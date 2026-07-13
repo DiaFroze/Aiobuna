@@ -1,0 +1,90 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: 248 249 251;
+  --surface: 255 255 255;
+  --surface-2: 244 246 249;
+  --border: 226 230 236;
+  --text: 17 22 33;
+  --muted: 108 117 135;
+  --brand: 79 70 229; /* indigo */
+  --brand-fg: 255 255 255;
+  --accent: 16 185 129;
+  --success: 22 163 74;
+  --warning: 202 138 4;
+  --danger: 220 38 38;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: 10 12 18;
+    --surface: 20 24 33;
+    --surface-2: 28 33 45;
+    --border: 40 46 60;
+    --text: 236 239 244;
+    --muted: 148 156 173;
+    --brand: 129 140 248;
+    --brand-fg: 12 14 22;
+    --accent: 52 211 153;
+  }
+}
+
+* {
+  border-color: rgb(var(--border));
+}
+
+body {
+  background: rgb(var(--bg));
+  color: rgb(var(--text));
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Premium glass surfaces + subtle motion */
+.card {
+  @apply bg-surface border rounded-2xl shadow-card;
+}
+.btn {
+  @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 font-medium transition active:scale-[0.98];
+}
+/* Button colors per user's codes: green #00FA0F (primary/confirm), magenta
+   #8B008B (accent/secondary), red for destructive. Bright green needs dark text. */
+.btn-primary {
+  @apply btn hover:brightness-105;
+  background-color: #00fa0f; /* rgb(0,250,15) */
+  color: #05230a;
+  font-weight: 700;
+  box-shadow: 0 6px 18px rgb(0 250 15 / 0.28);
+}
+.btn-success {
+  @apply btn-primary;
+}
+.btn-accent {
+  @apply btn text-white hover:brightness-110;
+  background-color: #8b008b; /* rgb(139,0,139) magenta */
+  box-shadow: 0 6px 18px rgb(139 0 139 / 0.28);
+}
+.btn-danger {
+  @apply btn text-white hover:brightness-110;
+  background-color: #dc2626; /* red-600 */
+  box-shadow: 0 6px 18px rgb(220 38 38 / 0.24);
+}
+.btn-ghost {
+  @apply btn bg-surface-2 text-text hover:bg-border;
+}
+.badge {
+  @apply inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium;
+}
+.input {
+  @apply w-full rounded-xl border bg-surface px-3.5 py-2.5 text-text outline-none focus:ring-2 focus:ring-brand/40;
+}
+
+/* Sanitized supplier content rendering */
+.prose-supplier :where(p, ul, ol) { @apply my-2; }
+.prose-supplier :where(ul) { @apply list-disc pl-5; }
+.prose-supplier :where(ol) { @apply list-decimal pl-5; }
+.prose-supplier :where(a) { @apply text-brand underline; }
+.prose-supplier :where(h1,h2,h3) { @apply font-semibold mt-3 mb-1; }

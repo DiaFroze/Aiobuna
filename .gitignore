@@ -1,0 +1,31 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# next
+/.next/
+/out/
+/build
+next-env.d.ts
+
+# env & secrets — NEVER commit
+.env
+.env.local
+.env.*.local
+*.pem
+
+# prisma
+/prisma/*.db
+/prisma/*.db-journal
+
+# misc
+.DS_Store
+*.log
+/coverage
+
+# local embedded postgres data
+.pgdata/
+
+# generated prisma bot client
+/src/generated/

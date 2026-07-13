@@ -1,0 +1,84 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: digital_goods
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d digital_goods"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: sh -c "npx prisma db push && npm run db:seed && npm run start"
+    environment:
+      DATABASE_URL: postgresql://app:app@db:5432/digital_goods?schema=public
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: production
+      APP_URL: http://localhost:3000
+      AUTH_SESSION_SECRET: ${AUTH_SESSION_SECRET:-dev-only-change-me-please-32-bytes-min}
+      CREDENTIALS_ENC_KEY: ${CREDENTIALS_ENC_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      SUPPLIER_MODE: ${SUPPLIER_MODE:-mock}
+      DEFAULT_CURRENCY: ${DEFAULT_CURRENCY:-USDT}
+      USDT_UZS_RATE: ${USDT_UZS_RATE:-12600}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ADMIN_CHAT_ID: ${TELEGRAM_ADMIN_CHAT_ID:-}
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-admin@sb.eu}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-admin12345}
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: npm run worker
+    environment:
+      DATABASE_URL: postgresql://app:app@db:5432/digital_goods?schema=public
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: production
+      CREDENTIALS_ENC_KEY: ${CREDENTIALS_ENC_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      SUPPLIER_MODE: ${SUPPLIER_MODE:-mock}
+      DEFAULT_CURRENCY: ${DEFAULT_CURRENCY:-USDT}
+      USDT_UZS_RATE: ${USDT_UZS_RATE:-12600}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ADMIN_CHAT_ID: ${TELEGRAM_ADMIN_CHAT_ID:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  db_data:
+  redis_data:

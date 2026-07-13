@@ -1,0 +1,590 @@
+// ============================================================================
+// Digital Goods Reseller Platform — Prisma schema (PostgreSQL)
+// See docs/DATABASE_SCHEMA.md for the human-readable description.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// RBAC / Admins
+// ---------------------------------------------------------------------------
+
+model Admin {
+  id           String        @id @default(cuid())
+  email        String        @unique
+  passwordHash String
+  name         String?
+  isActive     Boolean       @default(true)
+  roleId       String
+  role         Role          @relation(fields: [roleId], references: [id])
+  sessions     AdminSession[]
+  auditLogs    AuditLog[]
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+}
+
+model Role {
+  id          String           @id @default(cuid())
+  key         String           @unique // e.g. "superadmin", "manager", "viewer"
+  name        String
+  admins      Admin[]
+  permissions RolePermission[]
+  createdAt   DateTime         @default(now())
+}
+
+model Permission {
+  id    String           @id @default(cuid())
+  key   String           @unique // e.g. "products.write", "suppliers.read"
+  name  String
+  roles RolePermission[]
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+model AdminSession {
+  id        String   @id @default(cuid())
+  adminId   String
+  admin     Admin    @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  ip        String?
+  userAgent String?
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  adminId    String?
+  admin      Admin?   @relation(fields: [adminId], references: [id])
+  action     String   // e.g. "product.price.update"
+  entityType String   // e.g. "CanonicalProduct"
+  entityId   String?
+  // Sanitized diff/metadata. NEVER contains API keys or passwords.
+  metadata   Json?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Customers
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String?
+  name         String?
+  locale       String   @default("ru") // ru | uz | en
+  telegramId   String?
+  orders       Order[]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Suppliers
+// ---------------------------------------------------------------------------
+
+enum SupplierStatus {
+  CONNECTED
+  DISCONNECTED
+  ERROR
+  BLACKLISTED
+}
+
+model Supplier {
+  id                 String                 @id @default(cuid())
+  name               String
+  slug               String                 @unique
+  adapterKey         String                 @default("mock") // registry key
+  apiBaseUrl         String?
+  status             SupplierStatus         @default(DISCONNECTED)
+  balance            Decimal                @default(0) @db.Decimal(18, 6)
+  balanceCurrency    String                 @default("USDT")
+  // Reliability metrics (0..1 for rates, seconds for time)
+  successRate        Float                  @default(1)
+  avgFulfilSeconds   Int                    @default(0)
+  reliabilityRating  Float                  @default(0) // 0..5 composite
+  manualPriority     Int                    @default(0) // higher wins on ties
+  isBlacklisted      Boolean                @default(false)
+  notes              String?
+  credential         SupplierApiCredential?
+  products           SupplierProduct[]
+  links              ProductSupplierLink[]
+  syncLogs           SupplierSyncLog[]
+  apiErrors          SupplierApiError[]
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+}
+
+// API key stored ENCRYPTED (AES-256-GCM). Never returned to the client.
+model SupplierApiCredential {
+  id            String   @id @default(cuid())
+  supplierId    String   @unique
+  supplier      Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  // Encrypted blob: iv:authTag:ciphertext (all hex/base64). See security/crypto.ts
+  encryptedKey  String
+  keyLast4      String?  // for display only, e.g. "…a1b2"
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+// Raw product as reported by a supplier (one row per supplier product).
+model SupplierProduct {
+  id                       String                @id @default(cuid())
+  supplierId               String
+  supplier                 Supplier              @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  externalId               String                // supplier's product id
+  title                    String
+  description              String?
+  // cost price from supplier
+  supplierPrice            Decimal               @db.Decimal(18, 6)
+  currency                 String                @default("USDT")
+  stock                    Int?                  // null = unlimited/unknown
+  inStock                  Boolean               @default(true)
+  durationLabel            String?               // e.g. "18m"
+  // Raw content fields imported from supplier
+  conditions               String?
+  guarantee                String?
+  instructions             String?
+  deliveryTerms            String?
+  refundPolicy             String?
+  rules                    String?
+  premiumEmojiCode         String?               // VARCHAR — long numeric codes, never Number
+  logoUrl                  String?
+  rawPayload               Json?                 // full original payload for audit
+  lastSeenAt               DateTime              @default(now())
+  links                    ProductSupplierLink[]
+  candidate                Candidate?
+  createdAt                DateTime              @default(now())
+  updatedAt                DateTime              @updatedAt
+
+  @@unique([supplierId, externalId])
+  @@index([title])
+}
+
+// ---------------------------------------------------------------------------
+// Canonical catalog products
+// ---------------------------------------------------------------------------
+
+enum ProductStatus {
+  DRAFT
+  PUBLISHED
+  HIDDEN
+  ARCHIVED
+}
+
+model CanonicalProduct {
+  id                String                @id @default(cuid())
+  slug              String                @unique
+  name              String
+  status            ProductStatus         @default(DRAFT)
+  categoryId        String?
+  category          ProductCategory?      @relation(fields: [categoryId], references: [id])
+  durationLabel     String?
+  // Emoji / icon config is 1:1
+  emojiConfig       PremiumEmojiConfig?
+  content           ProductContent?
+  priceRule         ProductPriceRule?
+  links             ProductSupplierLink[]
+  orderItems        OrderItem[]
+  priceHistory      PriceHistory[]
+  salesCount        Int                   @default(0)
+  totalProfit       Decimal               @default(0) @db.Decimal(18, 6)
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  @@index([status])
+}
+
+model ProductCategory {
+  id                    String             @id @default(cuid())
+  slug                  String             @unique
+  name                  String
+  parentId              String?
+  parent                ProductCategory?   @relation("CategoryTree", fields: [parentId], references: [id])
+  children              ProductCategory[]  @relation("CategoryTree")
+  // category-level default markup (percent), optional
+  categoryMarkupPercent Decimal?           @db.Decimal(6, 2)
+  sortOrder             Int                @default(0)
+  products              CanonicalProduct[]
+  createdAt             DateTime           @default(now())
+}
+
+// Links a canonical product to a supplier product, with priority/fallback order.
+model ProductSupplierLink {
+  id                String           @id @default(cuid())
+  canonicalId       String
+  canonical         CanonicalProduct @relation(fields: [canonicalId], references: [id], onDelete: Cascade)
+  supplierId        String
+  supplier          Supplier         @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  supplierProductId String
+  supplierProduct   SupplierProduct  @relation(fields: [supplierProductId], references: [id], onDelete: Cascade)
+  // Manual confirmation required — system never auto-merges.
+  isConfirmed       Boolean          @default(false)
+  isPrimary         Boolean          @default(false)
+  fallbackOrder     Int              @default(0) // 0 = primary, 1 = first fallback, ...
+  isEnabled         Boolean          @default(true)
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  @@unique([canonicalId, supplierProductId])
+  @@index([canonicalId])
+}
+
+// ---------------------------------------------------------------------------
+// Pricing
+// ---------------------------------------------------------------------------
+
+enum RoundingMode {
+  NONE
+  NEAREST_05   // 0.63 -> 0.65
+  NEAREST_10   // 0.67 -> 0.70
+  NEAREST_1000 // 8570 -> 9000 (UZS)
+  PSYCHOLOGICAL // .99 endings
+}
+
+model Setting {
+  id    String @id @default(cuid())
+  key   String @unique
+  value Json
+  updatedAt DateTime @updatedAt
+}
+
+// Per-product price rule. Global & category defaults live in Setting/Category.
+model ProductPriceRule {
+  id                String           @id @default(cuid())
+  canonicalId       String           @unique
+  canonical         CanonicalProduct @relation(fields: [canonicalId], references: [id], onDelete: Cascade)
+  useFixedPrice     Boolean          @default(false)
+  fixedPrice        Decimal?         @db.Decimal(18, 6)
+  markupPercent     Decimal?         @db.Decimal(6, 2) // overrides global/category
+  minPrice          Decimal?         @db.Decimal(18, 6)
+  maxPrice          Decimal?         @db.Decimal(18, 6)
+  minProfit         Decimal?         @db.Decimal(18, 6)
+  roundingMode      RoundingMode     @default(NEAREST_05)
+  sellCurrency      String           @default("USDT")
+  // Manual override: admin-set final price, wins over computed price.
+  manualPrice       Decimal?         @db.Decimal(18, 6)
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+}
+
+model PriceHistory {
+  id            String           @id @default(cuid())
+  canonicalId   String
+  canonical     CanonicalProduct @relation(fields: [canonicalId], references: [id], onDelete: Cascade)
+  supplierPrice Decimal          @db.Decimal(18, 6)
+  clientPrice   Decimal          @db.Decimal(18, 6)
+  markupPercent Decimal?         @db.Decimal(6, 2)
+  currency      String
+  reason        String           // "supplier_change" | "manual" | "recalc" | "rule_change"
+  createdAt     DateTime         @default(now())
+
+  @@index([canonicalId, createdAt])
+}
+
+model CurrencyRate {
+  id        String   @id @default(cuid())
+  base      String   // "USDT"
+  quote     String   // "UZS"
+  rate      Decimal  @db.Decimal(18, 6)
+  updatedAt DateTime @updatedAt
+
+  @@unique([base, quote])
+}
+
+// ---------------------------------------------------------------------------
+// Product content (descriptions / conditions / guarantee / instructions)
+// ---------------------------------------------------------------------------
+
+enum ContentSyncMode {
+  AUTO        // always take supplier text
+  MANUAL      // use our text, ignore supplier updates
+  SUPPLIER_PLUS_OURS // supplier text + our appended block
+}
+
+model ProductContent {
+  id                            String                  @id @default(cuid())
+  canonicalId                   String                  @unique
+  canonical                     CanonicalProduct        @relation(fields: [canonicalId], references: [id], onDelete: Cascade)
+
+  // Originals captured from the selected supplier (sanitized)
+  supplierDescriptionOriginal   String?
+  supplierConditionsOriginal    String?
+  supplierGuaranteeOriginal     String?
+  supplierInstructionsOriginal  String?
+  supplierDeliveryTermsOriginal String?
+
+  // Public (what customers see)
+  publicDescription             String?
+  publicConditions              String?
+  publicGuarantee               String?
+  publicInstructions            String?
+  publicDeliveryTerms           String?
+
+  // Per-field sync mode + master override
+  syncModeDescription           ContentSyncMode         @default(AUTO)
+  syncModeConditions            ContentSyncMode         @default(AUTO)
+  syncModeGuarantee             ContentSyncMode         @default(AUTO)
+  syncModeInstructions          ContentSyncMode         @default(AUTO)
+  syncModeDeliveryTerms         ContentSyncMode         @default(AUTO)
+
+  // "our appended block" for SUPPLIER_PLUS_OURS mode
+  appendedBlock                 String?
+
+  lastSupplierContentSyncAt     DateTime?
+  contentVersion                Int                     @default(1)
+  versions                      ProductContentVersion[]
+  createdAt                     DateTime                @default(now())
+  updatedAt                     DateTime                @updatedAt
+}
+
+model ProductContentVersion {
+  id          String         @id @default(cuid())
+  contentId   String
+  content     ProductContent @relation(fields: [contentId], references: [id], onDelete: Cascade)
+  version     Int
+  // Snapshot of all public + original fields at this version
+  snapshot    Json
+  source      String         // "supplier_sync" | "admin_edit" | "revert"
+  changedBy   String?        // admin id or "system"
+  createdAt   DateTime       @default(now())
+
+  @@unique([contentId, version])
+}
+
+// ---------------------------------------------------------------------------
+// Premium Emoji / logo config
+// ---------------------------------------------------------------------------
+
+enum IconDisplayMode {
+  PREMIUM_EMOJI
+  LOGO
+  BOTH
+  NONE
+}
+
+model PremiumEmojiConfig {
+  id                          String           @id @default(cuid())
+  canonicalId                 String           @unique
+  canonical                   CanonicalProduct @relation(fields: [canonicalId], references: [id], onDelete: Cascade)
+  // STRING to preserve long numeric codes precisely. Never Number/BigInt.
+  premiumEmojiCode            String?
+  premiumEmojiFallbackImageUrl String?
+  premiumEmojiAltText         String?
+  productLogoUrl              String?
+  iconDisplayMode             IconDisplayMode  @default(PREMIUM_EMOJI)
+  // renderer provider key, extensible (e.g. "default", "telegram", "cdn")
+  rendererProvider            String           @default("default")
+  createdAt                   DateTime         @default(now())
+  updatedAt                   DateTime         @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Candidates (found supplier products not yet published)
+// ---------------------------------------------------------------------------
+
+enum CandidateStatus {
+  NEW
+  IGNORED
+  HIDDEN
+  LINKED
+  PUBLISHED
+}
+
+model Candidate {
+  id                 String          @id @default(cuid())
+  supplierProductId  String          @unique
+  supplierProduct    SupplierProduct @relation(fields: [supplierProductId], references: [id], onDelete: Cascade)
+  status             CandidateStatus @default(NEW)
+  // suggested pricing/analytics computed at discovery
+  suggestedMarkup    Decimal?        @db.Decimal(6, 2)
+  suggestedPrice     Decimal?        @db.Decimal(18, 6)
+  projectedProfit    Decimal?        @db.Decimal(18, 6)
+  similarSupplierCount Int           @default(0)
+  possibleMatchIds   Json?           // array of CanonicalProduct ids
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  @@index([status])
+}
+
+// ---------------------------------------------------------------------------
+// Orders / payments / profit
+// ---------------------------------------------------------------------------
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID
+  PROCESSING
+  DELIVERED
+  FAILED
+  MANUAL_REVIEW
+  REFUNDED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+model Order {
+  id            String       @id @default(cuid())
+  publicCode    String       @unique // human-friendly order code
+  userId        String?
+  user          User?        @relation(fields: [userId], references: [id])
+  status        OrderStatus  @default(PENDING_PAYMENT)
+  currency      String       @default("USDT")
+  totalClient   Decimal      @default(0) @db.Decimal(18, 6)
+  totalCost     Decimal      @default(0) @db.Decimal(18, 6)
+  totalProfit   Decimal      @default(0) @db.Decimal(18, 6)
+  items         OrderItem[]
+  payment       Payment?
+  profitRecord  ProfitRecord?
+  // append-only action history
+  actionLog     Json?
+  errorMessage  String?
+  createdAt     DateTime     @default(now())
+  deliveredAt   DateTime?
+  completedAt   DateTime?
+  updatedAt     DateTime     @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+model OrderItem {
+  id                 String           @id @default(cuid())
+  orderId            String
+  order              Order            @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  canonicalId        String
+  canonical          CanonicalProduct @relation(fields: [canonicalId], references: [id])
+  supplierId         String?
+  supplierProductId  String?
+  supplierOrderId    String?          // id returned by supplier on purchase
+  quantity           Int              @default(1)
+  // Prices at purchase time
+  supplierPrice      Decimal          @db.Decimal(18, 6)
+  clientPrice        Decimal          @db.Decimal(18, 6)
+  profit             Decimal          @db.Decimal(18, 6)
+  currency           String
+  // IMMUTABLE snapshot at purchase: conditions/guarantee/description/instructions
+  contentSnapshot    Json
+  deliveryData       Json?            // credentials/keys delivered to customer
+  status             OrderStatus      @default(PROCESSING)
+  errorMessage       String?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  @@index([orderId])
+}
+
+model Payment {
+  id            String        @id @default(cuid())
+  orderId       String        @unique
+  order         Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  provider      String        @default("mock")
+  status        PaymentStatus @default(PENDING)
+  amount        Decimal       @db.Decimal(18, 6)
+  currency      String
+  externalRef   String?       // provider ref — NO card data stored
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+}
+
+model ProfitRecord {
+  id          String   @id @default(cuid())
+  orderId     String   @unique
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  revenue     Decimal  @db.Decimal(18, 6)
+  cost        Decimal  @db.Decimal(18, 6)
+  profit      Decimal  @db.Decimal(18, 6)
+  currency    String
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Supplier ops logs
+// ---------------------------------------------------------------------------
+
+enum SyncStatus {
+  SUCCESS
+  PARTIAL
+  FAILED
+}
+
+model SupplierSyncLog {
+  id              String     @id @default(cuid())
+  supplierId      String
+  supplier        Supplier   @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  status          SyncStatus
+  productsSeen    Int        @default(0)
+  productsCreated Int        @default(0)
+  productsUpdated Int        @default(0)
+  priceChanges    Int        @default(0)
+  contentChanges  Int        @default(0)
+  durationMs      Int        @default(0)
+  message         String?
+  createdAt       DateTime   @default(now())
+
+  @@index([supplierId, createdAt])
+}
+
+model SupplierApiError {
+  id          String   @id @default(cuid())
+  supplierId  String
+  supplier    Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  operation   String   // "fetchProducts" | "placeOrder" | ...
+  // Sanitized message — never contains API keys.
+  message     String
+  statusCode  Int?
+  context     Json?
+  createdAt   DateTime @default(now())
+
+  @@index([supplierId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+enum NotificationChannel {
+  TELEGRAM
+  INTERNAL
+}
+
+model Notification {
+  id        String              @id @default(cuid())
+  channel   NotificationChannel @default(INTERNAL)
+  type      String              // "order.paid", "supplier.down", ...
+  title     String
+  body      String
+  payload   Json?
+  isRead    Boolean             @default(false)
+  createdAt DateTime            @default(now())
+
+  @@index([type, createdAt])
+}
