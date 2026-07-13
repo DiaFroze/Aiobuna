@@ -1,18 +1,22 @@
 import "server-only";
-import { PrismaClient as BotPrismaClient } from "@/generated/bot-client";
+import { prisma } from "./db";
+import { PrismaClient } from "@prisma/client";
 
-// Second Prisma client: the SubHub BOT's SQLite database. Lets the admin panel
-// read/write the bot's catalog (products, variants, settings, premium emoji).
-const globalForBotDb = globalThis as unknown as { botDb?: BotPrismaClient };
+type MergedPrismaClient = Omit<PrismaClient, "setting"> & {
+  setting: PrismaClient["botSetting"];
+};
 
-export const botDb =
-  globalForBotDb.botDb ??
-  new BotPrismaClient({
-    log: process.env.NODE_ENV === "development" ? ["warn", "error"] : ["error"],
-  });
-
-if (process.env.NODE_ENV !== "production") globalForBotDb.botDb = botDb;
+// Merged bot database: botDb is now a proxy over the main PostgreSQL prisma instance.
+// If code requests `botDb.setting`, it transparently maps to `prisma.botSetting`.
+export const botDb = new Proxy(prisma as any, {
+  get(target, prop, receiver) {
+    if (prop === "setting") {
+      return target.botSetting;
+    }
+    return Reflect.get(target, prop, receiver);
+  },
+}) as unknown as MergedPrismaClient;
 
 export function botConfigured(): boolean {
-  return Boolean(process.env.BOT_DATABASE_URL);
+  return true;
 }

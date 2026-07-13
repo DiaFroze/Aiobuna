@@ -588,3 +588,147 @@ model Notification {
 
   @@index([type, createdAt])
 }
+
+// ============================================================================
+// SubHub Bot Tables (Merged into PostgreSQL)
+// ============================================================================
+
+model Product {
+  id           Int     @id @default(autoincrement())
+  code         String  @unique
+  titleRu      String
+  titleUz      String
+  titleEn      String  @default("")
+  emoji        String  @default("✨")
+  premiumEmoji String? // Telegram custom_emoji_id (string)
+  bannerFileId String?
+  descRu       String  @default("")
+  descUz       String  @default("")
+  descEn       String  @default("")
+  sortOrder    Int     @default(0)
+  isActive     Boolean @default(true)
+  plans        Plan[]
+}
+
+model Plan {
+  id        Int       @id @default(autoincrement())
+  productId Int
+  product   Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  titleRu   String
+  titleUz   String
+  emoji     String    @default("")
+  sortOrder Int       @default(0)
+  isActive  Boolean   @default(true)
+  variants  Variant[]
+}
+
+model Variant {
+  id                 Int     @id @default(autoincrement())
+  planId             Int
+  plan               Plan    @relation(fields: [planId], references: [id], onDelete: Cascade)
+  titleRu            String
+  titleUz            String
+  durationDays       Int     @default(30)
+  priceUzs           Int     @default(0)
+  priceStars         Int     @default(0)
+  priceUsdt          Float   @default(0)
+  pointsCost         Int     @default(0)
+  sortOrder          Int     @default(0)
+  isActive           Boolean @default(true)
+  supplierKey        String?
+  supplierExternalId String?
+  supplierPriceUsdt  Float   @default(0)
+  supplierStock      Int     @default(0)
+  autoSupplier       Boolean @default(false)
+  manualDelivery     Boolean @default(false)
+  manualStockLimit   Int     @default(-1)
+
+  stockItems StockItem[]
+
+  @@unique([supplierKey, supplierExternalId])
+}
+
+model BotSetting {
+  key       String   @id
+  valueRu   String   @default("")
+  valueUz   String   @default("")
+  fileId    String?
+  type      String   @default("text")
+  updatedAt DateTime @updatedAt
+}
+
+model BotUser {
+  id         Int      @id @default(autoincrement())
+  tgId       String   @unique
+  username   String?
+  firstName  String?
+  lang       String   @default("ru")
+  balance    Float    @default(0)
+  referredBy String?
+  refRewardClaimed Boolean @default(false)
+  isFormatterAllowed Boolean @default(false)
+  createdAt  DateTime @default(now())
+  orders     BotOrder[]
+  topups     TopUp[]
+}
+
+model StockItem {
+  id        Int       @id @default(autoincrement())
+  variantId Int
+  variant   Variant   @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  payload   String
+  isSold    Boolean   @default(false)
+  soldAt    DateTime?
+  orderId   Int?
+  createdAt DateTime  @default(now())
+
+  @@index([variantId, isSold])
+}
+
+model BotOrder {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      BotUser  @relation(fields: [userId], references: [id])
+  variantId Int?
+  titleRu   String
+  priceUsdt Float
+  payload   String
+  source    String   @default("stock")
+  status    String   @default("delivered")
+  createdAt DateTime @default(now())
+}
+
+model ApiSource {
+  id        Int      @id @default(autoincrement())
+  slug      String   @unique
+  name      String
+  baseUrl   String
+  apiKey    String
+  format    String   @default("vex")
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
+model TopUp {
+  id         Int      @id @default(autoincrement())
+  userId     Int
+  user       BotUser  @relation(fields: [userId], references: [id])
+  amount     Float
+  method     String   @default("manual")
+  status     String   @default("pending")
+  note       String?
+  externalId String?
+  expiresAt  DateTime?
+  receiptFileId String?
+  txnRef     String?
+  createdAt  DateTime @default(now())
+}
+
+model RequiredChannel {
+  id        Int      @id @default(autoincrement())
+  name      String
+  url       String
+  chatId    String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+}

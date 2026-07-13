@@ -16,8 +16,10 @@ next-env.d.ts
 *.pem
 
 # prisma
-/prisma/*.db
-/prisma/*.db-journal
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
 
 # misc
 .DS_Store

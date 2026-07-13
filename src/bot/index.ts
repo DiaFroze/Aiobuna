@@ -980,6 +980,66 @@ async function sendHome(ctx: Context, user: Awaited<ReturnType<typeof getUser>>)
   await ctx.reply(menu.text, { parse_mode: "HTML", reply_markup: menu.kb });
 }
 
+// ---------- mandatory subscription check middleware ----------
+bot.use(async (ctx, next) => {
+  if (String(ctx.from?.id) === ADMIN_ID) {
+    return next();
+  }
+
+  const data = ctx.callbackQuery?.data;
+  if (data === "check_subs" || data?.startsWith("lang:")) {
+    return next();
+  }
+
+  const text = ctx.message?.text;
+  if (text?.startsWith("/start")) {
+    return next();
+  }
+
+  const active = await db.requiredChannel.findMany({ where: { isActive: true } });
+  if (active.length === 0) {
+    return next();
+  }
+
+  let allSubscribed = true;
+  const unsubscribed = [];
+  for (const ch of active) {
+    try {
+      const member = await ctx.api.getChatMember(ch.chatId, ctx.from!.id);
+      const isMember = ["member", "creator", "administrator", "restricted"].includes(member.status);
+      if (!isMember) {
+        allSubscribed = false;
+        unsubscribed.push(ch);
+      }
+    } catch {
+      allSubscribed = false;
+      unsubscribed.push(ch);
+    }
+  }
+
+  if (allSubscribed) {
+    return next();
+  }
+
+  const user = await getUser(ctx);
+  const lang = user.lang;
+
+  const kb = new InlineKeyboard();
+  for (const ch of unsubscribed) {
+    kb.url(`📢 ${ch.name}`, ch.url).row();
+  }
+  kb.text(t(lang, "check_subs_btn"), "check_subs").row();
+
+  const msgText = t(lang, "subs_required_msg");
+
+  if (ctx.callbackQuery) {
+    await ctx.answerCallbackQuery({ text: t(lang, "subs_required_toast"), show_alert: true }).catch(() => {});
+    await ctx.editMessageText(msgText, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+  } else {
+    await ctx.reply(msgText, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+  }
+});
+
 // ---------- commands & reply-keyboard ----------
 bot.command("start", async (ctx) => {
   const existing = await findUser(ctx);
@@ -1059,6 +1119,34 @@ bot.on("callback_query:data", async (ctx) => {
   const data = ctx.callbackQuery.data;
   try {
     if (data === "noop") return ctx.answerCallbackQuery();
+    if (data === "check_subs") {
+      const user = await getUser(ctx);
+      const active = await db.requiredChannel.findMany({ where: { isActive: true } });
+      const unsubscribed = [];
+      for (const ch of active) {
+        try {
+          const member = await ctx.api.getChatMember(ch.chatId, ctx.from!.id);
+          const isMember = ["member", "creator", "administrator", "restricted"].includes(member.status);
+          if (!isMember) unsubscribed.push(ch);
+        } catch {
+          unsubscribed.push(ch);
+        }
+      }
+      if (unsubscribed.length === 0) {
+        await ctx.answerCallbackQuery({ text: t(user.lang, "subs_ok_toast"), show_alert: true }).catch(() => {});
+        return sendHome(ctx, user);
+      } else {
+        await ctx.answerCallbackQuery({ text: t(user.lang, "subs_missing_toast"), show_alert: true }).catch(() => {});
+        const kb = new InlineKeyboard();
+        for (const ch of unsubscribed) {
+          kb.url(`📢 ${ch.name}`, ch.url).row();
+        }
+        kb.text(t(user.lang, "check_subs_btn"), "check_subs").row();
+        const text = t(user.lang, "subs_required_msg");
+        await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+        return;
+      }
+    }
     if (data.startsWith("lang:")) {
       const lang = normalizeLang(data.split(":")[1]);
       await db.botUser.update({ where: { tgId: String(ctx.from?.id) }, data: { lang } }).catch(() => {});

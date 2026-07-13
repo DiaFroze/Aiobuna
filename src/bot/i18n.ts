@@ -104,6 +104,11 @@ const RU: Dict = {
   gifts_share: "📤 Поделиться ссылкой",
   admin_topup: "💬 Написать администратору",
   err_retry: "Ошибка, попробуйте ещё раз",
+  check_subs_btn: "🔄 Проверить подписку",
+  subs_required_msg: "⚠️ <b>Доступ ограничен!</b>\n\nДля использования бота вы должны быть подписаны на наши каналы:\n\nПожалуйста, подпишитесь на них и нажмите кнопку проверки ниже.",
+  subs_required_toast: "⚠️ Пожалуйста, подпишитесь на каналы!",
+  subs_ok_toast: "✅ Подписка подтверждена!",
+  subs_missing_toast: "❌ Вы подписались не на все каналы!",
 };
 
 const EN: Dict = {
@@ -203,6 +208,11 @@ const EN: Dict = {
   gifts_share: "📤 Share link",
   admin_topup: "💬 Message admin",
   err_retry: "Error, please try again",
+  check_subs_btn: "🔄 Check subscription",
+  subs_required_msg: "⚠️ <b>Access Restricted!</b>\n\nTo use this bot, you must be subscribed to our channels:\n\nPlease subscribe to them and click the check button below.",
+  subs_required_toast: "⚠️ Please subscribe to channels!",
+  subs_ok_toast: "✅ Subscription verified!",
+  subs_missing_toast: "❌ You have not subscribed to all channels!",
 };
 
 const UZ: Dict = {
@@ -302,6 +312,11 @@ const UZ: Dict = {
   gifts_share: "📤 Ulashish",
   admin_topup: "💬 Adminga yozish",
   err_retry: "Xatolik, qayta urinib ko'ring",
+  check_subs_btn: "🔄 Obunani tekshirish",
+  subs_required_msg: "⚠️ <b>Kirish cheklangan!</b>\n\nBotdan foydalanish uchun quyidagi kanallarimizga a'zo bo'lishingiz kerak:\n\nIltimos, a'zo bo'ling va pastdagi tekshirish tugmasini bosing.",
+  subs_required_toast: "⚠️ Iltimos, kanallarga a'zo bo'ling!",
+  subs_ok_toast: "✅ Obuna tasdiqlandi!",
+  subs_missing_toast: "❌ Siz barcha kanallarga a'zo bo'lmadingiz!",
 };
 
 const DICTS: Record<Lang, Dict> = { ru: RU, en: EN, uz: UZ };

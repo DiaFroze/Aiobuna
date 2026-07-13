@@ -4,6 +4,6 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "npm run start:all"
+    "startCommand": "npm run bot"
   }
 }

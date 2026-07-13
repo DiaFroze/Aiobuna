@@ -1,6 +1,6 @@
 import { botDb, botConfigured } from "@/lib/botDb";
 import { PageHeader, EmptyState } from "@/components/admin/ui";
-import { adjustUserBalanceAction } from "./actions";
+import { creditUserBalanceAction, debitUserBalanceAction } from "./actions";
 
 export const dynamic = "force-dynamic";
 
@@ -108,7 +108,7 @@ export default async function BotUsersPage({
                   <td className="py-3">
                     <div className="flex justify-end gap-3 items-center">
                       {/* Add funds form */}
-                      <form action={adjustUserBalanceAction} className="flex gap-1 items-center">
+                      <form action={creditUserBalanceAction} className="flex gap-1 items-center">
                         <input type="hidden" name="userId" value={u.id} />
                         <input
                           type="number"
@@ -128,32 +128,16 @@ export default async function BotUsersPage({
                       </form>
 
                       {/* Deduct funds form */}
-                      <form
-                        action={adjustUserBalanceAction}
-                        className="flex gap-1 items-center"
-                      >
+                      <form action={debitUserBalanceAction} className="flex gap-1 items-center">
                         <input type="hidden" name="userId" value={u.id} />
                         <input
                           type="number"
-                          name="rawAmount"
+                          name="amount"
                           min="1"
                           placeholder="Сумма"
                           required
                           className="input text-xs w-24 py-1"
-                          ref={(el) => {
-                            // Convert to negative value right before submit
-                            if (el) {
-                              el.addEventListener("change", (e: any) => {
-                                const val = Math.abs(Number(e.target.value));
-                                const hidden = el.form?.querySelector(
-                                  'input[name="amount"]'
-                                ) as HTMLInputElement;
-                                if (hidden) hidden.value = String(-val);
-                              });
-                            }
-                          }}
                         />
-                        <input type="hidden" name="amount" value="" />
                         <button
                           type="submit"
                           className="btn btn-sm btn-danger px-2 text-xs"
