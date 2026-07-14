@@ -291,11 +291,7 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
   const kb = new InlineKeyboard();
   for (const it of items) {
     const price = it.minPrice > 0 ? money(it.minPrice, lang) : t(lang, "free");
-    if (it.premiumEmoji) {
-      kb.text(`${it.title} - ${price}`, `p:${it.id}:0:${sort}`).icon(it.premiumEmoji).row();
-    } else {
-      kb.text(`${it.emoji} ${it.title} - ${price}`, `p:${it.id}:0:${sort}`).row();
-    }
+    kb.text(`${it.emoji} ${it.title} - ${price}`, `p:${it.id}:0:${sort}`).row();
   }
   if (!freebies && items.length > 0) {
     kb.text(t(lang, "refresh"), `m:0:${sort}`)
@@ -342,7 +338,7 @@ async function showProduct(ctx: Context, id: number, back: string) {
     const price = v.priceUzs > 0 ? money(v.priceUzs, lang) : t(lang, "free");
     const dur = v.durationDays > 0 ? ` · ${v.durationDays}д` : "";
     const vt = await locName(v.titleRu, v.titleUz, lang);
-    kb.text(`${vt} — ${price}${dur}`, `b:${v.id}:${back}`).icon("5424972470023104089").row();
+    kb.text(`${vt} — ${price}${dur}`, `b:${v.id}:${back}`).row();
   }
   kb.text(t(lang, "back_to_list"), `m:${back}`).row();
 
@@ -1310,15 +1306,9 @@ bot.api.config.use((prev, method, payload, signal) => {
   const rm = (payload as { reply_markup?: { inline_keyboard?: unknown[][]; keyboard?: unknown[][] } }).reply_markup;
   if (rm?.inline_keyboard)
     for (const row of rm.inline_keyboard)
-      for (const btn of row as Array<{ text?: string; callback_data?: string; style?: string; icon_custom_emoji_id?: string }>) {
+      for (const btn of row as Array<{ text?: string; callback_data?: string; style?: string }>) {
         const st = styleFor(btn.callback_data);
         if (st && !btn.style) btn.style = st;
-        if (buttonEmoji && btn.text && ICON_TEXTS.has(btn.text) && !btn.icon_custom_emoji_id) btn.icon_custom_emoji_id = buttonEmoji;
-        // wallet premium emoji on "Баланс" inline button (replace the plain emoji)
-        if (walletButtonEmoji && btn.callback_data === "bal" && !btn.icon_custom_emoji_id) {
-          btn.icon_custom_emoji_id = walletButtonEmoji;
-          if (btn.text) btn.text = stripLeadEmoji(btn.text);
-        }
       }
   if (rm?.keyboard) for (const row of rm.keyboard) for (const btn of row as Array<{ style?: string }>) if (typeof btn === "object" && !btn.style) btn.style = "primary";
   return prev(method, payload, signal);
