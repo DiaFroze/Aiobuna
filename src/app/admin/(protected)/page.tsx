@@ -5,7 +5,9 @@ import { PageHeader, StatCard } from "@/components/admin/ui";
 
 export const dynamic = "force-dynamic";
 
-const usdt = (n: number) => `${(n ?? 0).toFixed(2)} USDT`;
+const UZS_RATE = Number(process.env.USDT_UZS_RATE ?? 12600);
+const uzs = (usdt: number) =>
+  `${Math.round((usdt ?? 0) * UZS_RATE).toLocaleString("ru-RU")} сум`;
 
 export default async function DashboardPage() {
   const admins = await prisma.admin.count();
@@ -55,9 +57,9 @@ export default async function DashboardPage() {
       <PageHeader title="Dashboard" subtitle="Обзор магазина-бота в реальном времени" />
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-        <StatCard label="Выручка сегодня" value={usdt(todayAgg._sum.priceUsdt ?? 0)} tone="success" />
+        <StatCard label="Выручка сегодня" value={uzs(todayAgg._sum.priceUsdt ?? 0)} tone="success" />
         <StatCard label="Продаж сегодня" value={String(todayAgg._count._all)} />
-        <StatCard label="Выручка всего" value={usdt(ordersAgg._sum.priceUsdt ?? 0)} />
+        <StatCard label="Выручка всего" value={uzs(ordersAgg._sum.priceUsdt ?? 0)} />
         <StatCard label="Продаж всего" value={String(ordersAgg._count._all)} />
         <StatCard label="Товаров (активных)" value={`${activeProducts}/${products}`} />
         <StatCard
@@ -66,7 +68,7 @@ export default async function DashboardPage() {
           tone={unsoldStock === 0 ? "danger" : "default"}
         />
         <StatCard label="Пользователей бота" value={String(users)} />
-        <StatCard label="Сумма балансов" value={usdt(balanceAgg._sum.balance ?? 0)} />
+        <StatCard label="Сумма балансов" value={uzs(balanceAgg._sum.balance ?? 0)} />
       </div>
 
       <div className="grid md:grid-cols-2 gap-4">
@@ -85,7 +87,7 @@ export default async function DashboardPage() {
                 <li key={p.titleRu} className="flex justify-between text-sm">
                   <span className="truncate pr-2">{p.titleRu}</span>
                   <span className="text-muted whitespace-nowrap">
-                    {p._count._all} продаж • {usdt(p._sum.priceUsdt ?? 0)}
+                    {p._count._all} продаж • {uzs(p._sum.priceUsdt ?? 0)}
                   </span>
                 </li>
               ))}

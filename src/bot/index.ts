@@ -42,6 +42,27 @@ const pending = new Map<
 
 const bot = new Bot(token);
 
+// Telegram Bot API requires icon_custom_emoji_id as a JSON number,
+// but these are 19-digit IDs that exceed JS Number precision.
+// We patch the raw fetch body to convert "icon_custom_emoji_id":"123" → "icon_custom_emoji_id":123
+// without going through JS number parsing (which would lose precision).
+const _origFetch = globalThis.fetch;
+globalThis.fetch = async function patchedFetch(input: RequestInfo | URL, init?: RequestInit) {
+  if (
+    typeof input === "string" &&
+    input.includes("api.telegram.org") &&
+    init?.body &&
+    typeof init.body === "string" &&
+    init.body.includes("icon_custom_emoji_id")
+  ) {
+    init = {
+      ...init,
+      body: init.body.replace(/"icon_custom_emoji_id":"(\d+)"/g, '"icon_custom_emoji_id":$1'),
+    };
+  }
+  return _origFetch(input as RequestInfo, init);
+} as typeof fetch;
+
 // ---------- helpers ----------
 const money = (n: number, lang: string | null | undefined) =>
   `${Math.round(n).toLocaleString("ru-RU")} ${CUR[normalizeLang(lang)]}`;
@@ -291,7 +312,11 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
   const kb = new InlineKeyboard();
   for (const it of items) {
     const price = it.minPrice > 0 ? money(it.minPrice, lang) : t(lang, "free");
-    kb.text(`${it.emoji} ${it.title} - ${price}`, `p:${it.id}:0:${sort}`).row();
+    if (it.premiumEmoji) {
+      kb.text(`${it.title} - ${price}`, `p:${it.id}:0:${sort}`).icon(it.premiumEmoji).row();
+    } else {
+      kb.text(`${it.emoji} ${it.title} - ${price}`, `p:${it.id}:0:${sort}`).row();
+    }
   }
   if (!freebies && items.length > 0) {
     kb.text(t(lang, "refresh"), `m:0:${sort}`)
@@ -338,7 +363,7 @@ async function showProduct(ctx: Context, id: number, back: string) {
     const price = v.priceUzs > 0 ? money(v.priceUzs, lang) : t(lang, "free");
     const dur = v.durationDays > 0 ? ` · ${v.durationDays}д` : "";
     const vt = await locName(v.titleRu, v.titleUz, lang);
-    kb.text(`${vt} — ${price}${dur}`, `b:${v.id}:${back}`).row();
+    kb.text(`${vt} — ${price}${dur}`, `b:${v.id}:${back}`).icon("5424972470023104089").row();
   }
   kb.text(t(lang, "back_to_list"), `m:${back}`).row();
 
