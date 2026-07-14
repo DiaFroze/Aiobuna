@@ -292,9 +292,9 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
   for (const it of items) {
     const price = it.minPrice > 0 ? money(it.minPrice, lang) : t(lang, "free");
     if (it.premiumEmoji) {
-      kb.text(`${it.title} - ${price} (${it.stock})`, `p:${it.id}:0:${sort}`).icon(it.premiumEmoji).row();
+      kb.text(`${it.title} - ${price}`, `p:${it.id}:0:${sort}`).icon(it.premiumEmoji).row();
     } else {
-      kb.text(`${it.emoji} ${it.title} - ${price} (${it.stock})`, `p:${it.id}:0:${sort}`).row();
+      kb.text(`${it.emoji} ${it.title} - ${price}`, `p:${it.id}:0:${sort}`).row();
     }
   }
   if (!freebies && items.length > 0) {
@@ -337,7 +337,7 @@ async function showProduct(ctx: Context, id: number, back: string) {
     const price = v.priceUzs > 0 ? money(v.priceUzs, lang) : t(lang, "free");
     const dur = v.durationDays > 0 ? ` · ${v.durationDays}д` : "";
     const vt = await locName(v.titleRu, v.titleUz, lang);
-    kb.text(`${vt} — ${price}${dur} (${st})`, `b:${v.id}:${back}`).icon("5424972470023104089").row();
+    kb.text(`${vt} — ${price}${dur}`, `b:${v.id}:${back}`).icon("5424972470023104089").row();
   }
   kb.text(t(lang, "back_to_list"), `m:${back}`).row();
 
