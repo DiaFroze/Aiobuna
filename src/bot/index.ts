@@ -314,11 +314,16 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
 }
 
 async function showMenu(ctx: Context, page: number, sort: Sort, edit: boolean, freebies = false) {
-  const user = await getUser(ctx);
-  const { text, kb } = await buildMenu(user.lang, user.balance, page, sort, freebies);
-  const opts = { parse_mode: "HTML" as const, reply_markup: kb };
-  if (edit) await ctx.editMessageText(text, opts).catch(() => {});
-  else await ctx.reply(text, opts);
+  try {
+    const user = await getUser(ctx);
+    const { text, kb } = await buildMenu(user.lang, user.balance, page, sort, freebies);
+    const opts = { parse_mode: "HTML" as const, reply_markup: kb };
+    if (edit) await ctx.editMessageText(text, opts).catch(() => {});
+    else await ctx.reply(text, opts);
+  } catch (err) {
+    console.error("Error in showMenu:", err);
+    await ctx.reply(`⚠️ Ошибка в меню: ${(err as Error).message}\n${(err as Error).stack}`).catch(() => {});
+  }
 }
 
 async function showProduct(ctx: Context, id: number, back: string) {
