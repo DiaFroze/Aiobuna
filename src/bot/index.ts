@@ -25,6 +25,10 @@ if (!token) {
   process.exit(1);
 }
 
+// Диагностика: чтобы бот не умирал молча — печатаем любую фатальную ошибку.
+process.on("unhandledRejection", (e) => console.error("[bot] unhandledRejection:", e));
+process.on("uncaughtException", (e) => console.error("[bot] uncaughtException:", e));
+
 const PAGE_SIZE = 8;
 const MIN_TOPUP = 10000;
 const TOPUP_PRESETS = [50000, 100000, 200000];
@@ -1563,4 +1567,7 @@ bot.start({
     prewarmTranslations().catch(() => {}); // pre-cache EN/UZ product titles
     console.info(`[bot] started as @${me.username} (long-polling)`);
   },
+}).catch((e) => {
+  console.error("[bot] start FAILED:", e instanceof Error ? e.stack || e.message : e);
+  process.exit(1);
 });
