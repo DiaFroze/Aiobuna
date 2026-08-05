@@ -781,3 +781,41 @@ model PromoRedemption {
 
   @@index([promoId, userId])
 }
+
+// Метод/гайд: как получить сервис (напр. Gemini Plus на 12 мес легально) —
+// текст-инструкция + ссылка. Может быть бесплатным (priceUzs = 0) или платным.
+// isActive — тумблер кнопки в боте (вкл/выкл), редактируется в админ-панели.
+model Method {
+  id           Int      @id @default(autoincrement())
+  code         String   @unique
+  titleRu      String
+  titleUz      String
+  titleEn      String   @default("")
+  emoji        String   @default("📘")
+  premiumEmoji String? // Telegram custom_emoji_id
+  bannerFileId String?
+  descRu       String   @default("") // содержимое гайда: как получить, что нажать
+  descUz       String   @default("")
+  descEn       String   @default("")
+  url          String? // ссылка «нажать сюда» (необязательно)
+  priceUzs     Int      @default(0) // 0 = бесплатно
+  priceStars   Int      @default(0)
+  sortOrder    Int      @default(0)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  purchases    MethodPurchase[]
+}
+
+// Факт покупки/получения метода пользователем (для платных — «уже куплено»).
+model MethodPurchase {
+  id        Int      @id @default(autoincrement())
+  methodId  Int
+  method    Method   @relation(fields: [methodId], references: [id], onDelete: Cascade)
+  userId    Int // BotUser.id
+  pricePaid Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@unique([methodId, userId])
+  @@index([userId])
+}

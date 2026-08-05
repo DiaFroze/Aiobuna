@@ -7,6 +7,7 @@ import { useState } from "react";
 const NAV: { href: string; label: string; icon: string }[] = [
   { href: "/admin", label: "Dashboard", icon: "▤" },
   { href: "/admin/bot-products", label: "Товары бота", icon: "🤖" },
+  { href: "/admin/bot-methods", label: "Методы / Гайды", icon: "📘" },
   { href: "/admin/bot-import", label: "Импорт из API", icon: "⇩" },
   { href: "/admin/bot-apis", label: "API-источники", icon: "🔌" },
   { href: "/admin/bot-settings", label: "Тексты и меню бота", icon: "✎" },

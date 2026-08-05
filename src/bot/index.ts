@@ -101,18 +101,28 @@ function maskName(s: string): string {
 // Per-user custom prices. Returns Map<variantId, { priceUzs, label }> for the
 // given user (optionally scoped to variantIds). Only that user sees these prices.
 async function priceOverridesFor(userId: number, variantIds?: number[]) {
-  const rows = await db.userVariantPrice.findMany({
-    where: { userId, ...(variantIds && variantIds.length ? { variantId: { in: variantIds } } : {}) },
-  });
   const m = new Map<number, { priceUzs: number; label: string }>();
-  for (const r of rows) m.set(r.variantId, { priceUzs: r.priceUzs, label: r.label });
+  try {
+    const rows = await db.userVariantPrice.findMany({
+      where: { userId, ...(variantIds && variantIds.length ? { variantId: { in: variantIds } } : {}) },
+    });
+    for (const r of rows) m.set(r.variantId, { priceUzs: r.priceUzs, label: r.label });
+  } catch (e) {
+    // Table may not exist yet (pre-migration) — fall back to base prices.
+    console.error("[bot] priceOverridesFor failed (using base prices):", (e as Error).message);
+  }
   return m;
 }
 
 // Effective price + optional VIP label for one user+variant (override wins).
 async function effPriceFor(userId: number, variantId: number, basePriceUzs: number): Promise<{ price: number; label: string | null }> {
-  const ov = await db.userVariantPrice.findUnique({ where: { userId_variantId: { userId, variantId } } });
-  return ov ? { price: ov.priceUzs, label: ov.label || null } : { price: basePriceUzs, label: null };
+  try {
+    const ov = await db.userVariantPrice.findUnique({ where: { userId_variantId: { userId, variantId } } });
+    return ov ? { price: ov.priceUzs, label: ov.label || null } : { price: basePriceUzs, label: null };
+  } catch (e) {
+    console.error("[bot] effPriceFor failed (using base price):", (e as Error).message);
+    return { price: basePriceUzs, label: null };
+  }
 }
 
 // Button colors (Bot API 9.4): success=green, danger=red, primary=blue.
@@ -133,6 +143,7 @@ const ICON_TEXTS = new Set(LANGS.map((l) => t(l, "refresh"))); // 🔄 animated 
 function mainKeyboard(lang: string) {
   return new Keyboard()
     .text(t(lang, "btn_shop")).row()
+    .text(t(lang, "btn_methods")).row()
     .text(t(lang, "btn_wallet")).text(t(lang, "btn_freebies")).row()
     .text(t(lang, "btn_orders")).text(t(lang, "btn_profile")).row()
     .text(t(lang, "btn_refer")).text(t(lang, "btn_support")).row()
@@ -814,7 +825,13 @@ async function redeemPromo(ctx: Context, user: Awaited<ReturnType<typeof getUser
   const fail = (msgKey: string) => ctx.reply(t(lang, msgKey), { parse_mode: "HTML", reply_markup: backKb });
 
   if (!code) return fail("promo_bad");
-  const promo = await db.promoCode.findUnique({ where: { code } });
+  let promo;
+  try {
+    promo = await db.promoCode.findUnique({ where: { code } });
+  } catch (e) {
+    console.error("[bot] promo lookup failed:", (e as Error).message);
+    return fail("promo_bad");
+  }
   if (!promo || !promo.isActive) return fail("promo_bad");
   if (promo.expiresAt && promo.expiresAt.getTime() < Date.now()) return fail("promo_expired");
   if (promo.maxUses > 0 && promo.usedCount >= promo.maxUses) return fail("promo_used");
@@ -1227,6 +1244,91 @@ bot.command(["referral", "invite", "taklif"], async (ctx) => { const u = await g
 bot.command(["support", "yordam"], async (ctx) => { const u = await getUser(ctx); const { text, kb } = await supportView(u.lang); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } }); });
 bot.command(["language", "lang", "til"], (ctx) => showLangPicker(ctx, false));
 
+// ── Методы / гайды ──────────────────────────────────────────────
+function methodTitle(m: { titleRu: string; titleUz: string; titleEn: string }, lang: string): string {
+  return lang === "uz" ? m.titleUz : lang === "en" ? m.titleEn || m.titleRu : m.titleRu;
+}
+function methodDesc(m: { descRu: string; descUz: string; descEn: string }, lang: string): string {
+  return lang === "uz" ? m.descUz : lang === "en" ? m.descEn || m.descRu : m.descRu;
+}
+
+/** Список активных методов (кнопки → meth:<id>). */
+async function showMethods(ctx: Context) {
+  const user = await getUser(ctx);
+  const lang = user.lang;
+  const methods = await db.method.findMany({ where: { isActive: true }, orderBy: { sortOrder: "asc" } });
+  if (!methods.length) return ctx.reply(t(lang, "methods_empty"));
+  const kb = new InlineKeyboard();
+  for (const m of methods) {
+    const price = m.priceUzs > 0 ? money(m.priceUzs, lang) : t(lang, "method_free");
+    kb.text(`${m.emoji} ${methodTitle(m, lang)} · ${price}`, `meth:${m.id}`).row();
+  }
+  return ctx.reply(t(lang, "methods_title"), { reply_markup: kb });
+}
+
+/** Отдать пользователю содержимое метода (инструкция + ссылка). */
+async function deliverMethod(
+  ctx: Context, lang: string,
+  m: { emoji: string; titleRu: string; titleUz: string; titleEn: string; descRu: string; descUz: string; descEn: string; url: string | null },
+) {
+  const kb = new InlineKeyboard();
+  if (m.url) kb.url(t(lang, "method_open_link"), m.url).row();
+  kb.text(t(lang, "to_shop"), "m:0:all");
+  const body = `${m.emoji} <b>${esc(methodTitle(m, lang))}</b>\n\n${esc(methodDesc(m, lang) || "")}`;
+  await ctx.reply(body, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } });
+}
+
+/** Открыть метод: бесплатный/купленный — сразу отдать; платный — кнопка покупки. */
+async function viewMethod(ctx: Context, id: number) {
+  const user = await getUser(ctx);
+  const lang = user.lang;
+  const m = await db.method.findUnique({ where: { id } });
+  if (!m || !m.isActive) return ctx.answerCallbackQuery().catch(() => {});
+  await ctx.answerCallbackQuery().catch(() => {});
+  const bought = await db.methodPurchase
+    .findUnique({ where: { methodId_userId: { methodId: id, userId: user.id } } })
+    .catch(() => null);
+  if (m.priceUzs <= 0 || bought) return deliverMethod(ctx, lang, m);
+  const kb = new InlineKeyboard()
+    .text(t(lang, "method_buy", { v: money(m.priceUzs, lang) }), `mbuy:${m.id}`).row()
+    .text(t(lang, "to_shop"), "m:0:all");
+  const body = `${m.emoji} <b>${esc(methodTitle(m, lang))}</b>\n\n${t(lang, "balance_line", { v: money(user.balance, lang) })}`;
+  return ctx.reply(body, { parse_mode: "HTML", reply_markup: kb });
+}
+
+/** Купить платный метод: списать баланс, зафиксировать покупку, отдать. */
+async function buyMethod(ctx: Context, id: number) {
+  const user = await getUser(ctx);
+  const lang = user.lang;
+  const m = await db.method.findUnique({ where: { id } });
+  if (!m || !m.isActive) return ctx.answerCallbackQuery().catch(() => {});
+  const existing = await db.methodPurchase
+    .findUnique({ where: { methodId_userId: { methodId: id, userId: user.id } } })
+    .catch(() => null);
+  if (existing) {
+    await ctx.answerCallbackQuery({ text: t(lang, "method_bought") }).catch(() => {});
+    return deliverMethod(ctx, lang, m);
+  }
+  const price = m.priceUzs;
+  if (price > 0 && user.balance < price) {
+    return ctx.answerCallbackQuery({
+      text: t(lang, "method_need_balance", { v: money(price - user.balance, lang) }),
+      show_alert: true,
+    }).catch(() => {});
+  }
+  try {
+    await db.$transaction(async (tx) => {
+      if (price > 0) await tx.botUser.update({ where: { id: user.id }, data: { balance: { decrement: price } } });
+      await tx.methodPurchase.create({ data: { methodId: id, userId: user.id, pricePaid: price } });
+    });
+  } catch {
+    // гонка по уникальному ключу — считаем, что уже куплено
+  }
+  await ctx.answerCallbackQuery({ text: t(lang, "method_delivered") }).catch(() => {});
+  return deliverMethod(ctx, lang, m);
+}
+
+bot.hears(btnVariants("btn_methods"), (ctx) => showMethods(ctx));
 bot.hears(btnVariants("btn_shop"), (ctx) => showMenu(ctx, 0, "all", false));
 bot.hears(btnVariants("btn_freebies"), (ctx) => showGifts(ctx));
 bot.hears(btnVariants("btn_wallet"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = balanceView(u.lang, u.balance); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
@@ -1292,6 +1394,8 @@ bot.on("callback_query:data", async (ctx) => {
     if (tag === "q") return showQtyChooser(ctx, Number(rest[0]), Number(rest[1]) || 1, `${rest[2] ?? "0"}:${rest[3] ?? "all"}`, true);
     if (tag === "qi") { pending.set(String(ctx.from?.id), { type: "qty", variantId: Number(rest[0]), back: `${rest[1] ?? "0"}:${rest[2] ?? "all"}` }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "enter_qty_msg")); }
     if (tag === "bc") return doBuy(ctx, Number(rest[0]), Number(rest[1]) || 1);
+    if (tag === "meth") return viewMethod(ctx, Number(rest[0]));
+    if (tag === "mbuy") return buyMethod(ctx, Number(rest[0]));
     if (tag === "top") { await ctx.answerCallbackQuery().catch(() => {}); const b = await buildTopupMethods(lang, Number(rest[0])); return ctx.editMessageText(b.text, { parse_mode: "HTML", reply_markup: b.kb }).catch(() => {}); }
     if (tag === "tstar") return starsInvoice(ctx, lang, Number(rest[0]));
     if (tag === "tcheck") return startReceiptPayment(ctx, lang, Number(rest[0]));
