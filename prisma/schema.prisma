@@ -643,7 +643,8 @@ model Variant {
   manualDelivery     Boolean @default(false)
   manualStockLimit   Int     @default(-1)
 
-  stockItems StockItem[]
+  stockItems   StockItem[]
+  customPrices UserVariantPrice[]
 
   @@unique([supplierKey, supplierExternalId])
 }
@@ -670,6 +671,8 @@ model BotUser {
   createdAt  DateTime @default(now())
   orders     BotOrder[]
   topups     TopUp[]
+  customPrices     UserVariantPrice[]
+  promoRedemptions PromoRedemption[]
 }
 
 model StockItem {
@@ -731,4 +734,50 @@ model RequiredChannel {
   chatId    String   @unique
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
+}
+
+// Per-user custom price for a specific variant. Only this user sees/pays this
+// price; `label` (e.g. "VIP", "Только для вас") is shown to them in the bot.
+model UserVariantPrice {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      BotUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  variantId Int
+  variant   Variant  @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  priceUzs  Int
+  label     String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, variantId])
+  @@index([userId])
+}
+
+// Promo code that credits a fixed сум amount to the user's balance (gift-card
+// style). Limits: total uses (maxUses, 0 = unlimited) and per-user (perUserLimit,
+// 0 = unlimited). Redemptions are tracked in PromoRedemption.
+model PromoCode {
+  id           Int               @id @default(autoincrement())
+  code         String            @unique // stored UPPERCASE
+  amountUzs    Int
+  maxUses      Int               @default(0)
+  usedCount    Int               @default(0)
+  perUserLimit Int               @default(1)
+  expiresAt    DateTime?
+  isActive     Boolean           @default(true)
+  note         String            @default("")
+  createdAt    DateTime          @default(now())
+  redemptions  PromoRedemption[]
+}
+
+model PromoRedemption {
+  id        Int       @id @default(autoincrement())
+  promoId   Int
+  promo     PromoCode @relation(fields: [promoId], references: [id], onDelete: Cascade)
+  userId    Int
+  user      BotUser   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  amountUzs Int
+  createdAt DateTime  @default(now())
+
+  @@index([promoId, userId])
 }

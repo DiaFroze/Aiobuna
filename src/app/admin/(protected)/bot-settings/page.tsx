@@ -10,6 +10,7 @@ const MENU_KEYS = ["store_name", "menu_emoji", "menu_premium_emoji", "menu_tagli
 // Common bot settings, shown as ready-to-fill rows even before they exist in the DB.
 const SUGGESTED: { key: string; hint: string }[] = [
   { key: "support_username", hint: "Username поддержки БЕЗ @ (кнопка «Поддержка» откроет t.me/username)" },
+  { key: "sales_group_id", hint: "Chat ID группы/канала для ленты покупок (напр. -1001234567890). Бот должен быть админом группы. Имя покупателя маскируется. Пусто = выключено." },
   { key: "payment_card", hint: "Номер карты для оплаты (на неё клиент переводит; последние 4 цифры сверяются с чеком)" },
   { key: "payment_card_holder", hint: "Владелец карты (имя, показывается клиенту)" },
   { key: "button_emoji", hint: "Premium emoji ID (иконка на кнопках Назад/Вперёд). Нужен рестарт бота." },

@@ -36,6 +36,7 @@ const pending = new Map<
   string,
   | { type: "qty"; variantId: number; back: string }
   | { type: "topup" }
+  | { type: "promo" }
   | { type: "formatter_index" }
   | { type: "formatter_links"; startIndex: number; collectedLinks?: string[]; timeoutId?: any }
 >();
@@ -85,6 +86,34 @@ const nextSort = (s: Sort): Sort => SORTS[(SORTS.indexOf(s) + 1) % SORTS.length]
 const isAdmin = (ctx: Context) => ADMIN_ID !== "" && String(ctx.from?.id) === ADMIN_ID;
 const soumToStars = (soum: number) => Math.max(1, Math.round((soum * STARS_PER_USDT) / UZS_PER_USDT));
 const clamp = (n: number, lo: number, hi: number) => Math.min(Math.max(lo, n), hi);
+
+// Partially hide a buyer's identity for the public sales feed: keep the first
+// and last visible chars, mask the middle. "Jahongir" → "Ja••••••ir".
+function maskName(s: string): string {
+  const v = (s ?? "").trim();
+  if (!v) return "•••";
+  if (v.length <= 2) return v[0] + "•";
+  if (v.length <= 4) return v[0] + "••" + v.slice(-1);
+  const keep = Math.min(2, v.length - 2);
+  return v.slice(0, keep) + "•".repeat(Math.max(3, v.length - keep - 1)) + v.slice(-1);
+}
+
+// Per-user custom prices. Returns Map<variantId, { priceUzs, label }> for the
+// given user (optionally scoped to variantIds). Only that user sees these prices.
+async function priceOverridesFor(userId: number, variantIds?: number[]) {
+  const rows = await db.userVariantPrice.findMany({
+    where: { userId, ...(variantIds && variantIds.length ? { variantId: { in: variantIds } } : {}) },
+  });
+  const m = new Map<number, { priceUzs: number; label: string }>();
+  for (const r of rows) m.set(r.variantId, { priceUzs: r.priceUzs, label: r.label });
+  return m;
+}
+
+// Effective price + optional VIP label for one user+variant (override wins).
+async function effPriceFor(userId: number, variantId: number, basePriceUzs: number): Promise<{ price: number; label: string | null }> {
+  const ov = await db.userVariantPrice.findUnique({ where: { userId_variantId: { userId, variantId } } });
+  return ov ? { price: ov.priceUzs, label: ov.label || null } : { price: basePriceUzs, label: null };
+}
 
 // Button colors (Bot API 9.4): success=green, danger=red, primary=blue.
 function styleFor(data?: string): "primary" | "success" | "danger" | undefined {
@@ -281,25 +310,27 @@ async function buildHeader(): Promise<{ text: string; entities: MessageEntity[] 
 }
 
 // ---------- storefront ----------
-async function buildMenu(lang: string, balance: number, page: number, sort: Sort, freebies = false) {
-  const [products, stock] = await Promise.all([
+async function buildMenu(lang: string, balance: number, page: number, sort: Sort, userId: number, freebies = false) {
+  const [products, stock, overrides] = await Promise.all([
     db.product.findMany({
       where: { isActive: true },
       orderBy: { sortOrder: "asc" },
       include: { plans: { include: { variants: { where: { isActive: true } } } } },
     }),
     stockMap(),
+    priceOverridesFor(userId),
   ]);
   const stOf = (v: { id: number; autoSupplier: boolean; supplierStock: number; manualDelivery: boolean }) =>
     v.manualDelivery ? 999999 : v.autoSupplier ? v.supplierStock : stock.get(v.id) ?? 0;
+  const priceOf = (v: { id: number; priceUzs: number }) => overrides.get(v.id)?.priceUzs ?? v.priceUzs;
 
   let items = await Promise.all(
     products.map(async (p) => {
       const variants = p.plans.flatMap((pl) => pl.variants);
-      const prices = variants.map((v) => v.priceUzs).filter((x) => x > 0);
+      const prices = variants.map((v) => priceOf(v)).filter((x) => x > 0);
       const minPrice = prices.length ? Math.min(...prices) : 0;
       const st = variants.reduce((s, v) => s + stOf(v), 0);
-      const hasFree = variants.some((v) => v.priceUzs <= 0 && stOf(v) > 0);
+      const hasFree = variants.some((v) => priceOf(v) <= 0 && stOf(v) > 0);
       return { id: p.id, emoji: p.emoji || "✨", premiumEmoji: p.premiumEmoji ?? null, title: await pick3(p.titleRu, p.titleEn, p.titleUz, lang), minPrice, stock: st, hasFree };
     }),
   );
@@ -337,7 +368,7 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
 async function showMenu(ctx: Context, page: number, sort: Sort, edit: boolean, freebies = false) {
   try {
     const user = await getUser(ctx);
-    const { text, kb } = await buildMenu(user.lang, user.balance, page, sort, freebies);
+    const { text, kb } = await buildMenu(user.lang, user.balance, page, sort, user.id, freebies);
     const opts = { parse_mode: "HTML" as const, reply_markup: kb };
     if (edit) await ctx.editMessageText(text, opts).catch(() => {});
     else await ctx.reply(text, opts);
@@ -357,10 +388,13 @@ async function showProduct(ctx: Context, id: number, back: string) {
   if (!p) return ctx.answerCallbackQuery({ text: t(lang, "out_of_stock"), show_alert: true });
 
   const variants = p.plans.flatMap((pl) => pl.variants);
+  const overrides = await priceOverridesFor(user.id, variants.map((v) => v.id));
   const kb = new InlineKeyboard();
   for (const v of variants) {
     const st = await availableStock(v);
-    const price = v.priceUzs > 0 ? money(v.priceUzs, lang) : t(lang, "free");
+    const ov = overrides.get(v.id);
+    const effPrice = ov?.priceUzs ?? v.priceUzs;
+    const price = effPrice > 0 ? `${ov ? "💎 " : ""}${money(effPrice, lang)}` : t(lang, "free");
     const dur = v.durationDays > 0 ? ` · ${v.durationDays}д` : "";
     const vt = await locName(v.titleRu, v.titleUz, lang);
     kb.text(`${vt} — ${price}${dur}`, `b:${v.id}:${back}`).icon("5424972470023104089").row();
@@ -450,6 +484,8 @@ async function buildQtyChooser(
   balance: number,
   qty: number,
   back: string,
+  unitPrice: number,
+  vipLabel: string | null,
 ) {
   const pt = await pick3(v.plan.product.titleRu, v.plan.product.titleEn, v.plan.product.titleUz, lang);
   const vt = await locName(v.titleRu, v.titleUz, lang);
@@ -457,7 +493,7 @@ async function buildQtyChooser(
   const max = await availableStock(v);
   if (max <= 0) return null;
   qty = clamp(Math.floor(qty) || 1, 1, max);
-  const total = v.priceUzs * qty;
+  const total = unitPrice * qty;
   const disclaimer = await disclaimerFor(lang);
 
   const kb = new InlineKeyboard()
@@ -473,7 +509,8 @@ async function buildQtyChooser(
 
   const text =
     `🧾 <b>${esc(title)}</b>\n\n` +
-    `${t(lang, "price_each", { v: v.priceUzs > 0 ? money(v.priceUzs, lang) : t(lang, "free") })}\n` +
+    (vipLabel ? `💎 <b>${esc(vipLabel)}</b>\n` : "") +
+    `${t(lang, "price_each", { v: unitPrice > 0 ? money(unitPrice, lang) : t(lang, "free") })}\n` +
     `${t(lang, "in_stock", { n: max })}\n` +
     `${t(lang, "qty", { n: qty })}\n` +
     `${t(lang, "total", { v: money(total, lang) })}\n` +
@@ -489,7 +526,8 @@ async function showQtyChooser(ctx: Context, variantId: number, qty: number, back
     ctx.callbackQuery ? ctx.answerCallbackQuery(o).catch(() => {}) : Promise.resolve();
   const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
   if (!v || !v.isActive) return ack({ text: t(lang, "plan_unavailable"), show_alert: true });
-  const built = await buildQtyChooser(v, lang, user.balance, qty, back);
+  const eff = await effPriceFor(user.id, variantId, v.priceUzs);
+  const built = await buildQtyChooser(v, lang, user.balance, qty, back, eff.price, eff.label);
   if (!built) return ack({ text: t(lang, "out_of_stock"), show_alert: true });
   const opts = { parse_mode: "HTML" as const, reply_markup: built.kb };
   if (edit) await ctx.editMessageText(built.text, opts).catch(() => {});
@@ -512,6 +550,23 @@ async function notifySale(ctx: Context, user: { firstName: string | null; userna
   await ctx.api.sendMessage(ADMIN_ID, `🛒 (${source}) <b>${esc(title)}</b>\n${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})\n${money(price, lang)} · #${orderId}`, { parse_mode: "HTML" }).catch(() => {});
 }
 
+// Public "sales feed": posts every purchase to the group set in the
+// `sales_group_id` setting, with the buyer's name masked. Add the bot to the
+// group (as admin) and put the group's chat id (e.g. -1001234567890) in settings.
+async function notifySalesGroup(user: { firstName: string | null; username: string | null; tgId: string }, title: string, price: number) {
+  const groupId = (await setting("sales_group_id", "")).trim();
+  if (!groupId) return;
+  const shown = maskName(user.firstName || user.username || user.tgId);
+  const text =
+    `🛒 <b>Новая покупка!</b>\n\n` +
+    `👤 ${esc(shown)}\n` +
+    `📦 ${esc(title)}\n` +
+    `💰 <b>${money(price, "ru")}</b>`;
+  await bot.api.sendMessage(groupId, text, { parse_mode: "HTML" }).catch((e) => {
+    console.error("[bot] sales group notify failed:", (e as Error).message);
+  });
+}
+
 async function executePurchase(tgId: string, variantId: number, qty: number) {
   const user = await db.botUser.findUnique({ where: { tgId } });
   if (!user) return;
@@ -530,7 +585,8 @@ async function executePurchase(tgId: string, variantId: number, qty: number) {
     return;
   }
   const finalQty = clamp(Math.floor(qty) || 1, 1, max);
-  const total = v.priceUzs * finalQty;
+  const eff = await effPriceFor(user.id, variantId, v.priceUzs);
+  const total = eff.price * finalQty;
   const label = finalQty > 1 ? `${baseTitle} ×${finalQty}` : baseTitle;
 
   // --- Manual delivery: charge, then the admin sends the goods by hand ---
@@ -590,6 +646,7 @@ async function executePurchase(tgId: string, variantId: number, qty: number) {
         { parse_mode: "HTML" }
       ).catch(() => {});
     }
+    await notifySalesGroup(user, label, total);
     return;
   }
 
@@ -625,6 +682,7 @@ async function executePurchase(tgId: string, variantId: number, qty: number) {
     if (ADMIN_ID) {
       await bot.api.sendMessage(ADMIN_ID, `🛒 (склад) <b>${esc(label)}</b>\n${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})\n${money(total, lang)} · #${result.order.id}`, { parse_mode: "HTML" }).catch(() => {});
     }
+    await notifySalesGroup(user, label, total);
     return;
   }
 
@@ -669,6 +727,7 @@ async function executePurchase(tgId: string, variantId: number, qty: number) {
       if (ADMIN_ID) {
         await bot.api.sendMessage(ADMIN_ID, `🛒 (${src.slug}) <b>${esc(label)}</b>\n${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})\n${money(total, lang)} · #${reserve.orderId}`, { parse_mode: "HTML" }).catch(() => {});
       }
+      await notifySalesGroup(user, label, total);
     } catch (e) {
       await db.$transaction([
         db.botUser.update({ where: { id: user.id }, data: { balance: { increment: total } } }),
@@ -702,7 +761,8 @@ async function doBuy(ctx: Context, variantId: number, qty: number) {
   const max = await availableStock(v);
   if (max <= 0) return ctx.answerCallbackQuery({ text: t(lang, "out_of_stock"), show_alert: true });
   qty = clamp(Math.floor(qty) || 1, 1, max);
-  const total = v.priceUzs * qty;
+  const eff = await effPriceFor(user.id, variantId, v.priceUzs);
+  const total = eff.price * qty;
   const label = qty > 1 ? `${baseTitle} ×${qty}` : baseTitle;
 
   // Enough balance -> execute purchase immediately
@@ -739,8 +799,44 @@ async function doBuy(ctx: Context, variantId: number, qty: number) {
 function balanceView(lang: string, balance: number) {
   const kb = new InlineKeyboard();
   for (const a of TOPUP_PRESETS) kb.text(`+${money(a, lang)}`, `top:${a}`);
-  kb.row().text(t(lang, "other_amount"), "topin").row().text(t(lang, "to_shop"), "m:0:all");
+  kb.row().text(t(lang, "other_amount"), "topin").row();
+  kb.text(t(lang, "promo_btn"), "promo").row();
+  kb.text(t(lang, "to_shop"), "m:0:all");
   return { text: `${t(lang, "wallet_title", { v: money(balance, lang) })}\n\n${t(lang, "wallet_hint", { min: money(MIN_TOPUP, lang) })}`, kb };
+}
+
+// Redeem a promo code → credit its fixed сум amount to the user's balance.
+// Validates active/expiry/total-uses/per-user limits atomically in a transaction.
+async function redeemPromo(ctx: Context, user: Awaited<ReturnType<typeof getUser>>, input: string) {
+  const lang = user.lang;
+  const code = (input ?? "").trim().toUpperCase();
+  const backKb = new InlineKeyboard().text(t(lang, "btn_wallet"), "bal").row().text(t(lang, "to_shop"), "m:0:all");
+  const fail = (msgKey: string) => ctx.reply(t(lang, msgKey), { parse_mode: "HTML", reply_markup: backKb });
+
+  if (!code) return fail("promo_bad");
+  const promo = await db.promoCode.findUnique({ where: { code } });
+  if (!promo || !promo.isActive) return fail("promo_bad");
+  if (promo.expiresAt && promo.expiresAt.getTime() < Date.now()) return fail("promo_expired");
+  if (promo.maxUses > 0 && promo.usedCount >= promo.maxUses) return fail("promo_used");
+
+  const result = await db.$transaction(async (tx) => {
+    const p = await tx.promoCode.findUnique({ where: { id: promo.id } });
+    if (!p || !p.isActive) return { error: "promo_bad" as const };
+    if (p.expiresAt && p.expiresAt.getTime() < Date.now()) return { error: "promo_expired" as const };
+    if (p.maxUses > 0 && p.usedCount >= p.maxUses) return { error: "promo_used" as const };
+    const mine = await tx.promoRedemption.count({ where: { promoId: p.id, userId: user.id } });
+    if (p.perUserLimit > 0 && mine >= p.perUserLimit) return { error: "promo_limit" as const };
+    await tx.promoRedemption.create({ data: { promoId: p.id, userId: user.id, amountUzs: p.amountUzs } });
+    await tx.promoCode.update({ where: { id: p.id }, data: { usedCount: { increment: 1 } } });
+    const u = await tx.botUser.update({ where: { id: user.id }, data: { balance: { increment: p.amountUzs } } });
+    return { amount: p.amountUzs, balance: u.balance };
+  });
+
+  if ("error" in result && result.error) return fail(result.error);
+  return ctx.reply(
+    t(lang, "promo_ok", { v: money(result.amount, lang), balance: money(result.balance, lang) }),
+    { parse_mode: "HTML", reply_markup: backKb },
+  );
 }
 async function ordersView(lang: string, userId: number) {
   // Only real purchases — delivered or awaiting manual delivery. Failed/refunded hidden.
@@ -1002,7 +1098,7 @@ async function showLangPicker(ctx: Context, edit: boolean) {
 async function sendHome(ctx: Context, user: Awaited<ReturnType<typeof getUser>>) {
   const { text, entities } = await buildHeader();
   await ctx.reply(text, { entities, reply_markup: mainKeyboard(user.lang) });
-  const menu = await buildMenu(user.lang, user.balance, 0, "all");
+  const menu = await buildMenu(user.lang, user.balance, 0, "all", user.id);
   await ctx.reply(menu.text, { parse_mode: "HTML", reply_markup: menu.kb });
 }
 
@@ -1187,6 +1283,7 @@ bot.on("callback_query:data", async (ctx) => {
     if (data === "ord") { const { text, kb } = await ordersView(lang, user.id); await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {}); return ctx.answerCallbackQuery().catch(() => {}); }
     if (data === "ref") { const { text, kb } = referView(ctx, user); await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {}); return ctx.answerCallbackQuery().catch(() => {}); }
     if (data === "topin") { pending.set(String(ctx.from?.id), { type: "topup" }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "enter_amount", { min: money(MIN_TOPUP, lang) })); }
+    if (data === "promo") { pending.set(String(ctx.from?.id), { type: "promo" }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "promo_enter")); }
 
     const [tag, ...rest] = data.split(":");
     if (tag === "m") { const page = Number(rest[0]) || 0; const sort = (SORTS.includes(rest[1] as Sort) ? rest[1] : "all") as Sort; await ctx.answerCallbackQuery().catch(() => {}); return showMenu(ctx, page, sort, true); }
@@ -1282,6 +1379,10 @@ bot.on("message:text", async (ctx) => {
     // Save back to pending map
     pending.set(key, state);
     return;
+  }
+
+  if (state.type === "promo") {
+    return redeemPromo(ctx, user, ctx.message.text);
   }
 
   const n = Math.floor(Number(ctx.message.text.replace(/[^\d]/g, "")));
