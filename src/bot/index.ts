@@ -1289,11 +1289,23 @@ async function deliverMethod(
   ctx: Context, lang: string,
   m: { emoji: string; titleRu: string; titleUz: string; titleEn: string; descRu: string; descUz: string; descEn: string; url: string | null },
 ) {
+  const title = methodTitle(m, lang);
+  const desc = methodDesc(m, lang) || "";
+  // Only attach a URL button for a valid http(s) link — otherwise Telegram rejects
+  // the whole message (BUTTON_URL_INVALID) and the method silently never arrives.
+  const validUrl = m.url && /^https?:\/\/\S+$/i.test(m.url.trim()) ? m.url.trim() : null;
   const kb = new InlineKeyboard();
-  if (m.url) kb.url(t(lang, "method_open_link"), m.url).row();
+  if (validUrl) kb.url(t(lang, "method_open_link"), validUrl).row();
   kb.text(t(lang, "to_shop"), "m:0:all");
-  const body = `${m.emoji} <b>${esc(methodTitle(m, lang))}</b>\n\n${esc(methodDesc(m, lang) || "")}`;
-  await ctx.reply(body, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } });
+  // If the link isn't a valid button, still include it as text so the user gets it.
+  const linkLine = m.url && !validUrl ? `\n\n🔗 ${esc(m.url)}` : "";
+  const body = `${m.emoji} <b>${esc(title)}</b>\n\n${esc(desc)}${linkLine}`;
+  await ctx.reply(body, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } })
+    .catch(async () => {
+      // Last-resort plain delivery — guarantees the method reaches the user.
+      const plain = `${m.emoji} ${title}\n\n${desc}${m.url ? `\n\n${m.url}` : ""}`;
+      await ctx.reply(plain, { reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all") }).catch(() => {});
+    });
 }
 
 /** Открыть метод: бесплатный/купленный — сразу отдать; платный — кнопка покупки. */
