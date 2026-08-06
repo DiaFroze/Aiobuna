@@ -1590,6 +1590,38 @@ async function ensureSchema() {
       CONSTRAINT "PromoRedemption_pkey" PRIMARY KEY ("id")
     )`,
     `CREATE INDEX IF NOT EXISTS "PromoRedemption_promoId_userId_idx" ON "PromoRedemption"("promoId", "userId")`,
+    `CREATE TABLE IF NOT EXISTS "Method" (
+      "id" SERIAL NOT NULL,
+      "code" TEXT NOT NULL,
+      "titleRu" TEXT NOT NULL,
+      "titleUz" TEXT NOT NULL,
+      "titleEn" TEXT NOT NULL DEFAULT '',
+      "emoji" TEXT NOT NULL DEFAULT '📘',
+      "premiumEmoji" TEXT,
+      "bannerFileId" TEXT,
+      "descRu" TEXT NOT NULL DEFAULT '',
+      "descUz" TEXT NOT NULL DEFAULT '',
+      "descEn" TEXT NOT NULL DEFAULT '',
+      "url" TEXT,
+      "priceUzs" INTEGER NOT NULL DEFAULT 0,
+      "priceStars" INTEGER NOT NULL DEFAULT 0,
+      "sortOrder" INTEGER NOT NULL DEFAULT 0,
+      "isActive" BOOLEAN NOT NULL DEFAULT true,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "Method_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "Method_code_key" ON "Method"("code")`,
+    `CREATE TABLE IF NOT EXISTS "MethodPurchase" (
+      "id" SERIAL NOT NULL,
+      "methodId" INTEGER NOT NULL,
+      "userId" INTEGER NOT NULL,
+      "pricePaid" INTEGER NOT NULL DEFAULT 0,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "MethodPurchase_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE INDEX IF NOT EXISTS "MethodPurchase_userId_idx" ON "MethodPurchase"("userId")`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "MethodPurchase_methodId_userId_key" ON "MethodPurchase"("methodId", "userId")`,
   ];
   for (const sql of statements) {
     try {
