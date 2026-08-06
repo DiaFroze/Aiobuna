@@ -1640,47 +1640,61 @@ function genAdminPassword(len = 20) {
   return out;
 }
 
-// One-time admin reset (guarded by a BotSetting marker): delete all admins,
-// create one strong superadmin, DM the credentials to the admin Telegram chat.
+// Admin reset. Two modes:
+//  • If ADMIN_LOGIN + ADMIN_PASSWORD env vars are set → enforce that single admin
+//    on EVERY start (owner controls the password; timing/markers don't matter).
+//  • Otherwise → one-time random reset (guarded by a BotSetting marker) with the
+//    generated credentials DM'd to the admin Telegram chat.
 async function maybeResetAdmins() {
-  const MARKER = "admin_reset_v2_done"; // bump suffix to run a fresh reset later
   try {
-    const done = await db.botSetting.findUnique({ where: { key: MARKER } });
-    if (done) return;
     const role = await db.role.findUnique({ where: { key: "superadmin" } });
     if (!role) {
-      console.error("[bot] maybeResetAdmins: superadmin role missing — skipping (no marker).");
+      console.error("[bot] maybeResetAdmins: superadmin role missing — skipping.");
       return;
     }
-    // Prefer admin-chosen credentials from env (ADMIN_LOGIN / ADMIN_PASSWORD),
-    // so the owner knows the password. Fall back to a random one DM'd to Telegram.
-    const email = (process.env.ADMIN_LOGIN || "").trim() || `admin_${randomBytes(4).toString("hex")}@sb.eu`;
-    const password = (process.env.ADMIN_PASSWORD || "").trim() || genAdminPassword();
+
+    const envEmail = (process.env.ADMIN_LOGIN || "").trim();
+    const envPass = (process.env.ADMIN_PASSWORD || "").trim();
+    const useEnv = envEmail.length > 0 && envPass.length >= 6;
+
+    // In random mode, only run once (marker-gated). In env mode, always enforce.
+    const MARKER = "admin_reset_v2_done";
+    if (!useEnv) {
+      const done = await db.botSetting.findUnique({ where: { key: MARKER } });
+      if (done) return;
+    }
+
+    const email = useEnv ? envEmail : `admin_${randomBytes(4).toString("hex")}@sb.eu`;
+    const password = useEnv ? envPass : genAdminPassword();
     const passwordHash = await bcrypt.hash(password, 12);
+
     const fresh = await db.admin.upsert({
       where: { email },
       create: { email, name: email.split("@")[0], passwordHash, roleId: role.id, isActive: true },
       update: { passwordHash, roleId: role.id, isActive: true },
     });
     const del = await db.admin.deleteMany({ where: { id: { not: fresh.id } } });
-    await db.botSetting.upsert({
-      where: { key: MARKER },
-      create: { key: MARKER, valueRu: new Date().toISOString(), type: "text" },
-      update: { valueRu: new Date().toISOString() },
-    });
-    if (ADMIN_ID) {
-      await bot.api.sendMessage(
-        ADMIN_ID,
-        `🔐 <b>Админ-панель обновлена</b>\n\n` +
-          `Удалено прежних админов: <b>${del.count}</b>\n\n` +
-          `Новый вход в веб-панель:\n` +
-          `Логин: <code>${email}</code>\n` +
-          `Пароль: <code>${password}</code>\n\n` +
-          `⚠️ Сохраните это сообщение — пароль больше нигде не хранится.`,
-        { parse_mode: "HTML" },
-      ).catch(() => {});
+
+    if (!useEnv) {
+      await db.botSetting.upsert({
+        where: { key: MARKER },
+        create: { key: MARKER, valueRu: new Date().toISOString(), type: "text" },
+        update: { valueRu: new Date().toISOString() },
+      });
+      if (ADMIN_ID) {
+        await bot.api.sendMessage(
+          ADMIN_ID,
+          `🔐 <b>Админ-панель обновлена</b>\n\n` +
+            `Удалено прежних админов: <b>${del.count}</b>\n\n` +
+            `Новый вход в веб-панель:\n` +
+            `Логин: <code>${email}</code>\n` +
+            `Пароль: <code>${password}</code>\n\n` +
+            `⚠️ Сохраните это сообщение — пароль больше нигде не хранится.`,
+          { parse_mode: "HTML" },
+        ).catch(() => {});
+      }
     }
-    console.info(`[bot] admin reset done: deleted ${del.count}, login=${email}`);
+    console.info(`[bot] admin reset (${useEnv ? "env" : "random"}) done: deleted ${del.count}, login=${email}`);
   } catch (e) {
     console.error("[bot] maybeResetAdmins failed:", (e as Error).message);
   }
