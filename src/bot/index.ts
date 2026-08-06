@@ -14,6 +14,8 @@ import { sourceOrder, envVexSource, type Source } from "../lib/supplier";
 import { geminiTranslate } from "../lib/gemini";
 import { t, LANGS, LANG_NAMES, normalizeLang, btnVariants, type Lang } from "./i18n";
 import { generateVerificationCode } from "../lib/orderCode";
+import bcrypt from "bcryptjs";
+import { randomBytes } from "node:crypto";
 
 const token = process.env.TELEGRAM_BOT_TOKEN ?? "";
 const ADMIN_ID = String(process.env.TELEGRAM_ADMIN_CHAT_ID ?? "");
@@ -1548,26 +1550,134 @@ bot.api.config.use((prev, method, payload, signal) => {
   return prev(method, payload, signal);
 });
 
-bot.start({
-  drop_pending_updates: false,
-  onStart: async (me) => {
-    buttonEmoji = await setting("button_emoji", "");
-    walletButtonEmoji = await setting("wallet_button_emoji", "");
-    await bot.api.setMyCommands([
-      { command: "start", description: "🛍 Магазин / Menu" },
-      { command: "shop", description: "🛍 Магазин" },
-      { command: "balance", description: "👛 Баланс" },
-      { command: "freebies", description: "🎁 Акции" },
-      { command: "orders", description: "🧾 Заказы" },
-      { command: "profile", description: "👤 Профиль" },
-      { command: "referral", description: "🤝 Пригласить" },
-      { command: "support", description: "🆘 Поддержка" },
-      { command: "language", description: "🌐 Язык / Language / Til" },
-    ]).catch(() => {});
-    prewarmTranslations().catch(() => {}); // pre-cache EN/UZ product titles
-    console.info(`[bot] started as @${me.username} (long-polling)`);
-  },
-}).catch((e) => {
+// Create tables added in this release if they're missing (idempotent), via the
+// Prisma client itself — no CLI/shell, works with the internal DB URL at runtime.
+// DDL matches `prisma migrate diff` output. Non-fatal: logs and continues.
+async function ensureSchema() {
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS "UserVariantPrice" (
+      "id" SERIAL NOT NULL,
+      "userId" INTEGER NOT NULL,
+      "variantId" INTEGER NOT NULL,
+      "priceUzs" INTEGER NOT NULL,
+      "label" TEXT NOT NULL DEFAULT '',
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "UserVariantPrice_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE INDEX IF NOT EXISTS "UserVariantPrice_userId_idx" ON "UserVariantPrice"("userId")`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "UserVariantPrice_userId_variantId_key" ON "UserVariantPrice"("userId", "variantId")`,
+    `CREATE TABLE IF NOT EXISTS "PromoCode" (
+      "id" SERIAL NOT NULL,
+      "code" TEXT NOT NULL,
+      "amountUzs" INTEGER NOT NULL,
+      "maxUses" INTEGER NOT NULL DEFAULT 0,
+      "usedCount" INTEGER NOT NULL DEFAULT 0,
+      "perUserLimit" INTEGER NOT NULL DEFAULT 1,
+      "expiresAt" TIMESTAMP(3),
+      "isActive" BOOLEAN NOT NULL DEFAULT true,
+      "note" TEXT NOT NULL DEFAULT '',
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "PromoCode_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "PromoCode_code_key" ON "PromoCode"("code")`,
+    `CREATE TABLE IF NOT EXISTS "PromoRedemption" (
+      "id" SERIAL NOT NULL,
+      "promoId" INTEGER NOT NULL,
+      "userId" INTEGER NOT NULL,
+      "amountUzs" INTEGER NOT NULL,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "PromoRedemption_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE INDEX IF NOT EXISTS "PromoRedemption_promoId_userId_idx" ON "PromoRedemption"("promoId", "userId")`,
+  ];
+  for (const sql of statements) {
+    try {
+      await db.$executeRawUnsafe(sql);
+    } catch (e) {
+      console.error("[bot] ensureSchema failed:", (e as Error).message);
+    }
+  }
+}
+
+function genAdminPassword(len = 20) {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%*-_";
+  const buf = randomBytes(len);
+  let out = "";
+  for (let i = 0; i < len; i++) out += alphabet[buf[i] % alphabet.length];
+  return out;
+}
+
+// One-time admin reset (guarded by a BotSetting marker): delete all admins,
+// create one strong superadmin, DM the credentials to the admin Telegram chat.
+async function maybeResetAdmins() {
+  const MARKER = "admin_reset_v1_done"; // bump suffix to run a fresh reset later
+  try {
+    const done = await db.botSetting.findUnique({ where: { key: MARKER } });
+    if (done) return;
+    const role = await db.role.findUnique({ where: { key: "superadmin" } });
+    if (!role) {
+      console.error("[bot] maybeResetAdmins: superadmin role missing — skipping (no marker).");
+      return;
+    }
+    const email = `admin_${randomBytes(4).toString("hex")}@sb.eu`;
+    const password = genAdminPassword();
+    const passwordHash = await bcrypt.hash(password, 12);
+    const fresh = await db.admin.upsert({
+      where: { email },
+      create: { email, name: email.split("@")[0], passwordHash, roleId: role.id, isActive: true },
+      update: { passwordHash, roleId: role.id, isActive: true },
+    });
+    const del = await db.admin.deleteMany({ where: { id: { not: fresh.id } } });
+    await db.botSetting.upsert({
+      where: { key: MARKER },
+      create: { key: MARKER, valueRu: new Date().toISOString(), type: "text" },
+      update: { valueRu: new Date().toISOString() },
+    });
+    if (ADMIN_ID) {
+      await bot.api.sendMessage(
+        ADMIN_ID,
+        `🔐 <b>Админ-панель обновлена</b>\n\n` +
+          `Удалено прежних админов: <b>${del.count}</b>\n\n` +
+          `Новый вход в веб-панель:\n` +
+          `Логин: <code>${email}</code>\n` +
+          `Пароль: <code>${password}</code>\n\n` +
+          `⚠️ Сохраните это сообщение — пароль больше нигде не хранится.`,
+        { parse_mode: "HTML" },
+      ).catch(() => {});
+    }
+    console.info(`[bot] admin reset done: deleted ${del.count}, login=${email}`);
+  } catch (e) {
+    console.error("[bot] maybeResetAdmins failed:", (e as Error).message);
+  }
+}
+
+async function bootstrap() {
+  await ensureSchema();       // create missing tables before serving anything
+  await maybeResetAdmins();   // one-time admin reset (guarded)
+  await bot.start({
+    drop_pending_updates: false,
+    onStart: async (me) => {
+      buttonEmoji = await setting("button_emoji", "");
+      walletButtonEmoji = await setting("wallet_button_emoji", "");
+      await bot.api.setMyCommands([
+        { command: "start", description: "🛍 Магазин / Menu" },
+        { command: "shop", description: "🛍 Магазин" },
+        { command: "balance", description: "👛 Баланс" },
+        { command: "freebies", description: "🎁 Акции" },
+        { command: "orders", description: "🧾 Заказы" },
+        { command: "profile", description: "👤 Профиль" },
+        { command: "referral", description: "🤝 Пригласить" },
+        { command: "support", description: "🆘 Поддержка" },
+        { command: "language", description: "🌐 Язык / Language / Til" },
+      ]).catch(() => {});
+      prewarmTranslations().catch(() => {}); // pre-cache EN/UZ product titles
+      console.info(`[bot] started as @${me.username} (long-polling)`);
+    },
+  });
+}
+
+bootstrap().catch((e) => {
   console.error("[bot] start FAILED:", e instanceof Error ? e.stack || e.message : e);
   process.exit(1);
 });

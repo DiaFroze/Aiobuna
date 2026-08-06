@@ -4,6 +4,6 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "npx prisma db push --skip-generate; node scripts/deploy-once.mjs; npm run bot"
+    "startCommand": "npm run bot"
   }
 }
