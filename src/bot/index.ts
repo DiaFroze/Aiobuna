@@ -863,18 +863,29 @@ async function redeemPromo(ctx: Context, user: Awaited<ReturnType<typeof getUser
 }
 async function ordersView(lang: string, userId: number) {
   // Only real purchases — delivered or awaiting manual delivery. Failed/refunded hidden.
-  const orders = await db.botOrder.findMany({
-    where: { userId, status: { in: ["delivered", "awaiting_delivery"] } },
-    orderBy: { id: "desc" },
-    take: 10,
-  });
+  let orders: Array<{ id: number; titleRu: string; priceUsdt: number; payload: string; status: string }> = [];
+  try {
+    orders = await db.botOrder.findMany({
+      where: { userId, status: { in: ["delivered", "awaiting_delivery"] } },
+      orderBy: { id: "desc" },
+      take: 10,
+    });
+  } catch (e) {
+    console.error("[bot] ordersView query failed:", (e as Error).message);
+  }
   const kb = new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all");
+  // Clip long fields so the HTML message stays well under Telegram's 4096 limit
+  // (a payload with many delivered codes could otherwise blow the limit → 400).
+  const clip = (s: string | null | undefined, n: number) => {
+    const v = (s ?? "").trim();
+    return v.length > n ? v.slice(0, n) + "…" : v;
+  };
   const body = orders.length
     ? orders
         .map((o) =>
           o.status === "awaiting_delivery"
-            ? `#${o.id} · ${esc(o.titleRu)} — ${money(o.priceUsdt, lang)}\n⏳ ${t(lang, "order_pending")}`
-            : `#${o.id} · ${esc(o.titleRu)} — ${money(o.priceUsdt, lang)}\n<code>${esc(o.payload)}</code>`,
+            ? `#${o.id} · ${esc(clip(o.titleRu, 80))} — ${money(o.priceUsdt, lang)}\n⏳ ${t(lang, "order_pending")}`
+            : `#${o.id} · ${esc(clip(o.titleRu, 80))} — ${money(o.priceUsdt, lang)}\n<code>${esc(clip(o.payload, 150))}</code>`,
         )
         .join("\n\n")
     : t(lang, "no_orders");
@@ -1244,7 +1255,7 @@ bot.command("code", async (ctx) => {
 bot.command("shop", (ctx) => showMenu(ctx, 0, "all", false));
 bot.command(["freebies", "deals", "aksiya", "gifts"], (ctx) => showGifts(ctx));
 bot.command(["balance", "wallet", "balans"], async (ctx) => { const u = await getUser(ctx); const { text, kb } = balanceView(u.lang, u.balance); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
-bot.command(["orders", "buyurtmalar"], async (ctx) => { const u = await getUser(ctx); const { text, kb } = await ordersView(u.lang, u.id); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
+bot.command(["orders", "buyurtmalar"], async (ctx) => { const u = await getUser(ctx); const { text, kb } = await ordersView(u.lang, u.id); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => ctx.reply(stripTags(text), { reply_markup: kb }).catch(() => {})); });
 bot.command(["profile", "profil"], async (ctx) => { const u = await getUser(ctx); const { text, kb } = await profileView(u); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
 bot.command(["referral", "invite", "taklif"], async (ctx) => { const u = await getUser(ctx); const { text, kb } = referView(ctx, u); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
 bot.command(["support", "yordam"], async (ctx) => { const u = await getUser(ctx); const { text, kb } = await supportView(u.lang); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } }); });
@@ -1338,7 +1349,7 @@ bot.hears(btnVariants("btn_methods"), (ctx) => showMethods(ctx));
 bot.hears(btnVariants("btn_shop"), (ctx) => showMenu(ctx, 0, "all", false));
 bot.hears(btnVariants("btn_freebies"), (ctx) => showGifts(ctx));
 bot.hears(btnVariants("btn_wallet"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = balanceView(u.lang, u.balance); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
-bot.hears(btnVariants("btn_orders"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = await ordersView(u.lang, u.id); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
+bot.hears(btnVariants("btn_orders"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = await ordersView(u.lang, u.id); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => ctx.reply(stripTags(text), { reply_markup: kb }).catch(() => {})); });
 bot.hears(btnVariants("btn_profile"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = await profileView(u); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
 bot.hears(btnVariants("btn_refer"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = referView(ctx, u); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
 bot.hears(btnVariants("btn_support"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = await supportView(u.lang); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } }); });
@@ -1388,7 +1399,7 @@ bot.on("callback_query:data", async (ctx) => {
     const user = await getUser(ctx);
     const lang = user.lang;
     if (data === "bal") { const { text, kb } = balanceView(lang, user.balance); await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {}); return ctx.answerCallbackQuery().catch(() => {}); }
-    if (data === "ord") { const { text, kb } = await ordersView(lang, user.id); await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {}); return ctx.answerCallbackQuery().catch(() => {}); }
+    if (data === "ord") { const { text, kb } = await ordersView(lang, user.id); await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => ctx.reply(stripTags(text), { reply_markup: kb }).catch(() => {})); return ctx.answerCallbackQuery().catch(() => {}); }
     if (data === "ref") { const { text, kb } = referView(ctx, user); await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {}); return ctx.answerCallbackQuery().catch(() => {}); }
     if (data === "topin") { pending.set(String(ctx.from?.id), { type: "topup" }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "enter_amount", { min: money(MIN_TOPUP, lang) })); }
     if (data === "promo") { pending.set(String(ctx.from?.id), { type: "promo" }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "promo_enter")); }
