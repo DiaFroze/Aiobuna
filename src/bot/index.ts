@@ -270,7 +270,7 @@ async function grantReferralReward(referrerTgId: string) {
   if (threshold < 1 || !variantId) return;
   const referrer = await db.botUser.findUnique({ where: { tgId: referrerTgId } });
   if (!referrer || referrer.refRewardClaimed) return;
-  const count = await db.botUser.count({ where: { referredBy: referrerTgId } });
+  const count = (await db.botUser.count({ where: { referredBy: referrerTgId } })) + (referrer.bonusReferrals || 0);
   if (count < threshold) return;
   const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
   if (!v || !v.isActive) return;
@@ -893,10 +893,11 @@ async function ordersView(lang: string, userId: number) {
 }
 async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
   const lang = user.lang;
-  const [ordersCount, refCount] = await Promise.all([
+  const [ordersCount, realRefs] = await Promise.all([
     db.botOrder.count({ where: { userId: user.id } }),
     db.botUser.count({ where: { referredBy: user.tgId } }),
   ]);
+  const refCount = realRefs + (user.bonusReferrals || 0);
   const kb = new InlineKeyboard().text(t(lang, "btn_wallet"), "bal").text(t(lang, "btn_refer"), "ref").row().text(t(lang, "to_shop"), "m:0:all");
   let text =
     `${t(lang, "profile_title")}\n\n` +
@@ -942,7 +943,7 @@ async function showGifts(ctx: Context, edit = false) {
     return;
   }
 
-  const refCount = await db.botUser.count({ where: { referredBy: user.tgId } });
+  const refCount = (await db.botUser.count({ where: { referredBy: user.tgId } })) + (user.bonusReferrals || 0);
   const link = `https://t.me/${ctx.me.username}?start=ref${user.tgId}`;
 
   // Get product name for display
@@ -1633,6 +1634,7 @@ async function ensureSchema() {
     )`,
     `CREATE INDEX IF NOT EXISTS "MethodPurchase_userId_idx" ON "MethodPurchase"("userId")`,
     `CREATE UNIQUE INDEX IF NOT EXISTS "MethodPurchase_methodId_userId_key" ON "MethodPurchase"("methodId", "userId")`,
+    `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "bonusReferrals" INTEGER NOT NULL DEFAULT 0`,
   ];
   for (const sql of statements) {
     try {

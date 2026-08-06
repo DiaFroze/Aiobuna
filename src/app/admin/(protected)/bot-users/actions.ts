@@ -108,3 +108,39 @@ export async function debitUserBalanceAction(formData: FormData) {
 
   revalidatePath("/admin/bot-users");
 }
+
+/**
+ * Add (or subtract) manual referrals to a bot user. Counts toward the referral
+ * reward the same as real invited users. Negative amount subtracts.
+ */
+export async function addReferralsAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
+  const userId = Number(formData.get("userId"));
+  const amount = Math.trunc(Number(formData.get("amount")));
+
+  if (!userId || !Number.isFinite(amount) || amount === 0) {
+    throw new Error("Неверные параметры начисления рефералов");
+  }
+
+  const user = await botDb.botUser.findUnique({ where: { id: userId } });
+  if (!user) {
+    throw new Error("Пользователь бота не найден");
+  }
+
+  const newBonus = Math.max(0, (user.bonusReferrals ?? 0) + amount);
+
+  await botDb.botUser.update({
+    where: { id: userId },
+    data: { bonusReferrals: newBonus },
+  });
+
+  await audit({
+    adminId: admin.id,
+    action: "bot.user.referrals.add",
+    entityType: "BotUser",
+    entityId: user.tgId,
+    metadata: { adjustment: amount, oldBonus: user.bonusReferrals ?? 0, newBonus },
+  });
+
+  revalidatePath("/admin/bot-users");
+}

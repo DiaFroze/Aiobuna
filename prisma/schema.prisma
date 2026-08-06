@@ -668,6 +668,7 @@ model BotUser {
   referredBy String?
   refRewardClaimed Boolean @default(false)
   isFormatterAllowed Boolean @default(false)
+  bonusReferrals Int     @default(0) // manual referrals added by admin
   createdAt  DateTime @default(now())
   orders     BotOrder[]
   topups     TopUp[]

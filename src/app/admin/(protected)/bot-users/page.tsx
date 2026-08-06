@@ -1,6 +1,6 @@
 import { botDb, botConfigured } from "@/lib/botDb";
 import { PageHeader, EmptyState } from "@/components/admin/ui";
-import { creditUserBalanceAction, debitUserBalanceAction } from "./actions";
+import { creditUserBalanceAction, debitUserBalanceAction, addReferralsAction } from "./actions";
 
 export const dynamic = "force-dynamic";
 
@@ -38,6 +38,15 @@ export default async function BotUsersPage({
     orderBy: { createdAt: "desc" },
     take: 50,
   });
+
+  // Real invited counts (referredBy = referrer's tgId), aggregated in one query.
+  const refGroups = await botDb.botUser.groupBy({
+    by: ["referredBy"],
+    where: { referredBy: { not: null } },
+    _count: { _all: true },
+  });
+  const realRefMap = new Map<string, number>();
+  for (const g of refGroups) if (g.referredBy) realRefMap.set(g.referredBy, g._count._all);
 
   return (
     <div className="space-y-6">
@@ -81,6 +90,7 @@ export default async function BotUsersPage({
               <tr className="border-b text-muted uppercase text-xs">
                 <th className="pb-3">Пользователь</th>
                 <th className="pb-3">Telegram ID</th>
+                <th className="pb-3 text-center">Рефералы</th>
                 <th className="pb-3 text-right">Текущий баланс</th>
                 <th className="pb-3 text-center">Действия с балансом</th>
               </tr>
@@ -102,6 +112,34 @@ export default async function BotUsersPage({
                     )}
                   </td>
                   <td className="py-3 font-mono text-xs text-muted">{u.tgId}</td>
+                  <td className="py-3 text-center">
+                    {(() => {
+                      const real = realRefMap.get(u.tgId) ?? 0;
+                      const bonus = u.bonusReferrals ?? 0;
+                      return (
+                        <div className="flex flex-col items-center gap-1">
+                          <span className="font-semibold">🤝 {real + bonus}</span>
+                          <span className="text-[10px] text-muted">
+                            {real} реал.{bonus ? ` + ${bonus} бонус` : ""}
+                          </span>
+                          <form action={addReferralsAction} className="flex gap-1 items-center">
+                            <input type="hidden" name="userId" value={u.id} />
+                            <input
+                              type="number"
+                              name="amount"
+                              placeholder="+N"
+                              required
+                              className="input text-xs w-16 py-1"
+                              title="Сколько рефералов добавить (можно отрицательное)"
+                            />
+                            <button type="submit" className="btn btn-sm px-2 text-xs" title="Добавить рефералов">
+                              ➕
+                            </button>
+                          </form>
+                        </div>
+                      );
+                    })()}
+                  </td>
                   <td className="py-3 text-right font-bold text-success">
                     {money(u.balance)}
                   </td>
