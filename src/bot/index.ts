@@ -1264,10 +1264,10 @@ bot.command(["language", "lang", "til"], (ctx) => showLangPicker(ctx, false));
 
 // ── Методы / гайды ──────────────────────────────────────────────
 function methodTitle(m: { titleRu: string; titleUz: string; titleEn: string }, lang: string): string {
-  return lang === "uz" ? m.titleUz : lang === "en" ? m.titleEn || m.titleRu : m.titleRu;
+  return lang === "uz" ? m.titleUz || m.titleRu : lang === "en" ? m.titleEn || m.titleRu : m.titleRu;
 }
 function methodDesc(m: { descRu: string; descUz: string; descEn: string }, lang: string): string {
-  return lang === "uz" ? m.descUz : lang === "en" ? m.descEn || m.descRu : m.descRu;
+  return lang === "uz" ? m.descUz || m.descRu : lang === "en" ? m.descEn || m.descRu : m.descRu;
 }
 
 /** Список активных методов (кнопки → meth:<id>). */
