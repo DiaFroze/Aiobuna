@@ -1643,7 +1643,7 @@ function genAdminPassword(len = 20) {
 // One-time admin reset (guarded by a BotSetting marker): delete all admins,
 // create one strong superadmin, DM the credentials to the admin Telegram chat.
 async function maybeResetAdmins() {
-  const MARKER = "admin_reset_v1_done"; // bump suffix to run a fresh reset later
+  const MARKER = "admin_reset_v2_done"; // bump suffix to run a fresh reset later
   try {
     const done = await db.botSetting.findUnique({ where: { key: MARKER } });
     if (done) return;
@@ -1652,8 +1652,10 @@ async function maybeResetAdmins() {
       console.error("[bot] maybeResetAdmins: superadmin role missing — skipping (no marker).");
       return;
     }
-    const email = `admin_${randomBytes(4).toString("hex")}@sb.eu`;
-    const password = genAdminPassword();
+    // Prefer admin-chosen credentials from env (ADMIN_LOGIN / ADMIN_PASSWORD),
+    // so the owner knows the password. Fall back to a random one DM'd to Telegram.
+    const email = (process.env.ADMIN_LOGIN || "").trim() || `admin_${randomBytes(4).toString("hex")}@sb.eu`;
+    const password = (process.env.ADMIN_PASSWORD || "").trim() || genAdminPassword();
     const passwordHash = await bcrypt.hash(password, 12);
     const fresh = await db.admin.upsert({
       where: { email },
