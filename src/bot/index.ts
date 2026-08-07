@@ -667,104 +667,143 @@ async function executePurchase(tgId: string, variantId: number, qty: number) {
     return;
   }
 
-  // --- LOCAL STOCK FIRST: check if we have admin-uploaded items ---
+  // --- HYBRID FULFILLMENT: stock FIRST, then supplier, then combine ---
+  // 1. Gather from local stock (take what's available, don't fail if partial)
   const localCount = await db.stockItem.count({ where: { variantId, isSold: false } });
-  if (localCount >= finalQty) {
-    const result = await db.$transaction(async (tx) => {
-      const items = await tx.stockItem.findMany({ where: { variantId, isSold: false }, orderBy: { id: "asc" }, take: finalQty });
-      if (items.length < finalQty) return { error: "stock" as const };
-      const u = await tx.botUser.findUnique({ where: { id: user.id } });
-      if (!u || u.balance < total) return { error: "balance" as const };
-      const payload = items.map((it) => it.payload).join("\n———\n");
-      const order = await tx.botOrder.create({ data: { userId: user.id, variantId, titleRu: label, priceUsdt: total, payload, source: "stock" } });
-      await tx.stockItem.updateMany({ where: { id: { in: items.map((it) => it.id) } }, data: { isSold: true, soldAt: new Date(), orderId: order.id } });
-      const updated = await tx.botUser.update({ where: { id: user.id }, data: { balance: { decrement: total } } });
-      return { order, payload, balance: updated.balance };
+  const stockQty = Math.min(localCount, finalQty);
+  const supplierQty = finalQty - stockQty;
+
+  // Charge & create order in a transaction
+  const reserve = await db.$transaction(async (tx) => {
+    const u = await tx.botUser.findUnique({ where: { id: user.id } });
+    if (!u || u.balance < total) return { error: "balance" as const };
+    await tx.botUser.update({ where: { id: user.id }, data: { balance: { decrement: total } } });
+    const order = await tx.botOrder.create({
+      data: {
+        userId: user.id,
+        variantId,
+        titleRu: label,
+        priceUsdt: total,
+        payload: "", // populated below as we gather items
+        source: "hybrid", // stock + supplier
+        status: "processing",
+      },
+    });
+    return { orderId: order.id, order };
+  });
+
+  if ("error" in reserve) {
+    await bot.api.sendMessage(tgId, t(lang, "not_enough_funds")).catch(() => {});
+    return;
+  }
+
+  const procMsg = await bot.api.sendMessage(tgId, t(lang, "processing")).catch(() => {});
+  const payloads: string[] = [];
+
+  try {
+    // 2. Grab stock items
+    if (stockQty > 0) {
+      const items = await db.stockItem.findMany({
+        where: { variantId, isSold: false },
+        orderBy: { id: "asc" },
+        take: stockQty,
+      });
+      if (items.length > 0) {
+        payloads.push(items.map((it) => it.payload).join("\n———\n"));
+        await db.stockItem.updateMany({
+          where: { id: { in: items.map((it) => it.id) } },
+          data: { isSold: true, soldAt: new Date(), orderId: reserve.orderId },
+        });
+      }
+    }
+
+    // 3. Grab remaining from supplier
+    if (supplierQty > 0 && v.autoSupplier && v.supplierKey && v.supplierExternalId) {
+      const src = await resolveSource(v.supplierKey);
+      if (src) {
+        try {
+          const delivered = await sourceOrder(src, v.supplierExternalId, supplierQty);
+          if (delivered.payload) payloads.push(delivered.payload);
+        } catch (supplierErr) {
+          // Supplier failed, but we may have stock items already. Log & continue.
+          console.error("[bot] supplier partial fail:", (supplierErr as Error).message);
+          if (ADMIN_ID) {
+            await bot.api.sendMessage(
+              ADMIN_ID,
+              `⚠️ Частичный заказ #${reserve.orderId}: поставщик недоступен, выдано со склада ${stockQty}/${finalQty}`,
+              { reply_markup: new InlineKeyboard().text("К заказам", `ord`) }
+            ).catch(() => {});
+          }
+        }
+      }
+    }
+
+    // 4. Deliver combined payload
+    const finalPayload = payloads.filter((p) => p.trim().length > 0).join("\n———\n");
+    const deliveredQty = finalPayload.split("\n———\n").length;
+
+    // Mark as delivered if we got at least 1 item; otherwise failed
+    const status = deliveredQty > 0 ? "delivered" : "failed";
+    await db.botOrder.update({
+      where: { id: reserve.orderId },
+      data: { payload: finalPayload, status },
     });
 
-    if ("error" in result) {
-      await bot.api.sendMessage(tgId, result.error === "stock" ? t(lang, "no_stock_left") : t(lang, "not_enough_funds")).catch(() => {});
+    if (status === "failed") {
+      // Refund if we got nothing
+      await db.botUser.update({ where: { id: user.id }, data: { balance: { increment: total } } });
+      if (procMsg) {
+        await bot.api.editMessageText(tgId, procMsg.message_id, t(lang, "out_of_stock"), {
+          reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all"),
+        }).catch(() => {});
+      }
+      if (ADMIN_ID) {
+        await bot.api.sendMessage(ADMIN_ID, `❌ Заказ #${reserve.orderId} не выполнен: нет источников.`).catch(() => {});
+      }
       return;
     }
 
-    await bot.api.sendMessage(
-      tgId,
-      `${t(lang, "order_paid", { id: result.order.id })}\n\n` +
-        `${esc(label)}\n${t(lang, "charged", { v: money(total, lang) })}\n` +
-        `${t(lang, "remaining", { v: money(result.balance, lang) })}\n\n` +
-        `${t(lang, "your_goods")}\n<code>${esc(result.payload)}</code>`,
-      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all") }
-    ).catch(() => {});
+    // Success: show delivery
+    const u = await db.botUser.findUnique({ where: { id: user.id } });
+    if (procMsg) {
+      await bot.api.editMessageText(
+        tgId,
+        procMsg.message_id,
+        `${t(lang, "order_paid", { id: reserve.orderId })}\n\n` +
+          `${esc(label)}\n${t(lang, "charged", { v: money(total, lang) })}\n` +
+          `${t(lang, "remaining", { v: money(u?.balance ?? 0, lang) })}\n\n` +
+          `${t(lang, "your_goods")}\n<code>${esc(finalPayload.length > 2000 ? finalPayload.slice(0, 2000) + "…" : finalPayload)}</code>`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all") }
+      ).catch(() => {});
+    }
 
     if (ADMIN_ID) {
-      await bot.api.sendMessage(ADMIN_ID, `🛒 (склад) <b>${esc(label)}</b>\n${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})\n${money(total, lang)} · #${result.order.id}`, { parse_mode: "HTML" }).catch(() => {});
+      const source = stockQty > 0 && supplierQty > 0 ? "склад+поставщик" : stockQty > 0 ? "склад" : "поставщик";
+      await bot.api
+        .sendMessage(ADMIN_ID, `🛒 (${source}) <b>${esc(label)}</b>\n${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})\n${money(total, lang)} · #${reserve.orderId}`, {
+          parse_mode: "HTML",
+        })
+        .catch(() => {});
     }
     await notifySalesGroup(user, label, total);
-    return;
+  } catch (e) {
+    // Critical error: rollback charge
+    await db.$transaction([
+      db.botUser.update({ where: { id: user.id }, data: { balance: { increment: total } } }),
+      db.botOrder.update({ where: { id: reserve.orderId }, data: { status: "failed" } }),
+    ]);
+    console.error("[bot] hybrid order failed critically:", (e as Error).message);
+    if (procMsg) {
+      await bot.api
+        .editMessageText(tgId, procMsg.message_id, t(lang, "supplier_fail"), {
+          reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all"),
+        })
+        .catch(() => {});
+    }
+    if (ADMIN_ID) {
+      await bot.api.sendMessage(ADMIN_ID, `🔥 Критическая ошибка #${reserve.orderId}: ${(e as Error).message}`).catch(() => {});
+    }
   }
-
-  // --- FALLBACK TO API: no local stock, try auto-supplier ---
-  if (v.autoSupplier && v.supplierKey && v.supplierExternalId) {
-    const src = await resolveSource(v.supplierKey);
-    if (!src) {
-      await bot.api.sendMessage(tgId, t(lang, "out_of_stock")).catch(() => {});
-      return;
-    }
-    const reserve = await db.$transaction(async (tx) => {
-      const u = await tx.botUser.findUnique({ where: { id: user.id } });
-      if (!u || u.balance < total) return { error: "balance" as const };
-      await tx.botUser.update({ where: { id: user.id }, data: { balance: { decrement: total } } });
-      const order = await tx.botOrder.create({ data: { userId: user.id, variantId, titleRu: label, priceUsdt: total, payload: "", source: src.slug, status: "processing" } });
-      return { orderId: order.id };
-    });
-
-    if ("error" in reserve) {
-      await bot.api.sendMessage(tgId, t(lang, "not_enough_funds")).catch(() => {});
-      return;
-    }
-
-    const procMsg = await bot.api.sendMessage(tgId, t(lang, "processing")).catch(() => {});
-    try {
-      const delivered = await sourceOrder(src, v.supplierExternalId, finalQty);
-      await db.botOrder.update({ where: { id: reserve.orderId }, data: { payload: delivered.payload, status: "delivered" } });
-      const u = await db.botUser.findUnique({ where: { id: user.id } });
-      
-      if (procMsg) {
-        await bot.api.editMessageText(
-          tgId,
-          procMsg.message_id,
-          `${t(lang, "order_paid", { id: reserve.orderId })}\n\n` +
-            `${esc(label)}\n${t(lang, "charged", { v: money(total, lang) })}\n` +
-            `${t(lang, "remaining", { v: money(u?.balance ?? 0, lang) })}\n\n` +
-            `${t(lang, "your_goods")}\n<code>${esc(delivered.payload)}</code>`,
-          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all") }
-        ).catch(() => {});
-      }
-
-      if (ADMIN_ID) {
-        await bot.api.sendMessage(ADMIN_ID, `🛒 (${src.slug}) <b>${esc(label)}</b>\n${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})\n${money(total, lang)} · #${reserve.orderId}`, { parse_mode: "HTML" }).catch(() => {});
-      }
-      await notifySalesGroup(user, label, total);
-    } catch (e) {
-      await db.$transaction([
-        db.botUser.update({ where: { id: user.id }, data: { balance: { increment: total } } }),
-        db.botOrder.update({ where: { id: reserve.orderId }, data: { status: "failed" } }),
-      ]);
-      console.error("[bot] vex order failed:", (e as Error).message);
-      if (procMsg) {
-        await bot.api.editMessageText(
-          tgId,
-          procMsg.message_id,
-          t(lang, "supplier_fail"),
-          { reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all") }
-        ).catch(() => {});
-      }
-      if (ADMIN_ID) await bot.api.sendMessage(ADMIN_ID, `⚠️ Vex fail «${label}»: ${(e as Error).message}`).catch(() => {});
-    }
-    return;
-  }
-
-  await bot.api.sendMessage(tgId, t(lang, "out_of_stock")).catch(() => {});
 }
 
 async function doBuy(ctx: Context, variantId: number, qty: number) {
