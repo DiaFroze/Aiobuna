@@ -7,7 +7,7 @@ try {
   /* .env optional; Prisma also loads it on client construct */
 }
 
-import { Bot, InlineKeyboard, Keyboard, type Context } from "grammy";
+import { Bot, InlineKeyboard, Keyboard, InputFile, type Context } from "grammy";
 import type { MessageEntity } from "grammy/types";
 import { db } from "./db";
 import { sourceOrder, envVexSource, type Source } from "../lib/supplier";
@@ -765,16 +765,40 @@ async function executePurchase(tgId: string, variantId: number, qty: number) {
 
     // Success: show delivery
     const u = await db.botUser.findUnique({ where: { id: user.id } });
-    if (procMsg) {
-      await bot.api.editMessageText(
-        tgId,
-        procMsg.message_id,
-        `${t(lang, "order_paid", { id: reserve.orderId })}\n\n` +
-          `${esc(label)}\n${t(lang, "charged", { v: money(total, lang) })}\n` +
-          `${t(lang, "remaining", { v: money(u?.balance ?? 0, lang) })}\n\n` +
-          `${t(lang, "your_goods")}\n<code>${esc(finalPayload.length > 2000 ? finalPayload.slice(0, 2000) + "…" : finalPayload)}</code>`,
-        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all") }
-      ).catch(() => {});
+    const isLargeOrder = deliveredQty > 5;
+
+    if (isLargeOrder) {
+      // Large order: send as text file (no size limit, guaranteed delivery)
+      if (procMsg) {
+        await bot.api.editMessageText(
+          tgId,
+          procMsg.message_id,
+          `${t(lang, "order_paid", { id: reserve.orderId })}\n\n` +
+            `${esc(label)}\n${t(lang, "charged", { v: money(total, lang) })}\n` +
+            `${t(lang, "remaining", { v: money(u?.balance ?? 0, lang) })}\n\n` +
+            `✅ <b>Файл со ссылками отправляется...</b>`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all") }
+        ).catch(() => {});
+      }
+      // Send payload as .txt file
+      const filename = `order_${reserve.orderId}.txt`;
+      const fileContent = Buffer.from(finalPayload, "utf-8");
+      await bot.api.sendDocument(tgId, new InputFile(fileContent, filename), {
+        caption: `📄 ${esc(label)} (${deliveredQty} ссылок)`,
+      }).catch(() => {});
+    } else {
+      // Small order: show inline in message
+      if (procMsg) {
+        await bot.api.editMessageText(
+          tgId,
+          procMsg.message_id,
+          `${t(lang, "order_paid", { id: reserve.orderId })}\n\n` +
+            `${esc(label)}\n${t(lang, "charged", { v: money(total, lang) })}\n` +
+            `${t(lang, "remaining", { v: money(u?.balance ?? 0, lang) })}\n\n` +
+            `${t(lang, "your_goods")}\n<code>${esc(finalPayload)}</code>`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all") }
+        ).catch(() => {});
+      }
     }
 
     if (ADMIN_ID) {
