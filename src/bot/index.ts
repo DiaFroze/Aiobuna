@@ -709,7 +709,7 @@ async function executePurchase(tgId: string, variantId: number, qty: number) {
         take: stockQty,
       });
       if (items.length > 0) {
-        payloads.push(items.map((it) => it.payload).join("\n———\n"));
+        payloads.push(items.map((it) => it.payload).join("\n"));
         await db.stockItem.updateMany({
           where: { id: { in: items.map((it) => it.id) } },
           data: { isSold: true, soldAt: new Date(), orderId: reserve.orderId },
@@ -739,8 +739,8 @@ async function executePurchase(tgId: string, variantId: number, qty: number) {
     }
 
     // 4. Deliver combined payload
-    const finalPayload = payloads.filter((p) => p.trim().length > 0).join("\n———\n");
-    const deliveredQty = finalPayload.split("\n———\n").length;
+    const finalPayload = payloads.filter((p) => p.trim().length > 0).join("\n");
+    const deliveredQty = finalPayload.split("\n").filter((line) => line.trim().length > 0).length;
 
     // Mark as delivered if we got at least 1 item; otherwise failed
     const status = deliveredQty > 0 ? "delivered" : "failed";
