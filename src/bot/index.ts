@@ -150,8 +150,7 @@ function mainKeyboard(lang: string) {
   return new Keyboard()
     .text(t(lang, "btn_shop")).row()
     .text(t(lang, "btn_wallet")).text(t(lang, "btn_freebies")).row()
-    .text(t(lang, "btn_orders")).text(t(lang, "btn_profile")).row()
-    .text(t(lang, "btn_support")).row()
+    .text(t(lang, "btn_profile")).row()
     .text(t(lang, "btn_language"))
     .resized().persistent();
 }
@@ -957,7 +956,13 @@ async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
     db.botUser.count({ where: { referredBy: user.tgId } }),
   ]);
   const refCount = realRefs + (user.bonusReferrals || 0);
-  const kb = new InlineKeyboard().text(t(lang, "btn_wallet"), "bal").text(t(lang, "btn_refer"), "ref").row().text(t(lang, "to_shop"), "m:0:all");
+
+  // Professional profile layout with all actions
+  const kb = new InlineKeyboard()
+    .text(t(lang, "btn_wallet"), "bal").text(t(lang, "btn_refer"), "ref").row()
+    .text(`🧾 ${t(lang, "p_orders")}`, "ord").text(t(lang, "btn_support"), "support_show").row()
+    .text(t(lang, "to_shop"), "m:0:all");
+
   let text =
     `${t(lang, "profile_title")}\n\n` +
     `${t(lang, "p_name")}: ${esc(user.firstName ?? "—")}\n` +
@@ -1478,6 +1483,7 @@ bot.on("callback_query:data", async (ctx) => {
     if (data === "topin") { pending.set(String(ctx.from?.id), { type: "topup" }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "enter_amount", { min: money(MIN_TOPUP, lang) })); }
     if (data === "promo") { pending.set(String(ctx.from?.id), { type: "promo" }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "promo_enter")); }
     if (data === "methods_show") { await ctx.answerCallbackQuery().catch(() => {}); return showMethods(ctx); }
+    if (data === "support_show") { const { text, kb } = await supportView(lang); await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {}); return ctx.answerCallbackQuery().catch(() => {}); }
 
     const [tag, ...rest] = data.split(":");
     if (tag === "m") { const page = Number(rest[0]) || 0; const sort = (SORTS.includes(rest[1] as Sort) ? rest[1] : "all") as Sort; await ctx.answerCallbackQuery().catch(() => {}); return showMenu(ctx, page, sort, true); }
