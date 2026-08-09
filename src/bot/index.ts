@@ -149,8 +149,10 @@ let buttonEmoji = "";
 // Overridable via the `wallet_button_emoji` / `profile_button_emoji` settings.
 const PREMIUM_EMOJI_WALLET = "5224257782013769471";
 const PREMIUM_EMOJI_PROFILE = "5258011929993026890";
+const PREMIUM_EMOJI_ORDERS = "5967412305338568701";
 let walletButtonEmoji = PREMIUM_EMOJI_WALLET;
 let profileButtonEmoji = PREMIUM_EMOJI_PROFILE;
+let ordersButtonEmoji = PREMIUM_EMOJI_ORDERS;
 const ICON_TEXTS = new Set(LANGS.map((l) => t(l, "refresh"))); // 🔄 animated emoji on "Обновить"
 
 function mainKeyboard(lang: string) {
@@ -372,7 +374,7 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
   }
   if (!freebies && items.length > 0) {
     kb.text(stripLeadEmoji(t(lang, "btn_wallet")), "bal").icon(walletButtonEmoji)
-      .text(t(lang, "btn_orders"), "ord").row();
+      .text(stripLeadEmoji(t(lang, "btn_orders")), "ord").icon(ordersButtonEmoji).row();
     kb.text(stripLeadEmoji(t(lang, "btn_profile")), "profile_show").icon(profileButtonEmoji).row();
   }
 
@@ -969,7 +971,8 @@ async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
   const kb = new InlineKeyboard()
     .text(stripLeadEmoji(t(lang, "btn_wallet")), "bal").icon(walletButtonEmoji)
     .text(t(lang, "btn_refer"), "ref").row()
-    .text(`🧾 ${t(lang, "p_orders")}`, "ord").text(t(lang, "btn_support"), "support_show").row()
+    .text(stripLeadEmoji(t(lang, "p_orders")), "ord").icon(ordersButtonEmoji)
+    .text(t(lang, "btn_support"), "support_show").row()
     .text(`🌐 ${t(lang, "btn_language")}`, "lang_pick").row()
     .text(t(lang, "to_shop"), "m:0:all");
 
@@ -978,7 +981,7 @@ async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
     `${t(lang, "p_name")}: ${esc(user.firstName ?? "—")}\n` +
     `ID: <code>${user.tgId}</code>\n` +
     `${emojiIcon("💰", walletButtonEmoji)} ${t(lang, "your_balance", { v: money(user.balance, lang) })}\n` +
-    `🧾 ${t(lang, "p_orders")}: ${ordersCount}\n` +
+    `${emojiIcon("🧾", ordersButtonEmoji)} ${t(lang, "p_orders")}: ${ordersCount}\n` +
     `🤝 ${t(lang, "p_invited")}: ${refCount}`;
   const threshold = Number(await setting("ref_reward_threshold", "0"));
   if ((await setting("ref_reward_enabled", "")) === "1" && threshold > 0 && !user.refRewardClaimed)
@@ -1814,6 +1817,7 @@ async function bootstrap() {
       buttonEmoji = await setting("button_emoji", "");
       walletButtonEmoji = (await setting("wallet_button_emoji", "")).trim() || PREMIUM_EMOJI_WALLET;
       profileButtonEmoji = (await setting("profile_button_emoji", "")).trim() || PREMIUM_EMOJI_PROFILE;
+      ordersButtonEmoji = (await setting("orders_button_emoji", "")).trim() || PREMIUM_EMOJI_ORDERS;
       await bot.api.setMyCommands([
         { command: "start", description: "🛍 Магазин / Menu" },
         { command: "shop", description: "🛍 Магазин" },
