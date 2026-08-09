@@ -1193,14 +1193,6 @@ async function showLangPicker(ctx: Context, edit: boolean) {
 async function sendHome(ctx: Context, user: Awaited<ReturnType<typeof getUser>>) {
   const { text, entities } = await buildHeader();
   await ctx.reply(text, { entities, reply_markup: mainKeyboard(user.lang) });
-
-  // Conditionally show Methods button if enabled in settings
-  const methodsEnabled = (await setting("methods_enabled", "1")) === "1";
-  if (methodsEnabled) {
-    const methodsKb = new InlineKeyboard().text(t(user.lang, "btn_methods"), "methods_show");
-    await ctx.reply(t(user.lang, "btn_methods"), { reply_markup: methodsKb }).catch(() => {});
-  }
-
   const menu = await buildMenu(user.lang, user.balance, 0, "all", user.id);
   await ctx.reply(menu.text, { parse_mode: "HTML", reply_markup: menu.kb });
 }
