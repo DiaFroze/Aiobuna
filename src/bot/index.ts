@@ -150,10 +150,17 @@ let buttonEmoji = "";
 const PREMIUM_EMOJI_WALLET = "5224257782013769471";
 const PREMIUM_EMOJI_PROFILE = "5258011929993026890";
 const PREMIUM_EMOJI_ORDERS = "5967412305338568701";
+const PREMIUM_EMOJI_BACK = "5416113713428057601";
 let walletButtonEmoji = PREMIUM_EMOJI_WALLET;
 let profileButtonEmoji = PREMIUM_EMOJI_PROFILE;
 let ordersButtonEmoji = PREMIUM_EMOJI_ORDERS;
+let backButtonEmoji = PREMIUM_EMOJI_BACK;
 const ICON_TEXTS = new Set(LANGS.map((l) => t(l, "refresh"))); // 🔄 animated emoji on "Обновить"
+// Every "back"-style label in every language. Buttons carrying one of these get
+// the premium back-arrow icon (and their plain ⬅️ stripped) in the API
+// middleware below — one place instead of ~40 call sites.
+const BACK_KEYS = ["back", "back_to_list", "to_shop"] as const;
+const BACK_TEXTS = new Set(LANGS.flatMap((l) => BACK_KEYS.map((k) => t(l, k))));
 
 function mainKeyboard(lang: string) {
   return new Keyboard()
@@ -1649,9 +1656,14 @@ bot.api.config.use((prev, method, payload, signal) => {
   const rm = (payload as { reply_markup?: { inline_keyboard?: unknown[][]; keyboard?: unknown[][] } }).reply_markup;
   if (rm?.inline_keyboard)
     for (const row of rm.inline_keyboard)
-      for (const btn of row as Array<{ text?: string; callback_data?: string; style?: string }>) {
+      for (const btn of row as Array<{ text?: string; callback_data?: string; style?: string; icon_custom_emoji_id?: string }>) {
         const st = styleFor(btn.callback_data);
         if (st && !btn.style) btn.style = st;
+        // Premium back-arrow on every "back"/"to shop" button (plain ⬅️ removed).
+        if (btn.text && !btn.icon_custom_emoji_id && BACK_TEXTS.has(btn.text)) {
+          btn.icon_custom_emoji_id = backButtonEmoji;
+          btn.text = stripLeadEmoji(btn.text);
+        }
       }
   if (rm?.keyboard) for (const row of rm.keyboard) for (const btn of row as Array<{ style?: string }>) if (typeof btn === "object" && !btn.style) btn.style = "primary";
   return prev(method, payload, signal);
@@ -1818,6 +1830,7 @@ async function bootstrap() {
       walletButtonEmoji = (await setting("wallet_button_emoji", "")).trim() || PREMIUM_EMOJI_WALLET;
       profileButtonEmoji = (await setting("profile_button_emoji", "")).trim() || PREMIUM_EMOJI_PROFILE;
       ordersButtonEmoji = (await setting("orders_button_emoji", "")).trim() || PREMIUM_EMOJI_ORDERS;
+      backButtonEmoji = (await setting("back_button_emoji", "")).trim() || PREMIUM_EMOJI_BACK;
       await bot.api.setMyCommands([
         { command: "start", description: "🛍 Магазин / Menu" },
         { command: "shop", description: "🛍 Магазин" },
