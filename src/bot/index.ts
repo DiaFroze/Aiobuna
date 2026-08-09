@@ -150,8 +150,7 @@ function mainKeyboard(lang: string) {
   return new Keyboard()
     .text(t(lang, "btn_shop")).row()
     .text(t(lang, "btn_wallet")).text(t(lang, "btn_freebies")).row()
-    .text(t(lang, "btn_profile")).row()
-    .text(t(lang, "btn_language"))
+    .text(t(lang, "btn_profile"))
     .resized().persistent();
 }
 
@@ -366,6 +365,7 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
   }
   if (!freebies && items.length > 0) {
     kb.text(t(lang, "btn_wallet"), "bal").text(t(lang, "btn_orders"), "ord").row();
+    kb.text(`👤 ${t(lang, "btn_profile")}`, "profile_show");
   }
 
   const head = freebies ? t(lang, "promo_title") : t(lang, "products_available");
@@ -961,6 +961,7 @@ async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
   const kb = new InlineKeyboard()
     .text(t(lang, "btn_wallet"), "bal").text(t(lang, "btn_refer"), "ref").row()
     .text(`🧾 ${t(lang, "p_orders")}`, "ord").text(t(lang, "btn_support"), "support_show").row()
+    .text(`🌐 ${t(lang, "btn_language")}`, "lang_pick").row()
     .text(t(lang, "to_shop"), "m:0:all");
 
   let text =
@@ -1484,6 +1485,8 @@ bot.on("callback_query:data", async (ctx) => {
     if (data === "promo") { pending.set(String(ctx.from?.id), { type: "promo" }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "promo_enter")); }
     if (data === "methods_show") { await ctx.answerCallbackQuery().catch(() => {}); return showMethods(ctx); }
     if (data === "support_show") { const { text, kb } = await supportView(lang); await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {}); return ctx.answerCallbackQuery().catch(() => {}); }
+    if (data === "lang_pick") { await ctx.answerCallbackQuery().catch(() => {}); return showLangPicker(ctx, true); }
+    if (data === "profile_show") { const { text, kb } = await profileView(user); await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {}); return ctx.answerCallbackQuery().catch(() => {}); }
 
     const [tag, ...rest] = data.split(":");
     if (tag === "m") { const page = Number(rest[0]) || 0; const sort = (SORTS.includes(rest[1] as Sort) ? rest[1] : "all") as Sort; await ctx.answerCallbackQuery().catch(() => {}); return showMenu(ctx, page, sort, true); }
