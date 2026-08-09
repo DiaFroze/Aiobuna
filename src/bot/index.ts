@@ -365,7 +365,7 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
   }
   if (!freebies && items.length > 0) {
     kb.text(t(lang, "btn_wallet"), "bal").text(t(lang, "btn_orders"), "ord").row();
-    kb.text(`👤 ${t(lang, "btn_profile")}`, "profile_show");
+    kb.text(`5258011929993026890 ${t(lang, "btn_profile")}`, "profile_show");
   }
 
   const head = freebies ? t(lang, "promo_title") : t(lang, "products_available");
