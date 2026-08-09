@@ -367,9 +367,6 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
     }
   }
   if (!freebies && items.length > 0) {
-    kb.text(t(lang, "refresh"), `m:0:${sort}`)
-      .text(t(lang, "sort", { v: t(lang, `sort_${sort}`) }), `m:0:${nextSort(sort)}`)
-      .row();
     kb.text(t(lang, "btn_wallet"), "bal").text(t(lang, "btn_orders"), "ord").row();
   }
 
@@ -1338,6 +1335,12 @@ function methodDesc(m: { descRu: string; descUz: string; descEn: string }, lang:
 async function showMethods(ctx: Context) {
   const user = await getUser(ctx);
   const lang = user.lang;
+  const enabled = (await setting("methods_enabled", "1")) === "1";
+  if (!enabled) {
+    return ctx.reply(t(lang, "methods_disabled") || "Методы отключены.", {
+      reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all"),
+    });
+  }
   const methods = await db.method.findMany({ where: { isActive: true }, orderBy: { sortOrder: "asc" } });
   if (!methods.length) return ctx.reply(t(lang, "methods_empty"));
   const kb = new InlineKeyboard();
