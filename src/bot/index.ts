@@ -152,7 +152,7 @@ function mainKeyboard(lang: string) {
     .text(t(lang, "btn_methods")).row()
     .text(t(lang, "btn_wallet")).text(t(lang, "btn_freebies")).row()
     .text(t(lang, "btn_orders")).text(t(lang, "btn_profile")).row()
-    .text(t(lang, "btn_refer")).text(t(lang, "btn_support")).row()
+    .text(t(lang, "btn_support")).row()
     .text(t(lang, "btn_language"))
     .resized().persistent();
 }
@@ -981,11 +981,10 @@ function referView(ctx: Context, user: Awaited<ReturnType<typeof getUser>>) {
   return { text: `${t(lang, "refer_title")}\n\n${t(lang, "refer_text")}\n\n<code>${link}</code>`, kb };
 }
 async function supportView(lang: string) {
-  const username = (await setting("support_username", "")).replace(/^@/, "");
   const custom = await setting("support", "");
   const text = custom ? (lang === "ru" ? custom : await translate(custom, lang)) : t(lang, "support_none");
   const kb = new InlineKeyboard();
-  if (username) kb.url(t(lang, "support_write"), `https://t.me/${username}`).row();
+  kb.url(t(lang, "support_write"), "https://t.me/Abdulloh_Zokirov").row();
   kb.text(t(lang, "to_shop"), "m:0:all");
   return { text: `${t(lang, "support_title")}\n\n${text}`, kb };
 }
@@ -999,7 +998,7 @@ async function showGifts(ctx: Context, edit = false) {
   const variantId = Number(await setting("ref_reward_variant", "0"));
 
   if (!enabled || threshold < 1 || !variantId) {
-    const kb = new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all");
+    const kb = new InlineKeyboard().text(t(lang, "btn_refer"), "ref").row().text(t(lang, "to_shop"), "m:0:all");
     const text = t(lang, "gifts_disabled");
     if (edit) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
     else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
@@ -1017,6 +1016,7 @@ async function showGifts(ctx: Context, edit = false) {
 
   if (user.refRewardClaimed) {
     const text = t(lang, "gifts_claimed");
+    kb.text(t(lang, "btn_refer"), "ref").row();
     kb.text(t(lang, "to_shop"), "m:0:all");
     if (edit) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
     else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
@@ -1031,6 +1031,7 @@ async function showGifts(ctx: Context, edit = false) {
     `\n\n🔗 ${lang === "ru" ? "Ваша ссылка" : lang === "uz" ? "Havolangiz" : "Your link"}:\n<code>${link}</code>`;
 
   kb.url(t(lang, "gifts_share"), `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(lang === "ru" ? `Заходи в бот и получай подарки! 🎁` : `Join the bot and get gifts! 🎁`)}`).row();
+  kb.text(t(lang, "btn_refer"), "ref").row();
   kb.text(t(lang, "to_shop"), "m:0:all");
 
   if (edit) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
@@ -1354,11 +1355,8 @@ async function deliverMethod(
 ) {
   const title = methodTitle(m, lang);
   const desc = methodDesc(m, lang) || "";
-  // Only attach a URL button for a valid http(s) link — otherwise Telegram rejects
-  // the whole message (BUTTON_URL_INVALID) and the method silently never arrives.
-  const validUrl = m.url && /^https?:\/\/\S+$/i.test(m.url.trim()) ? m.url.trim() : null;
+  // No URL button in method delivery — just back to shop.
   const kb = new InlineKeyboard();
-  if (validUrl) kb.url(t(lang, "method_open_link"), validUrl).row();
   kb.text(t(lang, "to_shop"), "m:0:all");
   // If the link isn't a valid button, still include it as text so the user gets it.
   const linkLine = m.url && !validUrl ? `\n\n🔗 ${esc(m.url)}` : "";
