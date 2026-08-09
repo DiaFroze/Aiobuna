@@ -154,6 +154,7 @@ const PREMIUM_EMOJI_BACK = "5416113713428057601";
 const PREMIUM_EMOJI_SUPPORT = "4970126766132691795";
 const PREMIUM_EMOJI_REFER = "6048721430730773527";
 const PREMIUM_EMOJI_GIFTS = "5203996991054432397";
+const PREMIUM_EMOJI_SHOP = "5859297284029681680";
 let walletButtonEmoji = PREMIUM_EMOJI_WALLET;
 let profileButtonEmoji = PREMIUM_EMOJI_PROFILE;
 let ordersButtonEmoji = PREMIUM_EMOJI_ORDERS;
@@ -161,6 +162,7 @@ let backButtonEmoji = PREMIUM_EMOJI_BACK;
 let supportButtonEmoji = PREMIUM_EMOJI_SUPPORT;
 let referButtonEmoji = PREMIUM_EMOJI_REFER;
 let giftsButtonEmoji = PREMIUM_EMOJI_GIFTS;
+let shopButtonEmoji = PREMIUM_EMOJI_SHOP;
 const ICON_TEXTS = new Set(LANGS.map((l) => t(l, "refresh"))); // 🔄 animated emoji on "Обновить"
 // Every "back"-style label in every language. Buttons carrying one of these get
 // the premium back-arrow icon (and their plain ⬅️ stripped) in the API
@@ -173,6 +175,7 @@ const GIFTS_TEXTS = new Set(LANGS.map((l) => t(l, "btn_freebies")));
 const WALLET_TEXTS = new Set(LANGS.map((l) => t(l, "btn_wallet")));
 const PROFILE_TEXTS = new Set(LANGS.map((l) => t(l, "btn_profile")));
 const ORDERS_TEXTS = new Set(LANGS.map((l) => t(l, "btn_orders")));
+const SHOP_TEXTS = new Set(LANGS.map((l) => t(l, "btn_shop")));
 
 // Premium icon for a button label, or undefined if it isn't one of ours.
 // Bot API 9.4 supports `icon_custom_emoji_id` on BOTH inline and reply-keyboard
@@ -185,6 +188,7 @@ function premiumIconFor(text: string): string | undefined {
   if (WALLET_TEXTS.has(text)) return walletButtonEmoji;
   if (PROFILE_TEXTS.has(text)) return profileButtonEmoji;
   if (ORDERS_TEXTS.has(text)) return ordersButtonEmoji;
+  if (SHOP_TEXTS.has(text)) return shopButtonEmoji;
   return undefined;
 }
 
@@ -1877,6 +1881,7 @@ async function bootstrap() {
       supportButtonEmoji = (await setting("support_button_emoji", "")).trim() || PREMIUM_EMOJI_SUPPORT;
       referButtonEmoji = (await setting("refer_button_emoji", "")).trim() || PREMIUM_EMOJI_REFER;
       giftsButtonEmoji = (await setting("gifts_button_emoji", "")).trim() || PREMIUM_EMOJI_GIFTS;
+      shopButtonEmoji = (await setting("shop_button_emoji", "")).trim() || PREMIUM_EMOJI_SHOP;
       await bot.api.setMyCommands([
         { command: "start", description: "🛍 Магазин / Menu" },
         { command: "shop", description: "🛍 Магазин" },

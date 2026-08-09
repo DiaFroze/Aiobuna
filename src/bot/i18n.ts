@@ -388,6 +388,11 @@ export const DISCLAIMER: Record<Lang, string> = {
 };
 
 // All localised variants of a reply-keyboard label (for bot.hears matching).
+// When a premium icon is attached to a button, its plain leading emoji is
+// stripped from the label — so the emoji-less form must match too, otherwise the
+// tap arrives as ordinary text and no handler fires.
 export function btnVariants(key: string): string[] {
-  return LANGS.map((l) => DICTS[l][key]);
+  const labels = LANGS.map((l) => DICTS[l][key]).filter(Boolean);
+  const bare = labels.map((s) => s.replace(/^\p{Extended_Pictographic}️?\s*/u, ""));
+  return [...new Set([...labels, ...bare])];
 }
