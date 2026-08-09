@@ -170,15 +170,21 @@ const BACK_TEXTS = new Set(LANGS.flatMap((l) => BACK_KEYS.map((k) => t(l, k))));
 const SUPPORT_TEXTS = new Set(LANGS.map((l) => t(l, "btn_support")));
 const REFER_TEXTS = new Set(LANGS.map((l) => t(l, "btn_refer")));
 const GIFTS_TEXTS = new Set(LANGS.map((l) => t(l, "btn_freebies")));
+const WALLET_TEXTS = new Set(LANGS.map((l) => t(l, "btn_wallet")));
+const PROFILE_TEXTS = new Set(LANGS.map((l) => t(l, "btn_profile")));
+const ORDERS_TEXTS = new Set(LANGS.map((l) => t(l, "btn_orders")));
 
 // Premium icon for a button label, or undefined if it isn't one of ours.
-// Note: only inline buttons support `icon_custom_emoji_id` — reply-keyboard
-// buttons keep their plain emoji.
+// Bot API 9.4 supports `icon_custom_emoji_id` on BOTH inline and reply-keyboard
+// buttons, so this is applied to either kind in the API middleware below.
 function premiumIconFor(text: string): string | undefined {
   if (BACK_TEXTS.has(text)) return backButtonEmoji;
   if (SUPPORT_TEXTS.has(text)) return supportButtonEmoji;
   if (REFER_TEXTS.has(text)) return referButtonEmoji;
   if (GIFTS_TEXTS.has(text)) return giftsButtonEmoji;
+  if (WALLET_TEXTS.has(text)) return walletButtonEmoji;
+  if (PROFILE_TEXTS.has(text)) return profileButtonEmoji;
+  if (ORDERS_TEXTS.has(text)) return ordersButtonEmoji;
   return undefined;
 }
 
@@ -1000,7 +1006,7 @@ async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
     .text(t(lang, "btn_refer"), "ref").row()
     .text(stripLeadEmoji(t(lang, "p_orders")), "ord").icon(ordersButtonEmoji)
     .text(t(lang, "btn_support"), "support_show").row()
-    .text(`🌐 ${t(lang, "btn_language")}`, "lang_pick").row()
+    .text(t(lang, "btn_language"), "lang_pick").row()
     .text(t(lang, "to_shop"), "m:0:all");
 
   let text =
@@ -1009,7 +1015,7 @@ async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
     `ID: <code>${user.tgId}</code>\n` +
     `${emojiIcon("💰", walletButtonEmoji)} ${t(lang, "your_balance", { v: money(user.balance, lang) })}\n` +
     `${emojiIcon("🧾", ordersButtonEmoji)} ${t(lang, "p_orders")}: ${ordersCount}\n` +
-    `🤝 ${t(lang, "p_invited")}: ${refCount}`;
+    `${emojiIcon("🤝", referButtonEmoji)} ${t(lang, "p_invited")}: ${refCount}`;
   const threshold = Number(await setting("ref_reward_threshold", "0"));
   if ((await setting("ref_reward_enabled", "")) === "1" && threshold > 0 && !user.refRewardClaimed)
     text += `\n${t(lang, "ref_progress", { c: refCount, n: threshold })}`;
@@ -1689,7 +1695,20 @@ bot.api.config.use((prev, method, payload, signal) => {
           }
         }
       }
-  if (rm?.keyboard) for (const row of rm.keyboard) for (const btn of row as Array<{ style?: string }>) if (typeof btn === "object" && !btn.style) btn.style = "primary";
+  if (rm?.keyboard)
+    for (const row of rm.keyboard)
+      for (const btn of row as Array<{ text?: string; style?: string; icon_custom_emoji_id?: string }>) {
+        if (typeof btn !== "object" || btn === null) continue;
+        if (!btn.style) btn.style = "primary";
+        // Reply-keyboard buttons take premium icons too (Bot API 9.4).
+        if (btn.text && !btn.icon_custom_emoji_id) {
+          const icon = premiumIconFor(btn.text);
+          if (icon) {
+            btn.icon_custom_emoji_id = icon;
+            btn.text = stripLeadEmoji(btn.text);
+          }
+        }
+      }
   return prev(method, payload, signal);
 });
 
