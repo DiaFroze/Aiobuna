@@ -143,7 +143,14 @@ function styleFor(data?: string): "primary" | "success" | "danger" | undefined {
 // Premium-emoji icon on navigation buttons (Bot API 9.4 icon_custom_emoji_id).
 // Configurable via the `button_emoji` setting; loaded once at startup.
 let buttonEmoji = "";
-let walletButtonEmoji = "";
+// Premium (custom) emoji ids shown on the wallet / profile buttons via the Bot
+// API 9.4 `icon_custom_emoji_id` field. Button labels are plain text, so a
+// `<tg-emoji>` tag would be printed literally there — only `.icon()` works.
+// Overridable via the `wallet_button_emoji` / `profile_button_emoji` settings.
+const PREMIUM_EMOJI_WALLET = "5224257782013769471";
+const PREMIUM_EMOJI_PROFILE = "5258011929993026890";
+let walletButtonEmoji = PREMIUM_EMOJI_WALLET;
+let profileButtonEmoji = PREMIUM_EMOJI_PROFILE;
 const ICON_TEXTS = new Set(LANGS.map((l) => t(l, "refresh"))); // 🔄 animated emoji on "Обновить"
 
 function mainKeyboard(lang: string) {
@@ -364,8 +371,9 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
     }
   }
   if (!freebies && items.length > 0) {
-    kb.text(t(lang, "btn_wallet"), "bal").text(t(lang, "btn_orders"), "ord").row();
-    kb.text(`<tg-emoji emoji-id="5258011929993026890">👤</tg-emoji> ${t(lang, "btn_profile")}`, "profile_show");
+    kb.text(stripLeadEmoji(t(lang, "btn_wallet")), "bal").icon(walletButtonEmoji)
+      .text(t(lang, "btn_orders"), "ord").row();
+    kb.text(stripLeadEmoji(t(lang, "btn_profile")), "profile_show").icon(profileButtonEmoji).row();
   }
 
   const head = freebies ? t(lang, "promo_title") : t(lang, "products_available");
@@ -959,7 +967,8 @@ async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
 
   // Professional profile layout with all actions
   const kb = new InlineKeyboard()
-    .text(t(lang, "btn_wallet"), "bal").text(t(lang, "btn_refer"), "ref").row()
+    .text(stripLeadEmoji(t(lang, "btn_wallet")), "bal").icon(walletButtonEmoji)
+    .text(t(lang, "btn_refer"), "ref").row()
     .text(`🧾 ${t(lang, "p_orders")}`, "ord").text(t(lang, "btn_support"), "support_show").row()
     .text(`🌐 ${t(lang, "btn_language")}`, "lang_pick").row()
     .text(t(lang, "to_shop"), "m:0:all");
@@ -968,7 +977,7 @@ async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
     `${t(lang, "profile_title")}\n\n` +
     `${t(lang, "p_name")}: ${esc(user.firstName ?? "—")}\n` +
     `ID: <code>${user.tgId}</code>\n` +
-    `<tg-emoji emoji-id="5224257782013769471">💰</tg-emoji> ${t(lang, "your_balance", { v: money(user.balance, lang) })}\n` +
+    `${emojiIcon("💰", walletButtonEmoji)} ${t(lang, "your_balance", { v: money(user.balance, lang) })}\n` +
     `🧾 ${t(lang, "p_orders")}: ${ordersCount}\n` +
     `🤝 ${t(lang, "p_invited")}: ${refCount}`;
   const threshold = Number(await setting("ref_reward_threshold", "0"));
@@ -1803,7 +1812,8 @@ async function bootstrap() {
     drop_pending_updates: false,
     onStart: async (me) => {
       buttonEmoji = await setting("button_emoji", "");
-      walletButtonEmoji = await setting("wallet_button_emoji", "");
+      walletButtonEmoji = (await setting("wallet_button_emoji", "")).trim() || PREMIUM_EMOJI_WALLET;
+      profileButtonEmoji = (await setting("profile_button_emoji", "")).trim() || PREMIUM_EMOJI_PROFILE;
       await bot.api.setMyCommands([
         { command: "start", description: "🛍 Магазин / Menu" },
         { command: "shop", description: "🛍 Магазин" },
