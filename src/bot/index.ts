@@ -1358,9 +1358,7 @@ async function deliverMethod(
   // No URL button in method delivery — just back to shop.
   const kb = new InlineKeyboard();
   kb.text(t(lang, "to_shop"), "m:0:all");
-  // If the link isn't a valid button, still include it as text so the user gets it.
-  const linkLine = m.url && !validUrl ? `\n\n🔗 ${esc(m.url)}` : "";
-  const body = `${m.emoji} <b>${esc(title)}</b>\n\n${esc(desc)}${linkLine}`;
+  const body = `${m.emoji} <b>${esc(title)}</b>\n\n${esc(desc)}`;
   await ctx.reply(body, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } })
     .catch(async () => {
       // Last-resort plain delivery — guarantees the method reaches the user.
