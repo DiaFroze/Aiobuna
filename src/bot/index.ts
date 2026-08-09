@@ -968,7 +968,7 @@ async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
     `${t(lang, "profile_title")}\n\n` +
     `${t(lang, "p_name")}: ${esc(user.firstName ?? "—")}\n` +
     `ID: <code>${user.tgId}</code>\n` +
-    `💰 ${t(lang, "your_balance", { v: money(user.balance, lang) })}\n` +
+    `5224257782013769471 ${t(lang, "your_balance", { v: money(user.balance, lang) })}\n` +
     `🧾 ${t(lang, "p_orders")}: ${ordersCount}\n` +
     `🤝 ${t(lang, "p_invited")}: ${refCount}`;
   const threshold = Number(await setting("ref_reward_threshold", "0"));
