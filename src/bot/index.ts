@@ -365,7 +365,7 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
   }
   if (!freebies && items.length > 0) {
     kb.text(t(lang, "btn_wallet"), "bal").text(t(lang, "btn_orders"), "ord").row();
-    kb.text(`5258011929993026890 ${t(lang, "btn_profile")}`, "profile_show");
+    kb.text(`<tg-emoji emoji-id="5258011929993026890">👤</tg-emoji> ${t(lang, "btn_profile")}`, "profile_show");
   }
 
   const head = freebies ? t(lang, "promo_title") : t(lang, "products_available");
@@ -968,7 +968,7 @@ async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
     `${t(lang, "profile_title")}\n\n` +
     `${t(lang, "p_name")}: ${esc(user.firstName ?? "—")}\n` +
     `ID: <code>${user.tgId}</code>\n` +
-    `5224257782013769471 ${t(lang, "your_balance", { v: money(user.balance, lang) })}\n` +
+    `<tg-emoji emoji-id="5224257782013769471">💰</tg-emoji> ${t(lang, "your_balance", { v: money(user.balance, lang) })}\n` +
     `🧾 ${t(lang, "p_orders")}: ${ordersCount}\n` +
     `🤝 ${t(lang, "p_invited")}: ${refCount}`;
   const threshold = Number(await setting("ref_reward_threshold", "0"));
