@@ -151,16 +151,36 @@ const PREMIUM_EMOJI_WALLET = "5224257782013769471";
 const PREMIUM_EMOJI_PROFILE = "5258011929993026890";
 const PREMIUM_EMOJI_ORDERS = "5967412305338568701";
 const PREMIUM_EMOJI_BACK = "5416113713428057601";
+const PREMIUM_EMOJI_SUPPORT = "4970126766132691795";
+const PREMIUM_EMOJI_REFER = "6048721430730773527";
+const PREMIUM_EMOJI_GIFTS = "5203996991054432397";
 let walletButtonEmoji = PREMIUM_EMOJI_WALLET;
 let profileButtonEmoji = PREMIUM_EMOJI_PROFILE;
 let ordersButtonEmoji = PREMIUM_EMOJI_ORDERS;
 let backButtonEmoji = PREMIUM_EMOJI_BACK;
+let supportButtonEmoji = PREMIUM_EMOJI_SUPPORT;
+let referButtonEmoji = PREMIUM_EMOJI_REFER;
+let giftsButtonEmoji = PREMIUM_EMOJI_GIFTS;
 const ICON_TEXTS = new Set(LANGS.map((l) => t(l, "refresh"))); // 🔄 animated emoji on "Обновить"
 // Every "back"-style label in every language. Buttons carrying one of these get
 // the premium back-arrow icon (and their plain ⬅️ stripped) in the API
 // middleware below — one place instead of ~40 call sites.
 const BACK_KEYS = ["back", "back_to_list", "to_shop"] as const;
 const BACK_TEXTS = new Set(LANGS.flatMap((l) => BACK_KEYS.map((k) => t(l, k))));
+const SUPPORT_TEXTS = new Set(LANGS.map((l) => t(l, "btn_support")));
+const REFER_TEXTS = new Set(LANGS.map((l) => t(l, "btn_refer")));
+const GIFTS_TEXTS = new Set(LANGS.map((l) => t(l, "btn_freebies")));
+
+// Premium icon for a button label, or undefined if it isn't one of ours.
+// Note: only inline buttons support `icon_custom_emoji_id` — reply-keyboard
+// buttons keep their plain emoji.
+function premiumIconFor(text: string): string | undefined {
+  if (BACK_TEXTS.has(text)) return backButtonEmoji;
+  if (SUPPORT_TEXTS.has(text)) return supportButtonEmoji;
+  if (REFER_TEXTS.has(text)) return referButtonEmoji;
+  if (GIFTS_TEXTS.has(text)) return giftsButtonEmoji;
+  return undefined;
+}
 
 function mainKeyboard(lang: string) {
   return new Keyboard()
@@ -1659,10 +1679,14 @@ bot.api.config.use((prev, method, payload, signal) => {
       for (const btn of row as Array<{ text?: string; callback_data?: string; style?: string; icon_custom_emoji_id?: string }>) {
         const st = styleFor(btn.callback_data);
         if (st && !btn.style) btn.style = st;
-        // Premium back-arrow on every "back"/"to shop" button (plain ⬅️ removed).
-        if (btn.text && !btn.icon_custom_emoji_id && BACK_TEXTS.has(btn.text)) {
-          btn.icon_custom_emoji_id = backButtonEmoji;
-          btn.text = stripLeadEmoji(btn.text);
+        // Premium icon on known nav buttons (back / support / invite / gifts).
+        // The plain leading emoji is stripped so it isn't shown twice.
+        if (btn.text && !btn.icon_custom_emoji_id) {
+          const icon = premiumIconFor(btn.text);
+          if (icon) {
+            btn.icon_custom_emoji_id = icon;
+            btn.text = stripLeadEmoji(btn.text);
+          }
         }
       }
   if (rm?.keyboard) for (const row of rm.keyboard) for (const btn of row as Array<{ style?: string }>) if (typeof btn === "object" && !btn.style) btn.style = "primary";
@@ -1831,6 +1855,9 @@ async function bootstrap() {
       profileButtonEmoji = (await setting("profile_button_emoji", "")).trim() || PREMIUM_EMOJI_PROFILE;
       ordersButtonEmoji = (await setting("orders_button_emoji", "")).trim() || PREMIUM_EMOJI_ORDERS;
       backButtonEmoji = (await setting("back_button_emoji", "")).trim() || PREMIUM_EMOJI_BACK;
+      supportButtonEmoji = (await setting("support_button_emoji", "")).trim() || PREMIUM_EMOJI_SUPPORT;
+      referButtonEmoji = (await setting("refer_button_emoji", "")).trim() || PREMIUM_EMOJI_REFER;
+      giftsButtonEmoji = (await setting("gifts_button_emoji", "")).trim() || PREMIUM_EMOJI_GIFTS;
       await bot.api.setMyCommands([
         { command: "start", description: "🛍 Магазин / Menu" },
         { command: "shop", description: "🛍 Магазин" },
