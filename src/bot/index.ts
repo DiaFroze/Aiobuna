@@ -1160,7 +1160,7 @@ async function buyForReferrals(ctx: Context, variantId: number) {
   }
 
   await ctx.answerCallbackQuery({ text: `✅ Списано ${pointsCost} реф.` }).catch(() => {});
-  await executePurchase(user.tgId, variantId, 1);
+  await executePurchase(user.tgId, variantId, 1, pointsCost);
 }
 
 // ---------- views ----------
