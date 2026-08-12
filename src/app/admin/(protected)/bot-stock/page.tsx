@@ -108,6 +108,38 @@ export default async function BotStockPage() {
               placeholder={"https://serviceactivation.google.com/...\nhttps://serviceactivation.google.com/...\nhttps://serviceactivation.google.com/..."}
             />
           </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label className="text-sm text-muted">Копий каждой ссылки</label>
+              <input
+                type="number"
+                name="copies"
+                min={1}
+                max={5000}
+                defaultValue={1}
+                className="input mt-1"
+              />
+              <p className="text-xs text-muted mt-1">
+                Если одна ссылка рассчитана на несколько активаций — укажите, сколько
+                раз добавить её на склад (например, 400).
+              </p>
+            </div>
+            <div className="flex items-start gap-2 sm:pt-7">
+              <input
+                type="checkbox"
+                name="allowDuplicates"
+                id="allowDuplicates"
+                className="mt-1"
+              />
+              <label htmlFor="allowDuplicates" className="text-sm">
+                Разрешить дубликаты
+                <span className="block text-xs text-muted">
+                  Добавить ссылку, даже если она уже есть на складе. При количестве
+                  копий больше 1 включается автоматически.
+                </span>
+              </label>
+            </div>
+          </div>
           <button type="submit" className="btn btn-success">
             ✅ Импортировать на склад
           </button>
