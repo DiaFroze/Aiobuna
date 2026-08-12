@@ -237,17 +237,21 @@ export async function addStockAction(formData: FormData) {
   revalidatePath(`/admin/bot-products/${productId}`);
 }
 
-/** Save the referral promo config (invite N → free variant(s), all delivered together). */
+/** Save the referral promo config — each row is its own tier (invite N → free variant). */
 export async function saveRefPromoAction(formData: FormData) {
   const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
-  const variantIds = formData
-    .getAll("variantIds")
-    .map((v) => Number(v))
-    .filter((n) => Number.isFinite(n) && n > 0);
+  const tiers: string[] = [];
+  for (let i = 0; ; i++) {
+    const thresholdRaw = formData.get(`tier${i}_threshold`);
+    const variantRaw = formData.get(`tier${i}_variant`);
+    if (thresholdRaw === null && variantRaw === null) break; // no more rows in the form
+    const threshold = Math.round(num(thresholdRaw));
+    const variantId = Math.round(num(variantRaw));
+    if (threshold > 0 && variantId > 0) tiers.push(`${threshold}:${variantId}`);
+  }
   const map: Record<string, string> = {
     ref_reward_enabled: formData.get("enabled") === "on" ? "1" : "0",
-    ref_reward_threshold: String(Math.max(0, Math.round(num(formData.get("threshold"))))),
-    ref_reward_variant: variantIds.join(","),
+    ref_reward_tiers: tiers.join(","),
   };
   for (const [key, valueRu] of Object.entries(map)) {
     await botDb.setting.upsert({ where: { key }, create: { key, valueRu, type: "text" }, update: { valueRu } });

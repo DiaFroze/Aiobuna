@@ -310,43 +310,68 @@ async function prewarmTranslations() {
   }
 }
 
-// Referral promo: when an inviter reaches the configured number of invites they
-// get a chosen product FREE (once). Configured in the admin panel via settings.
-// The `ref_reward_variant` setting holds one or more variant ids, comma- or
-// newline-separated (e.g. "12,34,56") — a single referral threshold can now
-// unlock a bundle of gifts (Gemini Pro + Canva + CapCut, etc), not just one.
-async function giftVariantIds(): Promise<number[]> {
-  const raw = (await setting("ref_reward_variant", "")).trim();
-  return [...new Set(raw.split(/[,\n]/).map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n > 0))];
+// Referral promo: each configured TIER (invite threshold → one gift variant)
+// unlocks independently — e.g. 5 invites → Canva Pro, 7 → CapCut Pro,
+// 10 → Gemini Pro. A user collects every tier they've crossed over time.
+// Configured in the admin panel; stored as "threshold:variantId" pairs,
+// comma- or newline-separated (e.g. "5:12,7:34,10:56").
+type GiftTier = { threshold: number; variantId: number };
+
+async function giftTiers(): Promise<GiftTier[]> {
+  const raw = (await setting("ref_reward_tiers", "")).trim();
+  const tiers = raw
+    .split(/[,\n]/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => {
+      const [th, vid] = s.split(":").map((x) => Number(x.trim()));
+      return { threshold: th, variantId: vid };
+    })
+    .filter((t) => Number.isFinite(t.threshold) && t.threshold > 0 && Number.isFinite(t.variantId) && t.variantId > 0);
+  if (tiers.length > 0) return tiers.sort((a, b) => a.threshold - b.threshold);
+
+  // Legacy fallback: old single-threshold, multi-variant "bundle" setup
+  // (ref_reward_threshold + ref_reward_variant) still works untouched.
+  const legacyThreshold = Number(await setting("ref_reward_threshold", "0"));
+  const legacyRaw = (await setting("ref_reward_variant", "")).trim();
+  const legacyVariants = [...new Set(legacyRaw.split(/[,\n]/).map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n > 0))];
+  if (legacyThreshold > 0 && legacyVariants.length > 0) {
+    return legacyVariants.map((variantId) => ({ threshold: legacyThreshold, variantId }));
+  }
+  return [];
 }
 
 async function grantReferralReward(referrerTgId: string) {
   if ((await setting("ref_reward_enabled", "")) !== "1") return;
-  const threshold = Number(await setting("ref_reward_threshold", "0"));
-  const variantIds = await giftVariantIds();
-  if (threshold < 1 || variantIds.length === 0) return;
+  const tiers = await giftTiers();
+  if (tiers.length === 0) return;
   const referrer = await db.botUser.findUnique({ where: { tgId: referrerTgId } });
   if (!referrer || referrer.refRewardClaimed) return;
   const count = (await db.botUser.count({ where: { referredBy: referrerTgId } })) + (referrer.bonusReferrals || 0);
-  if (count < threshold) return;
+
+  const unlocked = tiers.filter((tier) => count >= tier.threshold);
+  if (unlocked.length === 0) return;
   const lang = referrer.lang;
 
-  // Idempotent: figure out which configured gifts this referrer already has
+  // Idempotent: figure out which unlocked tiers this referrer already got
   // (via past "referral"-sourced orders) so a retry never double-delivers.
   const already = await db.botOrder.findMany({
-    where: { userId: referrer.id, source: "referral", variantId: { in: variantIds } },
+    where: { userId: referrer.id, source: "referral", variantId: { in: unlocked.map((tr) => tr.variantId) } },
     select: { variantId: true },
   });
   const alreadySet = new Set(already.map((o) => o.variantId));
-  const pending = variantIds.filter((id) => !alreadySet.has(id));
+  const pending = unlocked.filter((tier) => !alreadySet.has(tier.variantId));
 
   if (pending.length === 0) {
-    await db.botUser.update({ where: { id: referrer.id }, data: { refRewardClaimed: true } }).catch(() => {});
+    if (unlocked.length === tiers.length) {
+      await db.botUser.update({ where: { id: referrer.id }, data: { refRewardClaimed: true } }).catch(() => {});
+    }
     return;
   }
 
   const delivered: string[] = [];
-  for (const variantId of pending) {
+  for (const tier of pending) {
+    const variantId = tier.variantId;
     const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
     if (!v || !v.isActive) continue;
     const pt = lang === "uz" ? v.plan.product.titleUz || v.plan.product.titleRu : v.plan.product.titleRu;
@@ -367,8 +392,8 @@ async function grantReferralReward(referrerTgId: string) {
           return { payload: item.payload };
         });
         if ("error" in res) {
-          if (ADMIN_ID) await bot.api.sendMessage(ADMIN_ID, `⚠️ Реферальная награда: нет склада (вариант #${variantId}, инвайтер ${referrerTgId})`).catch(() => {});
-          continue; // this gift stays pending for the next referral event
+          if (ADMIN_ID) await bot.api.sendMessage(ADMIN_ID, `⚠️ Реферальная награда: нет склада (${tier.threshold} приглашений, вариант #${variantId}, инвайтер ${referrerTgId})`).catch(() => {});
+          continue; // this tier stays pending for the next referral event
         }
         payload = res.payload;
       }
@@ -380,9 +405,9 @@ async function grantReferralReward(referrerTgId: string) {
 
   if (delivered.length === 0) return;
 
-  // Only flip the "claimed" flag once every configured gift is out the door —
-  // anything that failed above (e.g. empty stock) gets retried on the next referral.
-  if (delivered.length === pending.length) {
+  // Only flip the "fully claimed" flag once every configured tier has been
+  // unlocked AND delivered — anything short of that gets retried next time.
+  if (unlocked.length === tiers.length && delivered.length === pending.length) {
     await db.botUser.update({ where: { id: referrer.id }, data: { refRewardClaimed: true } }).catch(() => {});
   }
 
@@ -1135,7 +1160,15 @@ async function sendTermsGate(ctx: Context, lang: string) {
   const title = t(lang, "terms_title", { date: formatDate(new Date()) });
   const intro = esc(t(lang, "terms_intro"));
   const kb = new InlineKeyboard().text(t(lang, "terms_accept_btn"), "terms_accept");
-  const text = `${title}\n\n<blockquote>${intro}</blockquote>\n\n${body}`;
+
+  // A message can only carry ONE reply_markup — an inline keyboard OR a
+  // reply-keyboard removal, never both. Returning users may still have the
+  // old persistent menu visible from before this gate existed, so kill it
+  // with its own message first: only the "Принимаю условия" inline button
+  // below is tappable until that's done.
+  await ctx.reply(title, { parse_mode: "HTML", reply_markup: { remove_keyboard: true } }).catch(() => {});
+
+  const text = `<blockquote>${intro}</blockquote>\n\n${body}`;
   await ctx
     .reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } })
     .catch(async () => {
@@ -1153,10 +1186,9 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
   const user = await getUser(ctx);
   const lang = user.lang;
   const enabled = (await setting("ref_reward_enabled", "")) === "1";
-  const threshold = Number(await setting("ref_reward_threshold", "0"));
-  const variantIds = await giftVariantIds();
+  const tiers = await giftTiers();
 
-  if (!enabled || threshold < 1 || variantIds.length === 0) {
+  if (!enabled || tiers.length === 0) {
     if (silent) return;
     const kb = new InlineKeyboard().text(t(lang, "btn_refer"), "ref").row().text(t(lang, "to_shop"), "m:0:all");
     const text = t(lang, "gifts_disabled");
@@ -1165,7 +1197,17 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
     return;
   }
 
-  if (user.refRewardClaimed) {
+  const refCount = (await db.botUser.count({ where: { referredBy: user.tgId } })) + (user.bonusReferrals || 0);
+
+  // Which tiers has this user already received? (same idempotency check grantReferralReward uses)
+  const deliveredOrders = await db.botOrder.findMany({
+    where: { userId: user.id, source: "referral", variantId: { in: tiers.map((tr) => tr.variantId) } },
+    select: { variantId: true },
+  });
+  const deliveredSet = new Set(deliveredOrders.map((o) => o.variantId));
+  const allDelivered = tiers.every((tr) => deliveredSet.has(tr.variantId));
+
+  if (allDelivered) {
     if (silent) return;
     const text = t(lang, "gifts_claimed");
     const kb = new InlineKeyboard().text(t(lang, "btn_refer"), "ref").row().text(t(lang, "to_shop"), "m:0:all");
@@ -1174,25 +1216,34 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
     return;
   }
 
-  const refCount = (await db.botUser.count({ where: { referredBy: user.tgId } })) + (user.bonusReferrals || 0);
   const link = `https://t.me/${ctx.me.username}?start=ref${user.tgId}`;
+  const variants = await db.variant.findMany({ where: { id: { in: tiers.map((tr) => tr.variantId) } }, include: { plan: { include: { product: true } } } });
+  const nameFor = (variantId: number) => {
+    const v = variants.find((x) => x.id === variantId);
+    if (!v) return t(lang, "gifts_default_product");
+    return lang === "uz" ? v.plan.product.titleUz || v.plan.product.titleRu : v.plan.product.titleRu;
+  };
 
-  // Product names for every configured gift — e.g. "Gemini AI Pro 18m + Canva Pro + CapCut Pro".
-  const variants = await db.variant.findMany({ where: { id: { in: variantIds } }, include: { plan: { include: { product: true } } } });
-  const productName = variantIds
-    .map((id) => variants.find((v) => v.id === id))
-    .filter((v): v is NonNullable<typeof v> => !!v)
-    .map((v) => (lang === "uz" ? v.plan.product.titleUz || v.plan.product.titleRu : v.plan.product.titleRu))
-    .join(" + ") || t(lang, "gifts_default_product");
+  // One line per tier: got it / unlocked-and-pending / still-locked-with-count-left.
+  const tierLines = tiers
+    .map((tr) => {
+      const got = deliveredSet.has(tr.variantId);
+      const reached = refCount >= tr.threshold;
+      const icon = got ? "✅" : reached ? "🎉" : "⬜";
+      const status = got
+        ? t(lang, "gifts_tier_got")
+        : reached
+        ? t(lang, "gifts_tier_ready")
+        : t(lang, "gifts_tier_left", { n: tr.threshold - refCount });
+      return `${icon} ${tr.threshold} ${t(lang, "gifts_tier_friends")} → <b>${esc(nameFor(tr.variantId))}</b> — ${status}`;
+    })
+    .join("\n");
 
   const kb = new InlineKeyboard();
-
-  // Progress bar
-  const filled = Math.min(refCount, threshold);
-  const bar = "▓".repeat(filled) + "░".repeat(threshold - filled);
-  const text = t(lang, "gifts_title", { n: threshold, c: refCount, product: productName }) +
-    `\n\n${bar} ${filled}/${threshold}` +
-    `\n\n🔗 ${lang === "ru" ? "Ваша ссылка" : lang === "uz" ? "Havolangiz" : "Your link"}:\n<code>${link}</code>`;
+  const text =
+    `${t(lang, "gifts_title_v2")}\n\n${tierLines}\n\n` +
+    `👤 ${t(lang, "p_invited")}: <b>${refCount}</b>\n\n` +
+    `🔗 ${lang === "ru" ? "Ваша ссылка" : lang === "uz" ? "Havolangiz" : "Your link"}:\n<code>${link}</code>`;
 
   kb.url(t(lang, "gifts_share"), `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(lang === "ru" ? `Заходи в бот и получай подарки! 🎁` : `Join the bot and get gifts! 🎁`)}`).row();
   kb.text(t(lang, "btn_refer"), "ref").row();
@@ -1375,6 +1426,31 @@ async function enterShop(ctx: Context, user: Awaited<ReturnType<typeof getUser>>
   if (!user.termsAcceptedAt) return sendTermsGate(ctx, user.lang);
   return sendHome(ctx, user);
 }
+
+// ---------- mandatory terms-acceptance gate ----------
+// Nothing works until the user taps "Принимаю условия" — not the reply
+// keyboard (sendTermsGate removes it), and not old inline buttons still
+// sitting in the chat history either: any action from a user who hasn't
+// accepted bounces back to the terms message instead of running.
+bot.use(async (ctx, next) => {
+  if (String(ctx.from?.id) === ADMIN_ID) return next();
+
+  const data = ctx.callbackQuery?.data;
+  if (data === "terms_accept" || data?.startsWith("lang:")) return next();
+
+  const text = ctx.message?.text;
+  if (text?.startsWith("/start")) return next();
+
+  const tgId = String(ctx.from?.id ?? "");
+  if (!tgId) return next();
+  const existingUser = await db.botUser.findUnique({ where: { tgId } });
+  if (!existingUser || existingUser.termsAcceptedAt) return next();
+
+  if (ctx.callbackQuery) {
+    await ctx.answerCallbackQuery({ text: t(existingUser.lang, "terms_required_toast"), show_alert: true }).catch(() => {});
+  }
+  return sendTermsGate(ctx, existingUser.lang);
+});
 
 // ---------- mandatory subscription check middleware ----------
 bot.use(async (ctx, next) => {
@@ -1738,26 +1814,42 @@ bot.on("message:text", async (ctx) => {
       // Done collecting, clean up state
       pending.delete(key);
 
-      const allLinks = state.collectedLinks || [];
-      if (allLinks.length === 0) {
+      const rawLinks = state.collectedLinks || [];
+      if (rawLinks.length === 0) {
         return ctx.reply("⚠️ Ссылки не найдены. Пожалуйста, отправьте список ссылок еще раз:");
       }
 
+      // A pasted URL sometimes carries a stray line break mid-way (copied from
+      // a source that soft-wrapped it), which would otherwise split ONE link
+      // into two numbered entries. Any "line" that isn't itself a fresh
+      // http(s):// link is a continuation of the previous one — rejoin it.
+      const allLinks: string[] = [];
+      for (const line of rawLinks) {
+        if (allLinks.length > 0 && !/^https?:\/\//i.test(line)) {
+          allLinks[allLinks.length - 1] += line;
+        } else {
+          allLinks.push(line);
+        }
+      }
+
       let current = state.startIndex;
-      const formattedLines = allLinks.map((link) => `<code>${current++}. ${link}</code>`);
+      // Query strings in these links are full of "&" — parse_mode HTML requires
+      // it (and "<"/">") escaped, or Telegram silently rejects the whole
+      // message; that was dropping entire chunks of links without any error.
+      const formattedLines = allLinks.map((link) => `<code>${current++}. ${esc(link)}</code>`);
 
       await ctx.reply("✅ <b>Форматированный список:</b>", { parse_mode: "HTML" }).catch(() => {});
 
       let currentMessage = "";
       for (const line of formattedLines) {
         if (currentMessage.length + line.length + 1 > 4000) {
-          await ctx.reply(currentMessage, { parse_mode: "HTML" }).catch(() => {});
+          await ctx.reply(currentMessage, { parse_mode: "HTML" }).catch((e) => console.error("[bot] /code chunk failed:", (e as Error).message));
           currentMessage = "";
         }
         currentMessage += (currentMessage ? "\n" : "") + line;
       }
       if (currentMessage) {
-        await ctx.reply(currentMessage, { parse_mode: "HTML" }).catch(() => {});
+        await ctx.reply(currentMessage, { parse_mode: "HTML" }).catch((e) => console.error("[bot] /code chunk failed:", (e as Error).message));
       }
     }, 1000);
 
