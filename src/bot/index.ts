@@ -105,6 +105,7 @@ const pending = new Map<
   | { type: "promo" }
   | { type: "formatter_index" }
   | { type: "formatter_links"; startIndex: number; collectedLinks?: string[]; timeoutId?: any }
+  | { type: "reject_custom_reason"; topupId: number }
 >();
 
 const bot = new Bot(token);
@@ -1524,6 +1525,128 @@ async function creditPaidTopUp(ctx: Context, amount: number, method: string, cha
     });
   }
 }
+const REJECT_REASONS = [
+  {
+    key: "bad_photo",
+    labelRu: "📷 Нечёткий чек / Не читается",
+    textRu: "Ваш чек нечитаем или размыт. Пожалуйста, отправьте чёткий скриншот или фото чека.",
+    textEn: "Your receipt photo is blurry or unreadable. Please send a clear screenshot or photo of the receipt.",
+    textUz: "Chekingiz o'qib bo'lmaydigan yoki xira. Iltimos, chekning aniq fotosuratini/skrinshotini yuboring.",
+  },
+  {
+    key: "wrong_amount",
+    labelRu: "💰 Неверная сумма в чеке",
+    textRu: "Сумма в отправленном чеке не совпадает с заявленной суммой пополнения.",
+    textEn: "The amount on the receipt does not match the requested top-up amount.",
+    textUz: "Chekdagi summa to'lov summasiga mos kelmaydi.",
+  },
+  {
+    key: "not_received",
+    labelRu: "💳 Оплата не поступила",
+    textRu: "Средства по данному чеку ещё не поступили на наш счёт. Проверьте статус перевода в банке.",
+    textEn: "Payment for this receipt has not reached our account yet. Please check transfer status in your banking app.",
+    textUz: "Ushbu chek bo'yicha mablag'lar hali hisobimizga tushmadi. Bank ilovasida o'tkazma holatini tekshiring.",
+  },
+  {
+    key: "duplicate",
+    labelRu: "🔄 Повторный / использованный чек",
+    textRu: "Этот чек уже был обработан ранее или использован другим пользователем.",
+    textEn: "This receipt has already been processed or used previously.",
+    textUz: "Ushbu chek ilgari ishlatilgan yoki boshqa foydalanuvchi tomonidan yuborilgan.",
+  },
+];
+
+async function promptRejectReason(ctx: Context, id: number) {
+  if (!isAdmin(ctx)) return ctx.answerCallbackQuery({ text: "Admin only", show_alert: true });
+  const topup = await db.topUp.findUnique({ where: { id }, include: { user: true } });
+  if (!topup || !["pending", "review", "awaiting_receipt"].includes(topup.status)) {
+    return ctx.answerCallbackQuery({ text: "Уже обработано", show_alert: true });
+  }
+
+  const kb = new InlineKeyboard();
+  for (let i = 0; i < REJECT_REASONS.length; i++) {
+    kb.text(REJECT_REASONS[i].labelRu, `rjs:${id}:${i}`).row();
+  }
+  kb.text("✏️ Написать свою причину", `rjs:${id}:custom`).row();
+  kb.text("⬅️ Отмена", `rjs:${id}:cancel`).row();
+
+  await ctx.editMessageText(
+    `❌ <b>Отклонение чека #${id}</b>\n\n` +
+    `Сумма: ${money(topup.amount, topup.user.lang)}\n` +
+    `Покупатель: ${topup.user.firstName ?? ""} @${topup.user.username ?? "—"} (${topup.user.tgId})\n\n` +
+    `Выберите причину отклонения:`,
+    { parse_mode: "HTML", reply_markup: kb }
+  ).catch(() => {});
+  await ctx.answerCallbackQuery().catch(() => {});
+}
+
+async function handleRejectChoice(ctx: Context, id: number, choice: string) {
+  if (!isAdmin(ctx)) return ctx.answerCallbackQuery({ text: "Admin only", show_alert: true });
+  const topup = await db.topUp.findUnique({ where: { id }, include: { user: true } });
+  if (!topup || !["pending", "review", "awaiting_receipt"].includes(topup.status)) {
+    return ctx.answerCallbackQuery({ text: "Уже обработано", show_alert: true });
+  }
+
+  if (choice === "cancel") {
+    const kb = new InlineKeyboard().text("✅ Зачислить", `ap:${id}`).text("❌ Отклонить", `rj:${id}`);
+    let adminText = `🧾 Новый чек на оплату #${id}\nСумма: ${money(topup.amount, topup.user.lang)}\nПокупатель: ${topup.user.firstName ?? ""} @${topup.user.username ?? "—"} (${topup.user.tgId})\nПроверьте чек и зачислите или отклоните:`;
+    await ctx.editMessageText(adminText, { reply_markup: kb }).catch(() => {});
+    return ctx.answerCallbackQuery().catch(() => {});
+  }
+
+  if (choice === "custom") {
+    pending.set(String(ctx.from?.id), { type: "reject_custom_reason", topupId: id });
+    await ctx.editMessageText(
+      `✏️ <b>Напишите причину отклонения для чека #${id}:</b>\n\n` +
+      `Отправьте текстовое сообщение с причиной. Оно будет отправлено пользователю.`
+    ).catch(() => {});
+    return ctx.answerCallbackQuery().catch(() => {});
+  }
+
+  const reasonIdx = Number(choice);
+  const reason = REJECT_REASONS[reasonIdx];
+  if (!reason) return ctx.answerCallbackQuery({ text: "Ошибка выбора", show_alert: true });
+
+  await executeRejectTopup(ctx, topup, reason.labelRu, reason);
+}
+
+async function executeRejectTopup(
+  ctx: Context,
+  topup: Awaited<ReturnType<typeof db.topUp.findUnique>> & { user: any },
+  adminLabel: string,
+  reasonObj?: (typeof REJECT_REASONS)[number],
+  customText?: string
+) {
+  if (!topup) return;
+  await db.topUp.update({ where: { id: topup.id }, data: { status: "rejected" } });
+
+  if (ctx.callbackQuery) {
+    await ctx.editMessageText(`❌ #${topup.id} Отклонен (${esc(adminLabel)})`).catch(() => {});
+    await ctx.answerCallbackQuery().catch(() => {});
+  } else {
+    await ctx.reply(`❌ Чек #${topup.id} отклонен (${esc(adminLabel)})`).catch(() => {});
+  }
+
+  const ulang = topup.user.lang;
+  let reasonForUser = "";
+  if (reasonObj) {
+    reasonForUser = ulang === "uz" ? reasonObj.textUz : ulang === "en" ? reasonObj.textEn : reasonObj.textRu;
+  } else if (customText) {
+    reasonForUser = customText;
+  }
+
+  const username = (await setting("support_username", "")).replace(/^@/, "");
+  const kb = new InlineKeyboard();
+  if (username) kb.url(t(ulang, "support_write"), `https://t.me/${username}`).row();
+  kb.text(t(ulang, "to_shop"), "m:0:all");
+
+  const msgText =
+    `❌ <b>Ваш чек #${topup.id} на сумму ${money(topup.amount, ulang)} был отклонен.</b>` +
+    (reasonForUser ? `\n\n<b>Причина:</b> ${esc(reasonForUser)}` : "");
+
+  await bot.api.sendMessage(topup.user.tgId, msgText, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+}
+
 async function resolveTopUp(ctx: Context, id: number, approve: boolean) {
   if (!isAdmin(ctx)) return ctx.answerCallbackQuery({ text: "Admin only", show_alert: true });
   const topup = await db.topUp.findUnique({ where: { id }, include: { user: true } });
@@ -1549,14 +1672,8 @@ async function resolveTopUp(ctx: Context, id: number, approve: boolean) {
       }
     }
   } else {
-    await db.topUp.update({ where: { id }, data: { status: "rejected" } });
-    await ctx.editMessageText(`❌ #${id}`).catch(() => {});
-    const username = (await setting("support_username", "")).replace(/^@/, "");
-    const kb = new InlineKeyboard();
-    if (username) kb.url(t(ulang, "support_write"), `https://t.me/${username}`);
-    await ctx.api.sendMessage(topup.user.tgId, t(ulang, "topup_rejected"), username ? { reply_markup: kb } : {}).catch(() => {});
+    await promptRejectReason(ctx, id);
   }
-  await ctx.answerCallbackQuery().catch(() => {});
 }
 
 // ---------- language ----------
@@ -2020,6 +2137,7 @@ bot.on("callback_query:data", async (ctx) => {
     if (tag === "tman_buy") { await ctx.answerCallbackQuery().catch(() => {}); return requestTopUp(ctx, lang, Number(rest[0]), "manual", `buy:${rest[1]}:${rest[2]}`); }
     if (tag === "ap") return resolveTopUp(ctx, Number(rest[0]), true);
     if (tag === "rj") return resolveTopUp(ctx, Number(rest[0]), false);
+    if (tag === "rjs") return handleRejectChoice(ctx, Number(rest[0]), rest[1]);
     return ctx.answerCallbackQuery();
   } catch (e) {
     console.error("[bot] callback error:", (e as Error).message);
@@ -2032,7 +2150,21 @@ bot.on("message:text", async (ctx) => {
   const key = String(ctx.from?.id);
   const state = pending.get(key);
   if (!state) return;
-  
+
+  if (state.type === "reject_custom_reason") {
+    pending.delete(key);
+    const customReason = (ctx.message.text ?? "").trim();
+    if (!customReason) {
+      return ctx.reply("⚠️ Текст причины не может быть пустым. Пожалуйста, напишите причину ещё раз:");
+    }
+    const topup = await db.topUp.findUnique({ where: { id: state.topupId }, include: { user: true } });
+    if (!topup || !["pending", "review", "awaiting_receipt"].includes(topup.status)) {
+      return ctx.reply("⚠️ Этот чек уже обработан или не найден.");
+    }
+    await executeRejectTopup(ctx, topup, customReason, undefined, customReason);
+    return;
+  }
+
   if (state.type !== "formatter_links") {
     pending.delete(key);
   }
