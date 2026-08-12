@@ -190,6 +190,7 @@ export async function updateVariantAction(formData: FormData) {
       durationDays: Math.round(num(formData.get("durationDays"))),
       priceUzs, // сум — the only price the bot uses
       priceStars: Math.round(num(formData.get("priceStars"))),
+      pointsCost: Math.max(0, Math.round(num(formData.get("pointsCost")))),
       manualDelivery: manual,
       manualStockLimit,
       isActive: formData.get("isActive") === "on",

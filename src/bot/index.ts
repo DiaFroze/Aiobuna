@@ -191,6 +191,20 @@ async function effPriceFor(userId: number, variantId: number, basePriceUzs: numb
   }
 }
 
+// Referral "points" a user currently has to spend: real invitees + admin
+// bonus - already spent on referral-priced purchases. Falls back gracefully
+// if the spentReferrals column hasn't been added yet (pre-migration).
+async function availableReferralPoints(user: { id: number; tgId: string; bonusReferrals?: number | null; spentReferrals?: number | null }): Promise<number> {
+  try {
+    const realRefs = await db.botUser.count({ where: { referredBy: user.tgId } });
+    const total = realRefs + (user.bonusReferrals ?? 0);
+    return Math.max(0, total - (user.spentReferrals ?? 0));
+  } catch (e) {
+    console.error("[bot] availableReferralPoints failed:", (e as Error).message);
+    return 0;
+  }
+}
+
 // Button colors (Bot API 9.4): success=green, danger=red, primary=blue.
 function styleFor(data?: string): "primary" | "success" | "danger" | undefined {
   if (data === "noop") return undefined;
@@ -583,6 +597,7 @@ async function showProduct(ctx: Context, id: number, back: string) {
 
   const variants = p.plans.flatMap((pl) => pl.variants);
   const overrides = await priceOverridesFor(user.id, variants.map((v) => v.id));
+  const availablePoints = await availableReferralPoints(user);
   const kb = new InlineKeyboard();
   for (const v of variants) {
     const st = await availableStock(v);
@@ -592,6 +607,14 @@ async function showProduct(ctx: Context, id: number, back: string) {
     const dur = v.durationDays > 0 ? ` · ${v.durationDays}д` : "";
     const vt = await locName(v.titleRu, v.titleUz, lang);
     kb.text(`${vt} — ${price}${dur}`, `b:${v.id}:${back}`).icon("5424972470023104089").row();
+    // Referrals-price row: shown only when admin set a pointsCost for this
+    // variant. Label mentions the user's own available points so they see
+    // whether they can afford it without extra taps.
+    if (v.pointsCost > 0 && st > 0) {
+      const canAfford = availablePoints >= v.pointsCost;
+      const icon = canAfford ? "🎁" : "🔒";
+      kb.text(`${icon} ${vt} — ${v.pointsCost} реф. (у вас: ${availablePoints})`, `rb:${v.id}:${back}`).row();
+    }
   }
   kb.text(t(lang, "back_to_list"), `m:${back}`).row();
 
@@ -1124,6 +1147,57 @@ async function doBuy(ctx: Context, variantId: number, qty: number) {
   } else {
     await ctx.editMessageText(promptText, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
   }
+}
+
+// Purchase paid in referral points (not сум). Reuses executePurchase's
+// full delivery path (stock → supplier → manual-ticket fallback) by
+// pre-crediting the user's balance with the exact item price and then
+// spending it, atomically incrementing spentReferrals in the same tx.
+// Result: everything downstream (order records, delivery, admin alerts)
+// stays identical to a normal purchase; the "money" is just internal.
+async function buyForReferrals(ctx: Context, variantId: number) {
+  const user = await getUser(ctx);
+  const lang = user.lang;
+  const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
+  if (!v || !v.isActive) return ctx.answerCallbackQuery({ text: t(lang, "plan_unavailable"), show_alert: true });
+  if (v.pointsCost <= 0) return ctx.answerCallbackQuery({ text: "Этот товар не продаётся за рефералы.", show_alert: true });
+
+  const points = await availableReferralPoints(user);
+  if (points < v.pointsCost) {
+    return ctx.answerCallbackQuery({
+      text: `Недостаточно рефералов: у вас ${points}, нужно ${v.pointsCost}. Пригласите ещё ${v.pointsCost - points}.`,
+      show_alert: true,
+    });
+  }
+
+  const max = await availableStock(v);
+  if (max <= 0) return ctx.answerCallbackQuery({ text: t(lang, "out_of_stock"), show_alert: true });
+
+  const eff = await effPriceFor(user.id, variantId, v.priceUzs);
+  const itemPrice = Math.max(1, eff.price); // needs a positive "amount" for the balance flow
+
+  // Atomically: spend the points, top up the balance with exactly one item's
+  // price. Fails cleanly if the user's points changed between UI and click.
+  const reserve = await db.$transaction(async (tx) => {
+    const fresh = await tx.botUser.findUnique({ where: { id: user.id } });
+    if (!fresh) return { error: "user" as const };
+    const realRefs = await tx.botUser.count({ where: { referredBy: fresh.tgId } });
+    const stillHave = Math.max(0, realRefs + (fresh.bonusReferrals ?? 0) - (fresh.spentReferrals ?? 0));
+    if (stillHave < v.pointsCost) return { error: "points" as const };
+    await tx.botUser.update({
+      where: { id: user.id },
+      data: { spentReferrals: { increment: v.pointsCost }, balance: { increment: itemPrice } },
+    });
+    return { ok: true as const };
+  });
+
+  if ("error" in reserve) {
+    await ctx.answerCallbackQuery({ text: reserve.error === "points" ? "Ваши рефералы изменились, попробуйте ещё раз." : "Ошибка", show_alert: true }).catch(() => {});
+    return;
+  }
+
+  await ctx.answerCallbackQuery({ text: `✅ Списано ${v.pointsCost} реф.` }).catch(() => {});
+  await executePurchase(user.tgId, variantId, 1);
 }
 
 // ---------- views ----------
@@ -1959,6 +2033,7 @@ bot.on("callback_query:data", async (ctx) => {
     if (tag === "q") return showQtyChooser(ctx, Number(rest[0]), Number(rest[1]) || 1, `${rest[2] ?? "0"}:${rest[3] ?? "all"}`, true);
     if (tag === "qi") { pending.set(String(ctx.from?.id), { type: "qty", variantId: Number(rest[0]), back: `${rest[1] ?? "0"}:${rest[2] ?? "all"}` }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "enter_qty_msg")); }
     if (tag === "bc") return doBuy(ctx, Number(rest[0]), Number(rest[1]) || 1);
+    if (tag === "rb") return buyForReferrals(ctx, Number(rest[0]));
     if (tag === "meth") return viewMethod(ctx, Number(rest[0]));
     if (tag === "mbuy") return buyMethod(ctx, Number(rest[0]));
     if (tag === "top") { await ctx.answerCallbackQuery().catch(() => {}); const b = await buildTopupMethods(lang, Number(rest[0])); await sendOrEdit(ctx, b.text, { reply_markup: b.kb }); return; }
@@ -2237,6 +2312,8 @@ async function ensureSchema() {
     `CREATE UNIQUE INDEX IF NOT EXISTS "MethodPurchase_methodId_userId_key" ON "MethodPurchase"("methodId", "userId")`,
     `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "bonusReferrals" INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "termsAcceptedAt" TIMESTAMP(3)`,
+    `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "spentReferrals" INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "pointsCost" INTEGER NOT NULL DEFAULT 0`,
     `CREATE TABLE IF NOT EXISTS "ChannelJoinRequest" (
       "id" SERIAL NOT NULL,
       "chatId" TEXT NOT NULL,

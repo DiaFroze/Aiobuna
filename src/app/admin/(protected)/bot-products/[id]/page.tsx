@@ -156,6 +156,10 @@ export default async function BotProductEditPage({ params }: { params: { id: str
                       <input name="priceStars" type="number" step="1" min="0" defaultValue={v.priceStars} className="input mt-1 text-sm" />
                     </div>
                     <div className="md:col-span-1">
+                      <label className="text-[11px] text-muted" title="Цена в рефералах. 0 = нельзя купить за рефералы.">Реф.🤝</label>
+                      <input name="pointsCost" type="number" step="1" min="0" defaultValue={v.pointsCost} className="input mt-1 text-sm" placeholder="0" />
+                    </div>
+                    <div className="md:col-span-1">
                       <label className="text-[11px] text-muted" title="Для ручной выдачи. -1 = безлимит">Лимит</label>
                       <input name="manualStockLimit" type="number" min="-1" defaultValue={v.manualStockLimit} className="input mt-1 text-sm font-mono" placeholder="∞" />
                     </div>
