@@ -41,6 +41,42 @@ const promoInstructionsFile = () => mediaAssetFile("promo-instructions.mp4");
 const howToPayFile = () => mediaAssetFile("how-to-pay.mp4");
 const howToActivateFile = () => mediaAssetFile("how-to-activate.mp4");
 
+// Universal "edit or replace" for callback-driven navigation. Works whether
+// the source message is plain text (edit its text) or a media message
+// (edit its caption, or if that fails, delete + resend). Optionally sends a
+// fresh media message with the given photo as its caption target.
+type SendOrEditOpts = { reply_markup?: InlineKeyboard | undefined; photo?: InputFile | null };
+async function sendOrEdit(ctx: Context, text: string, opts: SendOrEditOpts = {}) {
+  const chatId = ctx.chat?.id;
+  const messageId = ctx.callbackQuery?.message?.message_id;
+  const kb = opts.reply_markup;
+  const photo = opts.photo ?? null;
+
+  // Fresh photo-carrying message: replace whatever's there (or reply if the
+  // source is unknown), so the banner is actually visible.
+  if (photo) {
+    if (chatId && messageId) await ctx.api.deleteMessage(chatId, messageId).catch(() => {});
+    await ctx.replyWithPhoto(photo, { caption: text, parse_mode: "HTML", reply_markup: kb }).catch(async () => {
+      await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+    });
+    return;
+  }
+
+  // No photo: try text edit → caption edit → delete+resend, in that order.
+  if (chatId && messageId) {
+    try {
+      await ctx.api.editMessageText(chatId, messageId, text, { parse_mode: "HTML", reply_markup: kb });
+      return;
+    } catch {}
+    try {
+      await ctx.api.editMessageCaption(chatId, messageId, { caption: text, parse_mode: "HTML", reply_markup: kb });
+      return;
+    } catch {}
+    await ctx.api.deleteMessage(chatId, messageId).catch(() => {});
+  }
+  await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+}
+
 const token = process.env.TELEGRAM_BOT_TOKEN ?? "";
 const ADMIN_ID = String(process.env.TELEGRAM_ADMIN_CHAT_ID ?? "");
 const CARD_PROVIDER_TOKEN = process.env.TELEGRAM_PROVIDER_TOKEN ?? "";
@@ -517,9 +553,19 @@ async function showMenu(ctx: Context, page: number, sort: Sort, edit: boolean, f
   try {
     const user = await getUser(ctx);
     const { text, kb } = await buildMenu(user.lang, user.balance, page, sort, user.id, freebies);
-    const opts = { parse_mode: "HTML" as const, reply_markup: kb };
-    if (edit) await ctx.editMessageText(text, opts).catch(() => {});
-    else await ctx.reply(text, opts);
+    // The main catalog page (not the freebies view) leads with the shop
+    // banner as one combined photo+caption+buttons message. sendOrEdit
+    // handles the media-vs-text edit correctness for callback navigation.
+    const banner = !freebies ? shopBannerFile() : null;
+    if (edit) {
+      await sendOrEdit(ctx, text, { reply_markup: kb, photo: banner });
+    } else if (banner) {
+      await ctx.replyWithPhoto(banner, { caption: text, parse_mode: "HTML", reply_markup: kb }).catch(async () => {
+        await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+      });
+    } else {
+      await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+    }
   } catch (err) {
     console.error("Error in showMenu:", err);
     await ctx.reply(`⚠️ Ошибка в меню: ${(err as Error).message}\n${(err as Error).stack}`).catch(() => {});
@@ -618,10 +664,19 @@ async function showProduct(ctx: Context, id: number, back: string) {
   const suffix = `\n\n${t(lang, "choose_plan")}`;
   text += suffix;
 
+  // Product card uses message entities (custom_emoji/bold), not HTML — so the
+  // parse_mode-based sendOrEdit doesn't apply here. Try in-place text edit
+  // first (fast, no flicker); if the source was a photo message (catalog
+  // banner), delete it and post fresh so the entities render correctly.
   try {
     await ctx.editMessageText(text, { reply_markup: kb, entities });
   } catch {
-    await ctx.editMessageText(`${emojiStr} ${pt}${plainDesc ? `\n\n${plainDesc}` : ""}${suffix}`, { reply_markup: kb }).catch(() => {});
+    await ctx.deleteMessage().catch(() => {});
+    try {
+      await ctx.reply(text, { reply_markup: kb, entities });
+    } catch {
+      await ctx.reply(`${emojiStr} ${pt}${plainDesc ? `\n\n${plainDesc}` : ""}${suffix}`, { reply_markup: kb }).catch(() => {});
+    }
   }
   await ctx.answerCallbackQuery().catch(() => {});
 }
@@ -680,9 +735,11 @@ async function showQtyChooser(ctx: Context, variantId: number, qty: number, back
   const eff = await effPriceFor(user.id, variantId, v.priceUzs);
   const built = await buildQtyChooser(v, lang, user.balance, qty, back, eff.price, eff.label);
   if (!built) return ack({ text: t(lang, "out_of_stock"), show_alert: true });
-  const opts = { parse_mode: "HTML" as const, reply_markup: built.kb };
-  if (edit) await ctx.editMessageText(built.text, opts).catch(() => {});
-  else await ctx.reply(built.text, opts);
+  if (edit) {
+    await sendOrEdit(ctx, built.text, { reply_markup: built.kb });
+  } else {
+    await ctx.reply(built.text, { parse_mode: "HTML", reply_markup: built.kb });
+  }
   await ack();
 }
 
@@ -1291,17 +1348,19 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
   kb.text(t(lang, "btn_refer"), "ref").row();
   kb.text(t(lang, "to_shop"), "m:0:all");
 
-  if (edit) {
-    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
-    return;
-  }
-  // Banner as its own photo, then the tier text with its buttons. Keeping
-  // the buttons on a text message means "К магазину"/"Пригласить" taps can
-  // still edit the message — a photo caption can't be edited to a plain
-  // text message, which was silently breaking those buttons.
+  // Banner + tier text + buttons all as ONE photo message. sendOrEdit
+  // handles callback re-renders correctly (delete+resend when the source
+  // is a photo), so tapping "К магазину" / "Пригласить" always works.
   const banner = giftsBannerFile();
-  if (banner) await ctx.replyWithPhoto(banner).catch(() => {});
-  await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+  if (edit) {
+    await sendOrEdit(ctx, text, { reply_markup: kb, photo: banner });
+  } else if (banner) {
+    await ctx.replyWithPhoto(banner, { caption: text, parse_mode: "HTML", reply_markup: kb }).catch(async () => {
+      await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+    });
+  } else {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+  }
 }
 
 // ---------- top-up ----------
@@ -1466,16 +1525,19 @@ async function sendHome(ctx: Context, user: Awaited<ReturnType<typeof getUser>>)
   // Referral-gift teaser, right after the header — only sent when there's an
   // active campaign the user hasn't already claimed (silent otherwise).
   await showGifts(ctx, false, true).catch(() => {});
-  // Shop banner as its own photo (no caption/keyboard), then the catalog as
-  // a plain-text message with the product buttons. They arrive back-to-back
-  // so it reads as one block visually, but product buttons live on a text
-  // message — that matters because product/qty callbacks edit the message
-  // text (editMessageText), which Telegram refuses on media messages, and
-  // that was silently swallowing every tap on the shop-banner variant.
-  const banner = shopBannerFile();
-  if (banner) await ctx.replyWithPhoto(banner).catch(() => {});
+  // Shop banner + catalog text + product buttons all as ONE photo message.
+  // Product/qty callbacks now use sendOrEdit(), which correctly handles
+  // media-source messages via delete+resend when a plain text edit isn't
+  // possible — so the buttons work even though they live on a photo.
   const menu = await buildMenu(user.lang, user.balance, 0, "all", user.id);
-  await ctx.reply(menu.text, { parse_mode: "HTML", reply_markup: menu.kb });
+  const banner = shopBannerFile();
+  if (banner) {
+    await ctx.replyWithPhoto(banner, { caption: menu.text, parse_mode: "HTML", reply_markup: menu.kb }).catch(async () => {
+      await ctx.reply(menu.text, { parse_mode: "HTML", reply_markup: menu.kb }).catch(() => {});
+    });
+  } else {
+    await ctx.reply(menu.text, { parse_mode: "HTML", reply_markup: menu.kb });
+  }
 }
 
 // Gate every entry into the shop behind a one-time terms acceptance: users who
@@ -1880,15 +1942,15 @@ bot.on("callback_query:data", async (ctx) => {
     }
     const user = await getUser(ctx);
     const lang = user.lang;
-    if (data === "bal") { const { text, kb } = balanceView(lang, user.balance); const _bopts = { parse_mode: "HTML" as const, reply_markup: kb }; await ctx.editMessageText(text, _bopts).catch(() => ctx.reply(text, _bopts).catch(() => {})); return ctx.answerCallbackQuery().catch(() => {}); }
-    if (data === "ord") { const { text, kb } = await ordersView(lang, user.id); const _oopts = { parse_mode: "HTML" as const, reply_markup: kb }; await ctx.editMessageText(text, _oopts).catch(() => ctx.reply(stripTags(text), { reply_markup: kb }).catch(() => {})); return ctx.answerCallbackQuery().catch(() => {}); }
-    if (data === "ref") { const { text, kb } = referView(ctx, user); const _ropts = { parse_mode: "HTML" as const, reply_markup: kb }; await ctx.editMessageText(text, _ropts).catch(() => ctx.reply(text, _ropts).catch(() => {})); return ctx.answerCallbackQuery().catch(() => {}); }
+    if (data === "bal") { const { text, kb } = balanceView(lang, user.balance); await sendOrEdit(ctx, text, { reply_markup: kb }); return ctx.answerCallbackQuery().catch(() => {}); }
+    if (data === "ord") { const { text, kb } = await ordersView(lang, user.id); await sendOrEdit(ctx, text, { reply_markup: kb }); return ctx.answerCallbackQuery().catch(() => {}); }
+    if (data === "ref") { const { text, kb } = referView(ctx, user); await sendOrEdit(ctx, text, { reply_markup: kb }); return ctx.answerCallbackQuery().catch(() => {}); }
     if (data === "topin") { pending.set(String(ctx.from?.id), { type: "topup" }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "enter_amount", { min: money(MIN_TOPUP, lang) })); }
     if (data === "promo") { pending.set(String(ctx.from?.id), { type: "promo" }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "promo_enter")); }
     if (data === "methods_show") { await ctx.answerCallbackQuery().catch(() => {}); return showMethods(ctx); }
-    if (data === "support_show") { const { text, kb } = await supportView(lang); const _sopts = { parse_mode: "HTML" as const, reply_markup: kb, link_preview_options: { is_disabled: true } as const }; await ctx.editMessageText(text, _sopts).catch(() => ctx.reply(text, _sopts).catch(() => {})); return ctx.answerCallbackQuery().catch(() => {}); }
+    if (data === "support_show") { const { text, kb } = await supportView(lang); await sendOrEdit(ctx, text, { reply_markup: kb }); return ctx.answerCallbackQuery().catch(() => {}); }
     if (data === "lang_pick") { await ctx.answerCallbackQuery().catch(() => {}); return showLangPicker(ctx, true); }
-    if (data === "profile_show") { const { text, kb } = await profileView(user); const _popts = { parse_mode: "HTML" as const, reply_markup: kb }; await ctx.editMessageText(text, _popts).catch(() => ctx.reply(text, _popts).catch(() => {})); return ctx.answerCallbackQuery().catch(() => {}); }
+    if (data === "profile_show") { const { text, kb } = await profileView(user); await sendOrEdit(ctx, text, { reply_markup: kb }); return ctx.answerCallbackQuery().catch(() => {}); }
 
     const [tag, ...rest] = data.split(":");
     if (tag === "m") { const page = Number(rest[0]) || 0; const sort = (SORTS.includes(rest[1] as Sort) ? rest[1] : "all") as Sort; await ctx.answerCallbackQuery().catch(() => {}); return showMenu(ctx, page, sort, true); }
@@ -1899,7 +1961,7 @@ bot.on("callback_query:data", async (ctx) => {
     if (tag === "bc") return doBuy(ctx, Number(rest[0]), Number(rest[1]) || 1);
     if (tag === "meth") return viewMethod(ctx, Number(rest[0]));
     if (tag === "mbuy") return buyMethod(ctx, Number(rest[0]));
-    if (tag === "top") { await ctx.answerCallbackQuery().catch(() => {}); const b = await buildTopupMethods(lang, Number(rest[0])); return ctx.editMessageText(b.text, { parse_mode: "HTML", reply_markup: b.kb }).catch(() => {}); }
+    if (tag === "top") { await ctx.answerCallbackQuery().catch(() => {}); const b = await buildTopupMethods(lang, Number(rest[0])); await sendOrEdit(ctx, b.text, { reply_markup: b.kb }); return; }
     if (tag === "tstar") return starsInvoice(ctx, lang, Number(rest[0]));
     if (tag === "tcheck") return startReceiptPayment(ctx, lang, Number(rest[0]));
     if (tag === "tcard") return cardInvoice(ctx, lang, Number(rest[0]));
