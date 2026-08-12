@@ -43,7 +43,7 @@ const RU: Dict = {
   free: "🎁 Бесплатно",
   choose_plan: "Выберите тариф:",
   back_to_list: "⬅️ Назад к списку",
-  terms_title: "📜 <b>AI OBUNA — ПРАВИЛА ПОЛЬЗОВАНИЯ И ПУБЛИЧНАЯ ОФЕРТА</b>\nПоследнее обновление: {date}",
+  terms_title: "📜 <b>AI OBUNA — ПРАВИЛА ПОЛЬЗОВАНИЯ И ПУБЛИЧНАЯ ОФЕРТА</b>",
   terms_intro: "Уважаемый пользователь! Оформляя заказ или производя оплату через бота AI OBUNA, вы подтверждаете, что ознакомились с приведёнными ниже условиями и принимаете их в полном объёме.",
   terms_body:
     "<b>1. Общие положения</b>\n" +
@@ -191,7 +191,7 @@ const EN: Dict = {
   free: "🎁 Free",
   choose_plan: "Choose a plan:",
   back_to_list: "⬅️ Back to list",
-  terms_title: "📜 <b>AI OBUNA — TERMS OF USE & PUBLIC OFFER</b>\nLast updated: {date}",
+  terms_title: "📜 <b>AI OBUNA — TERMS OF USE & PUBLIC OFFER</b>",
   terms_intro: "Dear user! By placing an order or making a payment through the AI OBUNA bot, you confirm that you have read and fully accept the terms below.",
   terms_body:
     "<b>1. General provisions</b>\n" +
@@ -339,7 +339,7 @@ const UZ: Dict = {
   free: "🎁 Bepul",
   choose_plan: "Tarifni tanlang:",
   back_to_list: "⬅️ Ro‘yxatga qaytish",
-  terms_title: "📜 <b>AI OBUNA — FOYDALANISH QOIDALARI VA OMMAVIY OFERTA</b>\nOxirgi yangilanish: {date}",
+  terms_title: "📜 <b>AI OBUNA — FOYDALANISH QOIDALARI VA OMMAVIY OFERTA</b>",
   terms_intro: "Hurmatli foydalanuvchi! AI OBUNA boti orqali buyurtma berish yoki to‘lov qilish orqali siz quyidagi shartlarni to‘liq o‘qib, qabul qilganingizni tasdiqlaysiz.",
   terms_body:
     "<b>1. Umumiy qoidalar</b>\n" +

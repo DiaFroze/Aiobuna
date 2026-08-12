@@ -1161,9 +1161,6 @@ async function supportView(lang: string) {
   return { text: `${t(lang, "support_title")}\n\n${text}`, kb };
 }
 
-const pad2 = (n: number) => String(n).padStart(2, "0");
-const formatDate = (d: Date) => `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.${d.getFullYear()}`;
-
 // Purchase terms / public offer — mandatory onboarding step shown to new users
 // right after they pick a language, and to any existing user who hasn't tapped
 // "Accept" yet (e.g. was created before this feature shipped). Blocks nothing
@@ -1173,18 +1170,16 @@ const formatDate = (d: Date) => `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.
 async function sendTermsGate(ctx: Context, lang: string) {
   const custom = (await setting("terms", "")).trim();
   const body = custom ? (lang === "ru" ? custom : await translate(custom, lang)) : t(lang, "terms_body");
-  const title = t(lang, "terms_title", { date: formatDate(new Date()) });
+  const title = t(lang, "terms_title");
   const intro = esc(t(lang, "terms_intro"));
   const kb = new InlineKeyboard().text(t(lang, "terms_accept_btn"), "terms_accept");
 
-  // A message can only carry ONE reply_markup — an inline keyboard OR a
-  // reply-keyboard removal, never both. Returning users may still have the
-  // old persistent menu visible from before this gate existed, so kill it
-  // with its own message first: only the "Принимаю условия" inline button
-  // below is tappable until that's done.
-  await ctx.reply(title, { parse_mode: "HTML", reply_markup: { remove_keyboard: true } }).catch(() => {});
-
-  const text = `<blockquote>${intro}\n\n${body}</blockquote>`;
+  // One single message: heading + the whole terms text quoted + the accept
+  // button. Any tap on an old persistent reply-keyboard (or any other
+  // pre-acceptance action) is already redirected back here by the
+  // terms-acceptance middleware, so there's no need for a separate
+  // remove_keyboard message any more.
+  const text = `${title}\n\n<blockquote>${intro}\n\n${body}</blockquote>`;
   await ctx
     .reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } })
     .catch(async () => {
@@ -1269,10 +1264,17 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
     await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
     return;
   }
-  // New message (e.g. the /start teaser): lead with the banner image if we have one.
+  // New message (e.g. the /start teaser): one single post — banner photo with
+  // the tier text as its caption (well under Telegram's 1024-char caption cap),
+  // not two separate messages.
   const banner = giftsBannerFile();
-  if (banner) await ctx.replyWithPhoto(banner).catch(() => {});
-  await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+  if (banner) {
+    await ctx.replyWithPhoto(banner, { caption: text, parse_mode: "HTML", reply_markup: kb }).catch(async () => {
+      await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+    });
+  } else {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+  }
 }
 
 // ---------- top-up ----------
