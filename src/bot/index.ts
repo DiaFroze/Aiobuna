@@ -784,6 +784,10 @@ async function executePurchase(tgId: string, variantId: number, qty: number) {
 
   const procMsg = await bot.api.sendMessage(tgId, t(lang, "processing")).catch(() => {});
   const payloads: string[] = [];
+  let stockDeliveredQty = 0;
+  // Supplier delivery is all-or-nothing per call — either sourceOrder() returns
+  // the full requested quantity, or it throws and we got none of it.
+  let supplierOk = supplierQty === 0;
 
   try {
     // 2. Grab stock items
@@ -795,6 +799,7 @@ async function executePurchase(tgId: string, variantId: number, qty: number) {
       });
       if (items.length > 0) {
         payloads.push(items.map((it) => it.payload).join("\n"));
+        stockDeliveredQty = items.length;
         await db.stockItem.updateMany({
           where: { id: { in: items.map((it) => it.id) } },
           data: { isSold: true, soldAt: new Date(), orderId: reserve.orderId },
@@ -808,45 +813,77 @@ async function executePurchase(tgId: string, variantId: number, qty: number) {
       if (src) {
         try {
           const delivered = await sourceOrder(src, v.supplierExternalId, supplierQty);
-          if (delivered.payload) payloads.push(delivered.payload);
-        } catch (supplierErr) {
-          // Supplier failed, but we may have stock items already. Log & continue.
-          console.error("[bot] supplier partial fail:", (supplierErr as Error).message);
-          if (ADMIN_ID) {
-            await bot.api.sendMessage(
-              ADMIN_ID,
-              `⚠️ Частичный заказ #${reserve.orderId}: поставщик недоступен, выдано со склада ${stockQty}/${finalQty}`,
-              { reply_markup: new InlineKeyboard().text("К заказам", `ord`) }
-            ).catch(() => {});
+          if (delivered.payload) {
+            payloads.push(delivered.payload);
+            supplierOk = true;
           }
+        } catch (supplierErr) {
+          console.error("[bot] supplier fail:", (supplierErr as Error).message);
         }
       }
     }
 
-    // 4. Deliver combined payload
     const finalPayload = payloads.filter((p) => p.trim().length > 0).join("\n");
-    const deliveredQty = finalPayload.split("\n").filter((line) => line.trim().length > 0).length;
+    const deliveredQty = stockDeliveredQty + (supplierOk ? supplierQty : 0);
+    const shortfall = finalQty - deliveredQty;
 
-    // Mark as delivered if we got at least 1 item; otherwise failed
-    const status = deliveredQty > 0 ? "delivered" : "failed";
-    await db.botOrder.update({
-      where: { id: reserve.orderId },
-      data: { payload: finalPayload, status },
-    });
+    // Stock/supplier couldn't fully cover the order. Never just refund and shrug —
+    // the charge stays (no need for the buyer to pay again), the order becomes an
+    // "awaiting_delivery" ticket with a verification code, and the admin can
+    // complete it by hand via /give or the "Проверка кодов" admin page (same
+    // mechanism already used for manualDelivery items).
+    if (shortfall > 0) {
+      await db.botOrder.update({
+        where: { id: reserve.orderId },
+        data: { payload: finalPayload, status: "awaiting_delivery" },
+      });
+      const code = generateVerificationCode(reserve.orderId);
+      const supportUser = (await setting("support_username", "Aiobuna_support")).replace(/^@/, "");
+      const kb = new InlineKeyboard().url(t(lang, "admin_topup"), `https://t.me/${supportUser}`).row().text(t(lang, "to_shop"), "m:0:all");
 
-    if (status === "failed") {
-      // Refund if we got nothing
-      await db.botUser.update({ where: { id: user.id }, data: { balance: { increment: total } } });
-      if (procMsg) {
-        await bot.api.editMessageText(tgId, procMsg.message_id, t(lang, "out_of_stock"), {
-          reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all"),
-        }).catch(() => {});
+      if (deliveredQty === 0) {
+        const msg = t(lang, "delivery_issue_full", { id: reserve.orderId, code, admin: supportUser, product: label });
+        if (procMsg) await bot.api.editMessageText(tgId, procMsg.message_id, msg, { parse_mode: "HTML", reply_markup: kb }).catch(() => bot.api.sendMessage(tgId, msg, { parse_mode: "HTML", reply_markup: kb }).catch(() => {}));
+        else await bot.api.sendMessage(tgId, msg, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+      } else {
+        // Deliver the part we did get, then a follow-up with the code for the rest.
+        if (deliveredQty > 5) {
+          const fileContent = Buffer.from(finalPayload, "utf-8");
+          await bot.api.sendDocument(tgId, new InputFile(fileContent, `order_${reserve.orderId}.txt`), {
+            caption: `📄 ${esc(label)} (${deliveredQty}/${finalQty})`,
+          }).catch(() => {});
+        } else if (procMsg) {
+          await bot.api.editMessageText(
+            tgId, procMsg.message_id,
+            `${t(lang, "your_goods")}\n<code>${esc(finalPayload)}</code>`,
+            { parse_mode: "HTML" },
+          ).catch(() => {});
+        }
+        const msg = t(lang, "delivery_issue_partial", { id: reserve.orderId, got: deliveredQty, total: finalQty, missing: shortfall, code, admin: supportUser, product: label });
+        await bot.api.sendMessage(tgId, msg, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
       }
+
       if (ADMIN_ID) {
-        await bot.api.sendMessage(ADMIN_ID, `❌ Заказ #${reserve.orderId} не выполнен: нет источников.`).catch(() => {});
+        const gotLine = deliveredQty > 0 ? `Уже выдано автоматически:\n<code>${esc(finalPayload)}</code>\n\n` : "";
+        await bot.api.sendMessage(
+          ADMIN_ID,
+          `⚠️ <b>Довыдать вручную, заказ #${reserve.orderId}</b> (${deliveredQty}/${finalQty})\n` +
+          `Товар: ${esc(label)} — ${money(total, lang)}\n` +
+          `Покупатель: ${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})\n` +
+          `Код проверки: <code>${code}</code>\n\n` +
+          gotLine +
+          `Довыдать недостающее (${shortfall} шт.): <code>/give ${reserve.orderId} ...</code> или через «Проверка кодов» в панели.`,
+          { parse_mode: "HTML" }
+        ).catch(() => {});
       }
+      if (deliveredQty > 0) await notifySalesGroup(user, label, total);
       return;
     }
+
+    await db.botOrder.update({
+      where: { id: reserve.orderId },
+      data: { payload: finalPayload, status: "delivered" },
+    });
 
     // Success: show delivery
     const u = await db.botUser.findUnique({ where: { id: user.id } });
