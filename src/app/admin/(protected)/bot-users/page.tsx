@@ -11,9 +11,11 @@ function money(amount: number) {
 export default async function BotUsersPage({
   searchParams,
 }: {
-  searchParams: { search?: string };
+  searchParams: { search?: string; page?: string };
 }) {
   const search = (searchParams.search ?? "").trim();
+  const PAGE_SIZE = 100;
+  const page = Math.max(1, Math.floor(Number(searchParams.page) || 1));
 
   if (!botConfigured()) {
     return (
@@ -24,20 +26,25 @@ export default async function BotUsersPage({
     );
   }
 
-  // Retrieve users matching search query (all users if search is empty, limit to 50 for performance)
-  const users = await botDb.botUser.findMany({
-    where: search
-      ? {
-          OR: [
-            { tgId: { contains: search } },
-            { username: { contains: search } },
-            { firstName: { contains: search } },
-          ],
-        }
-      : undefined,
-    orderBy: { createdAt: "desc" },
-    take: 50,
-  });
+  const where = search
+    ? {
+        OR: [
+          { tgId: { contains: search } },
+          { username: { contains: search } },
+          { firstName: { contains: search } },
+        ],
+      }
+    : undefined;
+  const [totalUsers, users] = await Promise.all([
+    botDb.botUser.count({ where }),
+    botDb.botUser.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      skip: (page - 1) * PAGE_SIZE,
+      take: PAGE_SIZE,
+    }),
+  ]);
+  const totalPages = Math.max(1, Math.ceil(totalUsers / PAGE_SIZE));
 
   // Real invited counts (referredBy = referrer's tgId), aggregated in one query.
   const refGroups = await botDb.botUser.groupBy({
@@ -249,6 +256,39 @@ export default async function BotUsersPage({
               ))}
             </tbody>
           </table>
+        )}
+
+        {totalUsers > 0 && (
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm">
+            <div className="text-muted">
+              Всего: <b>{totalUsers}</b>
+              {totalPages > 1 && (
+                <>
+                  {" "}· страница <b>{page}</b> из <b>{totalPages}</b>
+                </>
+              )}
+            </div>
+            {totalPages > 1 && (
+              <div className="flex gap-2">
+                {page > 1 && (
+                  <a
+                    href={`?${new URLSearchParams({ ...(search && { search }), page: String(page - 1) }).toString()}`}
+                    className="btn btn-sm"
+                  >
+                    ← Назад
+                  </a>
+                )}
+                {page < totalPages && (
+                  <a
+                    href={`?${new URLSearchParams({ ...(search && { search }), page: String(page + 1) }).toString()}`}
+                    className="btn btn-sm"
+                  >
+                    Вперёд →
+                  </a>
+                )}
+              </div>
+            )}
+          </div>
         )}
       </div>
     </div>

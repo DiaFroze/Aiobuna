@@ -1295,17 +1295,13 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
     await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
     return;
   }
-  // New message (e.g. the /start teaser): one single post — banner photo with
-  // the tier text as its caption (well under Telegram's 1024-char caption cap),
-  // not two separate messages.
+  // Banner as its own photo, then the tier text with its buttons. Keeping
+  // the buttons on a text message means "К магазину"/"Пригласить" taps can
+  // still edit the message — a photo caption can't be edited to a plain
+  // text message, which was silently breaking those buttons.
   const banner = giftsBannerFile();
-  if (banner) {
-    await ctx.replyWithPhoto(banner, { caption: text, parse_mode: "HTML", reply_markup: kb }).catch(async () => {
-      await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
-    });
-  } else {
-    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
-  }
+  if (banner) await ctx.replyWithPhoto(banner).catch(() => {});
+  await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
 }
 
 // ---------- top-up ----------
@@ -1470,16 +1466,16 @@ async function sendHome(ctx: Context, user: Awaited<ReturnType<typeof getUser>>)
   // Referral-gift teaser, right after the header — only sent when there's an
   // active campaign the user hasn't already claimed (silent otherwise).
   await showGifts(ctx, false, true).catch(() => {});
-  // Catalog: one message — the shop banner with the balance/catalog text as its caption.
-  const menu = await buildMenu(user.lang, user.balance, 0, "all", user.id);
+  // Shop banner as its own photo (no caption/keyboard), then the catalog as
+  // a plain-text message with the product buttons. They arrive back-to-back
+  // so it reads as one block visually, but product buttons live on a text
+  // message — that matters because product/qty callbacks edit the message
+  // text (editMessageText), which Telegram refuses on media messages, and
+  // that was silently swallowing every tap on the shop-banner variant.
   const banner = shopBannerFile();
-  if (banner) {
-    await ctx.replyWithPhoto(banner, { caption: menu.text, parse_mode: "HTML", reply_markup: menu.kb }).catch(async () => {
-      await ctx.reply(menu.text, { parse_mode: "HTML", reply_markup: menu.kb }).catch(() => {});
-    });
-  } else {
-    await ctx.reply(menu.text, { parse_mode: "HTML", reply_markup: menu.kb });
-  }
+  if (banner) await ctx.replyWithPhoto(banner).catch(() => {});
+  const menu = await buildMenu(user.lang, user.balance, 0, "all", user.id);
+  await ctx.reply(menu.text, { parse_mode: "HTML", reply_markup: menu.kb });
 }
 
 // Gate every entry into the shop behind a one-time terms acceptance: users who
@@ -1653,6 +1649,50 @@ bot.command("stock", async (ctx) => {
   await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
 });
 
+// Admin broadcast: /post <text>  OR  reply to any message with /post
+// Sends the message to every bot user. HTML formatting supported; premium
+// emojis via <tg-emoji emoji-id="..."> tags carry over. Reply-mode uses
+// copyMessage so photos/videos/stickers with premium emoji in captions are
+// forwarded exactly (no "Forwarded from" header).
+bot.command("post", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const replyTo = ctx.message?.reply_to_message;
+  const text = (ctx.match ?? "").trim();
+  if (!replyTo && !text) {
+    return ctx.reply(
+      "📢 Формат:\n" +
+      "  <code>/post ваше сообщение</code> — рассылка текста (HTML + &lt;tg-emoji&gt; поддерживаются)\n" +
+      "  Или ответьте на любое сообщение командой <code>/post</code> — отправлю точную копию всем.",
+      { parse_mode: "HTML" },
+    );
+  }
+  const status = await ctx.reply("📢 Рассылка запущена…").catch(() => null);
+  const users = await db.botUser.findMany({ select: { tgId: true } });
+  let ok = 0, fail = 0;
+  const chunk = 25; // small parallel batches — polite to Telegram, still fast
+  for (let i = 0; i < users.length; i += chunk) {
+    await Promise.all(
+      users.slice(i, i + chunk).map(async (u) => {
+        try {
+          if (replyTo) {
+            await ctx.api.copyMessage(u.tgId, ctx.chat!.id, replyTo.message_id);
+          } else {
+            await ctx.api.sendMessage(u.tgId, text, { parse_mode: "HTML", link_preview_options: { is_disabled: true } });
+          }
+          ok++;
+        } catch {
+          fail++;
+        }
+      }),
+    );
+    // ~30 msg/s is well under Telegram's global rate limit; small pause per batch.
+    await new Promise((r) => setTimeout(r, 900));
+  }
+  const done = `📢 Готово: доставлено <b>${ok}</b> · не доставлено <b>${fail}</b> (всего ${users.length})`;
+  if (status) await ctx.api.editMessageText(ctx.chat!.id, status.message_id, done, { parse_mode: "HTML" }).catch(() => {});
+  else await ctx.reply(done, { parse_mode: "HTML" }).catch(() => {});
+});
+
 // Formatter: /code — format links into numbered copy-on-tap lines
 bot.command("code", async (ctx) => {
   const allowed = String(ctx.from?.id) === ADMIN_ID || (await db.botUser.findUnique({ where: { tgId: String(ctx.from?.id) } }))?.isFormatterAllowed;
@@ -1799,6 +1839,7 @@ bot.hears(btnVariants("btn_language"), (ctx) => showLangPicker(ctx, false));
 // ---------- inline callbacks ----------
 bot.on("callback_query:data", async (ctx) => {
   const data = ctx.callbackQuery.data;
+  console.log(`[bot] callback from ${ctx.from?.id}: "${data}"`);
   try {
     if (data === "noop") return ctx.answerCallbackQuery();
     if (data === "check_subs") {
@@ -1839,15 +1880,15 @@ bot.on("callback_query:data", async (ctx) => {
     }
     const user = await getUser(ctx);
     const lang = user.lang;
-    if (data === "bal") { const { text, kb } = balanceView(lang, user.balance); await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {}); return ctx.answerCallbackQuery().catch(() => {}); }
-    if (data === "ord") { const { text, kb } = await ordersView(lang, user.id); await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => ctx.reply(stripTags(text), { reply_markup: kb }).catch(() => {})); return ctx.answerCallbackQuery().catch(() => {}); }
-    if (data === "ref") { const { text, kb } = referView(ctx, user); await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {}); return ctx.answerCallbackQuery().catch(() => {}); }
+    if (data === "bal") { const { text, kb } = balanceView(lang, user.balance); const _bopts = { parse_mode: "HTML" as const, reply_markup: kb }; await ctx.editMessageText(text, _bopts).catch(() => ctx.reply(text, _bopts).catch(() => {})); return ctx.answerCallbackQuery().catch(() => {}); }
+    if (data === "ord") { const { text, kb } = await ordersView(lang, user.id); const _oopts = { parse_mode: "HTML" as const, reply_markup: kb }; await ctx.editMessageText(text, _oopts).catch(() => ctx.reply(stripTags(text), { reply_markup: kb }).catch(() => {})); return ctx.answerCallbackQuery().catch(() => {}); }
+    if (data === "ref") { const { text, kb } = referView(ctx, user); const _ropts = { parse_mode: "HTML" as const, reply_markup: kb }; await ctx.editMessageText(text, _ropts).catch(() => ctx.reply(text, _ropts).catch(() => {})); return ctx.answerCallbackQuery().catch(() => {}); }
     if (data === "topin") { pending.set(String(ctx.from?.id), { type: "topup" }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "enter_amount", { min: money(MIN_TOPUP, lang) })); }
     if (data === "promo") { pending.set(String(ctx.from?.id), { type: "promo" }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "promo_enter")); }
     if (data === "methods_show") { await ctx.answerCallbackQuery().catch(() => {}); return showMethods(ctx); }
-    if (data === "support_show") { const { text, kb } = await supportView(lang); await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {}); return ctx.answerCallbackQuery().catch(() => {}); }
+    if (data === "support_show") { const { text, kb } = await supportView(lang); const _sopts = { parse_mode: "HTML" as const, reply_markup: kb, link_preview_options: { is_disabled: true } as const }; await ctx.editMessageText(text, _sopts).catch(() => ctx.reply(text, _sopts).catch(() => {})); return ctx.answerCallbackQuery().catch(() => {}); }
     if (data === "lang_pick") { await ctx.answerCallbackQuery().catch(() => {}); return showLangPicker(ctx, true); }
-    if (data === "profile_show") { const { text, kb } = await profileView(user); await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {}); return ctx.answerCallbackQuery().catch(() => {}); }
+    if (data === "profile_show") { const { text, kb } = await profileView(user); const _popts = { parse_mode: "HTML" as const, reply_markup: kb }; await ctx.editMessageText(text, _popts).catch(() => ctx.reply(text, _popts).catch(() => {})); return ctx.answerCallbackQuery().catch(() => {}); }
 
     const [tag, ...rest] = data.split(":");
     if (tag === "m") { const page = Number(rest[0]) || 0; const sort = (SORTS.includes(rest[1] as Sort) ? rest[1] : "all") as Sort; await ctx.answerCallbackQuery().catch(() => {}); return showMenu(ctx, page, sort, true); }
