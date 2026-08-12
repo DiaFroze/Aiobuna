@@ -244,9 +244,15 @@ async function stockMap(): Promise<Map<number, number>> {
   const rows = await db.stockItem.groupBy({ by: ["variantId"], where: { isSold: false }, _count: { _all: true } });
   return new Map(rows.map((r) => [r.variantId, r._count._all]));
 }
+// Sentinel "stock" used internally for manual-delivery items with no explicit
+// cap (admin fulfils by hand, so supply is effectively unlimited). Never show
+// this number to the buyer as-is — render it via stockDisplay() instead.
+const STOCK_UNLIMITED = 999999;
+const stockDisplay = (n: number): string => (n >= STOCK_UNLIMITED ? "♾" : String(n));
+
 async function availableStock(v: { id: number; autoSupplier: boolean; supplierStock: number; manualDelivery?: boolean; manualStockLimit?: number }): Promise<number> {
   if (v.manualDelivery) {
-    return v.manualStockLimit !== undefined && v.manualStockLimit >= 0 ? v.manualStockLimit : 999999;
+    return v.manualStockLimit !== undefined && v.manualStockLimit >= 0 ? v.manualStockLimit : STOCK_UNLIMITED;
   }
   const local = await db.stockItem.count({ where: { variantId: v.id, isSold: false } });
   // Local stock + API stock (both available; local is used first in doBuy)
@@ -306,52 +312,86 @@ async function prewarmTranslations() {
 
 // Referral promo: when an inviter reaches the configured number of invites they
 // get a chosen product FREE (once). Configured in the admin panel via settings.
+// The `ref_reward_variant` setting holds one or more variant ids, comma- or
+// newline-separated (e.g. "12,34,56") — a single referral threshold can now
+// unlock a bundle of gifts (Gemini Pro + Canva + CapCut, etc), not just one.
+async function giftVariantIds(): Promise<number[]> {
+  const raw = (await setting("ref_reward_variant", "")).trim();
+  return [...new Set(raw.split(/[,\n]/).map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n > 0))];
+}
+
 async function grantReferralReward(referrerTgId: string) {
   if ((await setting("ref_reward_enabled", "")) !== "1") return;
   const threshold = Number(await setting("ref_reward_threshold", "0"));
-  const variantId = Number(await setting("ref_reward_variant", "0"));
-  if (threshold < 1 || !variantId) return;
+  const variantIds = await giftVariantIds();
+  if (threshold < 1 || variantIds.length === 0) return;
   const referrer = await db.botUser.findUnique({ where: { tgId: referrerTgId } });
   if (!referrer || referrer.refRewardClaimed) return;
   const count = (await db.botUser.count({ where: { referredBy: referrerTgId } })) + (referrer.bonusReferrals || 0);
   if (count < threshold) return;
-  const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
-  if (!v || !v.isActive) return;
   const lang = referrer.lang;
-  const pt = lang === "uz" ? v.plan.product.titleUz || v.plan.product.titleRu : v.plan.product.titleRu;
-  const title = `${pt} — ${lang === "uz" ? v.titleUz || v.titleRu : v.titleRu}`;
 
-  let payload = "";
-  try {
-    const src = v.autoSupplier && v.supplierKey && v.supplierExternalId ? await resolveSource(v.supplierKey) : null;
-    if (src && v.supplierExternalId) {
-      const d = await sourceOrder(src, v.supplierExternalId, 1);
-      payload = d.payload;
-      await db.$transaction([
-        db.botUser.update({ where: { id: referrer.id }, data: { refRewardClaimed: true } }),
-        db.botOrder.create({ data: { userId: referrer.id, variantId, titleRu: `🎁 ${title}`, priceUsdt: 0, payload, source: "referral" } }),
-      ]);
-    } else {
-      const res = await db.$transaction(async (tx) => {
-        const item = await tx.stockItem.findFirst({ where: { variantId, isSold: false }, orderBy: { id: "asc" } });
-        if (!item) return { error: true as const };
-        const order = await tx.botOrder.create({ data: { userId: referrer.id, variantId, titleRu: `🎁 ${title}`, priceUsdt: 0, payload: item.payload, source: "referral" } });
-        await tx.stockItem.update({ where: { id: item.id }, data: { isSold: true, soldAt: new Date(), orderId: order.id } });
-        await tx.botUser.update({ where: { id: referrer.id }, data: { refRewardClaimed: true } });
-        return { payload: item.payload };
-      });
-      if ("error" in res) {
-        if (ADMIN_ID) await bot.api.sendMessage(ADMIN_ID, `⚠️ Реферальная награда: нет склада (вариант #${variantId}, инвайтер ${referrerTgId})`).catch(() => {});
-        return;
-      }
-      payload = res.payload;
-    }
-  } catch (e) {
-    if (ADMIN_ID) await bot.api.sendMessage(ADMIN_ID, `⚠️ Реферальная награда не выдана (${referrerTgId}): ${(e as Error).message}`).catch(() => {});
+  // Idempotent: figure out which configured gifts this referrer already has
+  // (via past "referral"-sourced orders) so a retry never double-delivers.
+  const already = await db.botOrder.findMany({
+    where: { userId: referrer.id, source: "referral", variantId: { in: variantIds } },
+    select: { variantId: true },
+  });
+  const alreadySet = new Set(already.map((o) => o.variantId));
+  const pending = variantIds.filter((id) => !alreadySet.has(id));
+
+  if (pending.length === 0) {
+    await db.botUser.update({ where: { id: referrer.id }, data: { refRewardClaimed: true } }).catch(() => {});
     return;
   }
-  await bot.api.sendMessage(referrerTgId, `${t(lang, "ref_reward_win", { n: count, title })}\n<code>${esc(payload)}</code>`, { parse_mode: "HTML" }).catch(() => {});
-  if (ADMIN_ID) await bot.api.sendMessage(ADMIN_ID, `🎁 Реферальная награда выдана: ${title} → @${referrer.username ?? "—"} (${referrerTgId}), приглашено ${count}`).catch(() => {});
+
+  const delivered: string[] = [];
+  for (const variantId of pending) {
+    const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
+    if (!v || !v.isActive) continue;
+    const pt = lang === "uz" ? v.plan.product.titleUz || v.plan.product.titleRu : v.plan.product.titleRu;
+    const title = `${pt} — ${lang === "uz" ? v.titleUz || v.titleRu : v.titleRu}`;
+    try {
+      let payload = "";
+      const src = v.autoSupplier && v.supplierKey && v.supplierExternalId ? await resolveSource(v.supplierKey) : null;
+      if (src && v.supplierExternalId) {
+        const d = await sourceOrder(src, v.supplierExternalId, 1);
+        payload = d.payload;
+        await db.botOrder.create({ data: { userId: referrer.id, variantId, titleRu: `🎁 ${title}`, priceUsdt: 0, payload, source: "referral" } });
+      } else {
+        const res = await db.$transaction(async (tx) => {
+          const item = await tx.stockItem.findFirst({ where: { variantId, isSold: false }, orderBy: { id: "asc" } });
+          if (!item) return { error: true as const };
+          const order = await tx.botOrder.create({ data: { userId: referrer.id, variantId, titleRu: `🎁 ${title}`, priceUsdt: 0, payload: item.payload, source: "referral" } });
+          await tx.stockItem.update({ where: { id: item.id }, data: { isSold: true, soldAt: new Date(), orderId: order.id } });
+          return { payload: item.payload };
+        });
+        if ("error" in res) {
+          if (ADMIN_ID) await bot.api.sendMessage(ADMIN_ID, `⚠️ Реферальная награда: нет склада (вариант #${variantId}, инвайтер ${referrerTgId})`).catch(() => {});
+          continue; // this gift stays pending for the next referral event
+        }
+        payload = res.payload;
+      }
+      delivered.push(`🎁 <b>${esc(title)}</b>\n<code>${esc(payload)}</code>`);
+    } catch (e) {
+      if (ADMIN_ID) await bot.api.sendMessage(ADMIN_ID, `⚠️ Реферальная награда не выдана (${referrerTgId}, вариант #${variantId}): ${(e as Error).message}`).catch(() => {});
+    }
+  }
+
+  if (delivered.length === 0) return;
+
+  // Only flip the "claimed" flag once every configured gift is out the door —
+  // anything that failed above (e.g. empty stock) gets retried on the next referral.
+  if (delivered.length === pending.length) {
+    await db.botUser.update({ where: { id: referrer.id }, data: { refRewardClaimed: true } }).catch(() => {});
+  }
+
+  await bot.api.sendMessage(referrerTgId, `${t(lang, "ref_reward_win", { n: count })}\n\n${delivered.join("\n\n")}`, { parse_mode: "HTML" }).catch(() => {});
+  if (ADMIN_ID) {
+    await bot.api
+      .sendMessage(ADMIN_ID, `🎁 Реферальная награда (${delivered.length}/${pending.length}) → @${referrer.username ?? "—"} (${referrerTgId}), приглашено ${count}`)
+      .catch(() => {});
+  }
 }
 
 async function buildHeader(): Promise<{ text: string; entities: MessageEntity[] }> {
@@ -381,7 +421,7 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
     priceOverridesFor(userId),
   ]);
   const stOf = (v: { id: number; autoSupplier: boolean; supplierStock: number; manualDelivery: boolean }) =>
-    v.manualDelivery ? 999999 : v.autoSupplier ? v.supplierStock : stock.get(v.id) ?? 0;
+    v.manualDelivery ? STOCK_UNLIMITED : v.autoSupplier ? v.supplierStock : stock.get(v.id) ?? 0;
   const priceOf = (v: { id: number; priceUzs: number }) => overrides.get(v.id)?.priceUzs ?? v.priceUzs;
 
   let items = await Promise.all(
@@ -515,11 +555,12 @@ async function showProduct(ctx: Context, id: number, back: string) {
       });
 
       const boldStart = text.length;
-      text += ` ${st} шт.`;
+      const stLabel = st >= STOCK_UNLIMITED ? "♾" : `${st} шт.`;
+      text += ` ${stLabel}`;
       entities.push({
         type: "bold",
         offset: boldStart + 1, // skip the leading space
-        length: `${st} шт.`.length,
+        length: stLabel.length,
       });
     }
   }
@@ -562,7 +603,9 @@ async function buildQtyChooser(
     .row()
     .text(t(lang, "enter_qty_btn"), `qi:${v.id}:${back}`)
     .row();
-  if (max > 1) kb.text(t(lang, "maximum", { n: max }), `q:${v.id}:${max}:${back}`).row();
+  // Skip the "buy max" shortcut for unlimited manual-delivery items — there's
+  // no real ceiling to jump to, and 999999 would be a nonsensical quantity.
+  if (max > 1 && max < STOCK_UNLIMITED) kb.text(t(lang, "maximum", { n: max }), `q:${v.id}:${max}:${back}`).row();
   kb.text(t(lang, "buy_for", { v: money(total, lang) }), `bc:${v.id}:${qty}`).row();
   kb.text(t(lang, "back"), `p:${v.plan.product.id}:${back}`);
 
@@ -570,7 +613,7 @@ async function buildQtyChooser(
     `🧾 <b>${esc(title)}</b>\n\n` +
     (vipLabel ? `💎 <b>${esc(vipLabel)}</b>\n` : "") +
     `${t(lang, "price_each", { v: unitPrice > 0 ? money(unitPrice, lang) : t(lang, "free") })}\n` +
-    `${t(lang, "in_stock", { n: max })}\n` +
+    `${t(lang, "in_stock", { n: stockDisplay(max) })}\n` +
     `${t(lang, "qty", { n: qty })}\n` +
     `${t(lang, "total", { v: money(total, lang) })}\n` +
     `${t(lang, "your_balance", { v: money(balance, lang) })}` +
@@ -1065,16 +1108,30 @@ async function sendTermsGate(ctx: Context, lang: string) {
 }
 
 // ---------- gifts (referral reward) ----------
-async function showGifts(ctx: Context, edit = false) {
+// `silent`: used for the automatic teaser on /start — skip sending anything
+// when there's nothing worth interrupting the user for (feature off, or this
+// user already claimed their gifts). The explicit "🎁 Подарки" button always
+// shows something (the disabled/claimed message included).
+async function showGifts(ctx: Context, edit = false, silent = false) {
   const user = await getUser(ctx);
   const lang = user.lang;
   const enabled = (await setting("ref_reward_enabled", "")) === "1";
   const threshold = Number(await setting("ref_reward_threshold", "0"));
-  const variantId = Number(await setting("ref_reward_variant", "0"));
+  const variantIds = await giftVariantIds();
 
-  if (!enabled || threshold < 1 || !variantId) {
+  if (!enabled || threshold < 1 || variantIds.length === 0) {
+    if (silent) return;
     const kb = new InlineKeyboard().text(t(lang, "btn_refer"), "ref").row().text(t(lang, "to_shop"), "m:0:all");
     const text = t(lang, "gifts_disabled");
+    if (edit) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+    else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+    return;
+  }
+
+  if (user.refRewardClaimed) {
+    if (silent) return;
+    const text = t(lang, "gifts_claimed");
+    const kb = new InlineKeyboard().text(t(lang, "btn_refer"), "ref").row().text(t(lang, "to_shop"), "m:0:all");
     if (edit) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
     else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
     return;
@@ -1083,20 +1140,15 @@ async function showGifts(ctx: Context, edit = false) {
   const refCount = (await db.botUser.count({ where: { referredBy: user.tgId } })) + (user.bonusReferrals || 0);
   const link = `https://t.me/${ctx.me.username}?start=ref${user.tgId}`;
 
-  // Get product name for display
-  const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
-  const productName = v ? `${v.plan.product.titleRu} — ${v.titleRu}` : "подарок";
+  // Product names for every configured gift — e.g. "Gemini AI Pro 18m + Canva Pro + CapCut Pro".
+  const variants = await db.variant.findMany({ where: { id: { in: variantIds } }, include: { plan: { include: { product: true } } } });
+  const productName = variantIds
+    .map((id) => variants.find((v) => v.id === id))
+    .filter((v): v is NonNullable<typeof v> => !!v)
+    .map((v) => (lang === "uz" ? v.plan.product.titleUz || v.plan.product.titleRu : v.plan.product.titleRu))
+    .join(" + ") || t(lang, "gifts_default_product");
 
   const kb = new InlineKeyboard();
-
-  if (user.refRewardClaimed) {
-    const text = t(lang, "gifts_claimed");
-    kb.text(t(lang, "btn_refer"), "ref").row();
-    kb.text(t(lang, "to_shop"), "m:0:all");
-    if (edit) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
-    else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
-    return;
-  }
 
   // Progress bar
   const filled = Math.min(refCount, threshold);
@@ -1272,6 +1324,9 @@ async function showLangPicker(ctx: Context, edit: boolean) {
 async function sendHome(ctx: Context, user: Awaited<ReturnType<typeof getUser>>) {
   const { text, entities } = await buildHeader();
   await ctx.reply(text, { entities, reply_markup: mainKeyboard(user.lang) });
+  // Referral-gift teaser, right after the header — only sent when there's an
+  // active campaign the user hasn't already claimed (silent otherwise).
+  await showGifts(ctx, false, true).catch(() => {});
   const menu = await buildMenu(user.lang, user.balance, 0, "all", user.id);
   await ctx.reply(menu.text, { parse_mode: "HTML", reply_markup: menu.kb });
 }

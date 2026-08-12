@@ -237,13 +237,17 @@ export async function addStockAction(formData: FormData) {
   revalidatePath(`/admin/bot-products/${productId}`);
 }
 
-/** Save the referral promo config (invite N → free variant). */
+/** Save the referral promo config (invite N → free variant(s), all delivered together). */
 export async function saveRefPromoAction(formData: FormData) {
   const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
+  const variantIds = formData
+    .getAll("variantIds")
+    .map((v) => Number(v))
+    .filter((n) => Number.isFinite(n) && n > 0);
   const map: Record<string, string> = {
     ref_reward_enabled: formData.get("enabled") === "on" ? "1" : "0",
     ref_reward_threshold: String(Math.max(0, Math.round(num(formData.get("threshold"))))),
-    ref_reward_variant: String(Math.max(0, Math.round(num(formData.get("variantId"))))),
+    ref_reward_variant: variantIds.join(","),
   };
   for (const [key, valueRu] of Object.entries(map)) {
     await botDb.setting.upsert({ where: { key }, create: { key, valueRu, type: "text" }, update: { valueRu } });

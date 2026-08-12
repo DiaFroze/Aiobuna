@@ -22,7 +22,12 @@ export default async function BotPromoPage() {
   const val = (k: string) => settings.find((s) => s.key === k)?.valueRu ?? "";
   const enabled = val("ref_reward_enabled") === "1";
   const threshold = val("ref_reward_threshold") || "15";
-  const currentVariant = val("ref_reward_variant");
+  const currentVariantIds = new Set(
+    val("ref_reward_variant")
+      .split(/[,\n]/)
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isFinite(n) && n > 0),
+  );
 
   const options = products.flatMap((p) =>
     p.plans.flatMap((pl) => pl.variants.map((v) => ({ id: v.id, label: `${p.titleRu} — ${v.titleRu} (${v.priceUzs.toLocaleString("ru-RU")} сум)` }))),
@@ -47,21 +52,25 @@ export default async function BotPromoPage() {
           Акция включена
         </label>
 
-        <div className="grid sm:grid-cols-2 gap-4">
-          <div>
-            <label className="text-sm text-muted">Сколько приглашений нужно</label>
-            <input name="threshold" type="number" min="1" defaultValue={threshold} className="input mt-1" />
-            <p className="text-xs text-muted mt-1">Считаются пользователи, зашедшие по реф-ссылке и нажавшие /start.</p>
-          </div>
-          <div>
-            <label className="text-sm text-muted">Награда (товар/вариант)</label>
-            <select name="variantId" defaultValue={currentVariant} className="input mt-1">
-              <option value="0">— не выбрано —</option>
-              {options.map((o) => (
-                <option key={o.id} value={o.id}>{o.label}</option>
-              ))}
-            </select>
-            <p className="text-xs text-muted mt-1">Выдаётся бесплатно (со склада или через API, как обычная покупка).</p>
+        <div>
+          <label className="text-sm text-muted">Сколько приглашений нужно</label>
+          <input name="threshold" type="number" min="1" defaultValue={threshold} className="input mt-1 max-w-xs" />
+          <p className="text-xs text-muted mt-1">Считаются пользователи, зашедшие по реф-ссылке и нажавшие /start.</p>
+        </div>
+
+        <div>
+          <label className="text-sm text-muted">Награда — можно выбрать несколько товаров</label>
+          <p className="text-xs text-muted mt-1 mb-2">
+            За один и тот же порог приглашений пользователь получает <b>все</b> отмеченные ниже товары сразу
+            (например, Gemini AI Pro 18м + Canva Pro + CapCut Pro). Каждый выдаётся бесплатно — со склада или через API, как обычная покупка.
+          </p>
+          <div className="border rounded-lg divide-y max-h-72 overflow-y-auto">
+            {options.map((o) => (
+              <label key={o.id} className="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-surface-2">
+                <input type="checkbox" name="variantIds" value={o.id} defaultChecked={currentVariantIds.has(o.id)} />
+                {o.label}
+              </label>
+            ))}
           </div>
         </div>
 
