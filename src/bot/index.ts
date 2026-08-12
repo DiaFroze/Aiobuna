@@ -310,7 +310,8 @@ async function getUser(ctx: Context, refParam?: string) {
   const created = await db.botUser.create({
     data: { tgId, username: from.username ?? null, firstName: from.first_name ?? null, referredBy },
   });
-  if (referredBy) grantReferralReward(referredBy).catch(() => {}); // fire-and-forget
+  // No automatic gift here any more — the referrer earns 1 point per invite
+  // and spends them explicitly in the /gifts shop when they're ready.
   return created;
 }
 
@@ -384,114 +385,9 @@ async function prewarmTranslations() {
   }
 }
 
-// Referral promo: each configured TIER (invite threshold → one gift variant)
-// unlocks independently — e.g. 5 invites → Canva Pro, 7 → CapCut Pro,
-// 10 → Gemini Pro. A user collects every tier they've crossed over time.
-// Configured in the admin panel; stored as "threshold:variantId" pairs,
-// comma- or newline-separated (e.g. "5:12,7:34,10:56").
-type GiftTier = { threshold: number; variantId: number };
-
-async function giftTiers(): Promise<GiftTier[]> {
-  const raw = (await setting("ref_reward_tiers", "")).trim();
-  const tiers = raw
-    .split(/[,\n]/)
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((s) => {
-      const [th, vid] = s.split(":").map((x) => Number(x.trim()));
-      return { threshold: th, variantId: vid };
-    })
-    .filter((t) => Number.isFinite(t.threshold) && t.threshold > 0 && Number.isFinite(t.variantId) && t.variantId > 0);
-  if (tiers.length > 0) return tiers.sort((a, b) => a.threshold - b.threshold);
-
-  // Legacy fallback: old single-threshold, multi-variant "bundle" setup
-  // (ref_reward_threshold + ref_reward_variant) still works untouched.
-  const legacyThreshold = Number(await setting("ref_reward_threshold", "0"));
-  const legacyRaw = (await setting("ref_reward_variant", "")).trim();
-  const legacyVariants = [...new Set(legacyRaw.split(/[,\n]/).map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n > 0))];
-  if (legacyThreshold > 0 && legacyVariants.length > 0) {
-    return legacyVariants.map((variantId) => ({ threshold: legacyThreshold, variantId }));
-  }
-  return [];
-}
-
-async function grantReferralReward(referrerTgId: string) {
-  if ((await setting("ref_reward_enabled", "")) !== "1") return;
-  const tiers = await giftTiers();
-  if (tiers.length === 0) return;
-  const referrer = await db.botUser.findUnique({ where: { tgId: referrerTgId } });
-  if (!referrer || referrer.refRewardClaimed) return;
-  const count = (await db.botUser.count({ where: { referredBy: referrerTgId } })) + (referrer.bonusReferrals || 0);
-
-  const unlocked = tiers.filter((tier) => count >= tier.threshold);
-  if (unlocked.length === 0) return;
-  const lang = referrer.lang;
-
-  // Idempotent: figure out which unlocked tiers this referrer already got
-  // (via past "referral"-sourced orders) so a retry never double-delivers.
-  const already = await db.botOrder.findMany({
-    where: { userId: referrer.id, source: "referral", variantId: { in: unlocked.map((tr) => tr.variantId) } },
-    select: { variantId: true },
-  });
-  const alreadySet = new Set(already.map((o) => o.variantId));
-  const pending = unlocked.filter((tier) => !alreadySet.has(tier.variantId));
-
-  if (pending.length === 0) {
-    if (unlocked.length === tiers.length) {
-      await db.botUser.update({ where: { id: referrer.id }, data: { refRewardClaimed: true } }).catch(() => {});
-    }
-    return;
-  }
-
-  const delivered: string[] = [];
-  for (const tier of pending) {
-    const variantId = tier.variantId;
-    const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
-    if (!v || !v.isActive) continue;
-    const pt = lang === "uz" ? v.plan.product.titleUz || v.plan.product.titleRu : v.plan.product.titleRu;
-    const title = `${pt} — ${lang === "uz" ? v.titleUz || v.titleRu : v.titleRu}`;
-    try {
-      let payload = "";
-      const src = v.autoSupplier && v.supplierKey && v.supplierExternalId ? await resolveSource(v.supplierKey) : null;
-      if (src && v.supplierExternalId) {
-        const d = await sourceOrder(src, v.supplierExternalId, 1);
-        payload = d.payload;
-        await db.botOrder.create({ data: { userId: referrer.id, variantId, titleRu: `🎁 ${title}`, priceUsdt: 0, payload, source: "referral" } });
-      } else {
-        const res = await db.$transaction(async (tx) => {
-          const item = await tx.stockItem.findFirst({ where: { variantId, isSold: false }, orderBy: { id: "asc" } });
-          if (!item) return { error: true as const };
-          const order = await tx.botOrder.create({ data: { userId: referrer.id, variantId, titleRu: `🎁 ${title}`, priceUsdt: 0, payload: item.payload, source: "referral" } });
-          await tx.stockItem.update({ where: { id: item.id }, data: { isSold: true, soldAt: new Date(), orderId: order.id } });
-          return { payload: item.payload };
-        });
-        if ("error" in res) {
-          if (ADMIN_ID) await bot.api.sendMessage(ADMIN_ID, `⚠️ Реферальная награда: нет склада (${tier.threshold} приглашений, вариант #${variantId}, инвайтер ${referrerTgId})`).catch(() => {});
-          continue; // this tier stays pending for the next referral event
-        }
-        payload = res.payload;
-      }
-      delivered.push(`🎁 <b>${esc(title)}</b>\n<code>${esc(payload)}</code>`);
-    } catch (e) {
-      if (ADMIN_ID) await bot.api.sendMessage(ADMIN_ID, `⚠️ Реферальная награда не выдана (${referrerTgId}, вариант #${variantId}): ${(e as Error).message}`).catch(() => {});
-    }
-  }
-
-  if (delivered.length === 0) return;
-
-  // Only flip the "fully claimed" flag once every configured tier has been
-  // unlocked AND delivered — anything short of that gets retried next time.
-  if (unlocked.length === tiers.length && delivered.length === pending.length) {
-    await db.botUser.update({ where: { id: referrer.id }, data: { refRewardClaimed: true } }).catch(() => {});
-  }
-
-  await bot.api.sendMessage(referrerTgId, `${t(lang, "ref_reward_win", { n: count })}\n\n${delivered.join("\n\n")}`, { parse_mode: "HTML" }).catch(() => {});
-  if (ADMIN_ID) {
-    await bot.api
-      .sendMessage(ADMIN_ID, `🎁 Реферальная награда (${delivered.length}/${pending.length}) → @${referrer.username ?? "—"} (${referrerTgId}), приглашено ${count}`)
-      .catch(() => {});
-  }
-}
+// Note: the old tier-threshold auto-grant system (giftTiers/grantReferralReward)
+// was retired in favor of an explicit points shop — see showGifts / buyForReferrals.
+// pointsCost on each Variant is now the single source of truth for referral pricing.
 
 async function buildHeader(): Promise<{ text: string; entities: MessageEntity[] }> {
   const [storeName, emoji, premium, tagline] = await Promise.all([
@@ -1303,9 +1199,6 @@ async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
     `${emojiIcon("💰", walletButtonEmoji)} ${t(lang, "your_balance", { v: money(user.balance, lang) })}\n` +
     `${emojiIcon("🧾", ordersButtonEmoji)} ${t(lang, "p_orders")}: ${ordersCount}\n` +
     `${emojiIcon("🤝", referButtonEmoji)} ${t(lang, "p_invited")}: ${refCount}`;
-  const threshold = Number(await setting("ref_reward_threshold", "0"));
-  if ((await setting("ref_reward_enabled", "")) === "1" && threshold > 0 && !user.refRewardClaimed)
-    text += `\n${t(lang, "ref_progress", { c: refCount, n: threshold })}`;
   return { text, kb };
 }
 function referView(ctx: Context, user: Awaited<ReturnType<typeof getUser>>) {
@@ -1355,76 +1248,55 @@ async function sendTermsGate(ctx: Context, lang: string) {
 // when there's nothing worth interrupting the user for (feature off, or this
 // user already claimed their gifts). The explicit "🎁 Подарки" button always
 // shows something (the disabled/claimed message included).
+// "Подарки" section = referral-points shop. Lists every active variant with
+// pointsCost > 0 as a catalog: users spend 1 point per invited friend and
+// exchange them for the subscriptions the admin marked as gift-eligible.
+// Tapping a variant opens showGiftItem; the automatic tier-based grant flow
+// was retired — buying is now always an explicit action.
 async function showGifts(ctx: Context, edit = false, silent = false) {
   const user = await getUser(ctx);
   const lang = user.lang;
-  const enabled = (await setting("ref_reward_enabled", "")) === "1";
-  const tiers = await giftTiers();
+  const points = await availableReferralPoints(user);
 
-  if (!enabled || tiers.length === 0) {
-    if (silent) return;
-    const kb = new InlineKeyboard().text(t(lang, "btn_refer"), "ref").row().text(t(lang, "to_shop"), "m:0:all");
-    const text = t(lang, "gifts_disabled");
-    if (edit) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
-    else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
-    return;
-  }
-
-  const refCount = (await db.botUser.count({ where: { referredBy: user.tgId } })) + (user.bonusReferrals || 0);
-
-  // Which tiers has this user already received? (same idempotency check grantReferralReward uses)
-  const deliveredOrders = await db.botOrder.findMany({
-    where: { userId: user.id, source: "referral", variantId: { in: tiers.map((tr) => tr.variantId) } },
-    select: { variantId: true },
+  const variants = await db.variant.findMany({
+    where: { isActive: true, pointsCost: { gt: 0 } },
+    include: { plan: { include: { product: true } } },
+    orderBy: [{ pointsCost: "asc" }, { id: "asc" }],
   });
-  const deliveredSet = new Set(deliveredOrders.map((o) => o.variantId));
-  const allDelivered = tiers.every((tr) => deliveredSet.has(tr.variantId));
 
-  if (allDelivered) {
+  if (variants.length === 0) {
     if (silent) return;
-    const text = t(lang, "gifts_claimed");
     const kb = new InlineKeyboard().text(t(lang, "btn_refer"), "ref").row().text(t(lang, "to_shop"), "m:0:all");
-    if (edit) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
-    else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+    await sendOrEdit(ctx, t(lang, "gifts_disabled"), { reply_markup: kb });
     return;
   }
 
   const link = `https://t.me/${ctx.me.username}?start=ref${user.tgId}`;
-  const variants = await db.variant.findMany({ where: { id: { in: tiers.map((tr) => tr.variantId) } }, include: { plan: { include: { product: true } } } });
-  const nameFor = (variantId: number) => {
-    const v = variants.find((x) => x.id === variantId);
-    if (!v) return t(lang, "gifts_default_product");
-    return lang === "uz" ? v.plan.product.titleUz || v.plan.product.titleRu : v.plan.product.titleRu;
-  };
 
-  // One line per tier: got it / unlocked-and-pending / still-locked-with-count-left.
-  const tierLines = tiers
-    .map((tr) => {
-      const got = deliveredSet.has(tr.variantId);
-      const reached = refCount >= tr.threshold;
-      const icon = got ? "✅" : reached ? "🎉" : "⬜";
-      const status = got
-        ? t(lang, "gifts_tier_got")
-        : reached
-        ? t(lang, "gifts_tier_ready")
-        : t(lang, "gifts_tier_left", { n: tr.threshold - refCount });
-      return `${icon} ${tr.threshold} ${t(lang, "gifts_tier_friends")} → <b>${esc(nameFor(tr.variantId))}</b> — ${status}`;
-    })
-    .join("\n");
+  const listLines = variants.map((v) => {
+    const productName = lang === "uz" ? v.plan.product.titleUz || v.plan.product.titleRu : v.plan.product.titleRu;
+    const variantName = lang === "uz" ? v.titleUz || v.titleRu : v.titleRu;
+    const canAfford = points >= v.pointsCost;
+    const icon = canAfford ? "✅" : "🔒";
+    return `${icon} <b>${esc(productName)} — ${esc(variantName)}</b> = ${v.pointsCost} ${t(lang, "gifts_tier_friends")}`;
+  }).join("\n");
 
-  const kb = new InlineKeyboard();
   const text =
-    `${t(lang, "gifts_title_v2")}\n\n${tierLines}\n\n` +
-    `👤 ${t(lang, "p_invited")}: <b>${refCount}</b>\n\n` +
+    `${t(lang, "gifts_title_v2")}\n\n${listLines}\n\n` +
+    `👤 ${t(lang, "p_invited")}: <b>${points}</b>\n\n` +
     `🔗 ${lang === "ru" ? "Ваша ссылка" : lang === "uz" ? "Havolangiz" : "Your link"}:\n<code>${link}</code>`;
 
+  const kb = new InlineKeyboard();
+  for (const v of variants) {
+    const productName = lang === "uz" ? v.plan.product.titleUz || v.plan.product.titleRu : v.plan.product.titleRu;
+    const variantName = lang === "uz" ? v.titleUz || v.titleRu : v.titleRu;
+    const canAfford = points >= v.pointsCost;
+    kb.text(`${canAfford ? "🎁" : "🔒"} ${productName} — ${variantName} · ${v.pointsCost} реф.`, `gi:${v.id}`).row();
+  }
   kb.url(t(lang, "gifts_share"), `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(lang === "ru" ? `Заходи в бот и получай подарки! 🎁` : `Join the bot and get gifts! 🎁`)}`).row();
   kb.text(t(lang, "btn_refer"), "ref").row();
   kb.text(t(lang, "to_shop"), "m:0:all");
 
-  // Banner + tier text + buttons all as ONE photo message. sendOrEdit
-  // handles callback re-renders correctly (delete+resend when the source
-  // is a photo), so tapping "К магазину" / "Пригласить" always works.
   const banner = giftsBannerFile();
   if (edit) {
     await sendOrEdit(ctx, text, { reply_markup: kb, photo: banner });
@@ -1435,6 +1307,41 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
   } else {
     await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
   }
+}
+
+// One gift-item card: name, cost in referrals, user's current points, and
+// either a "Купить" button (enough points) or an "Пригласить" button (not
+// enough). Always a "Назад" back to the gifts list.
+async function showGiftItem(ctx: Context, variantId: number) {
+  const user = await getUser(ctx);
+  const lang = user.lang;
+  const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
+  if (!v || !v.isActive || v.pointsCost <= 0) {
+    await ctx.answerCallbackQuery({ text: t(lang, "plan_unavailable"), show_alert: true }).catch(() => {});
+    return;
+  }
+  const points = await availableReferralPoints(user);
+  const productName = lang === "uz" ? v.plan.product.titleUz || v.plan.product.titleRu : v.plan.product.titleRu;
+  const variantName = lang === "uz" ? v.titleUz || v.titleRu : v.titleRu;
+  const canAfford = points >= v.pointsCost;
+  const missing = Math.max(0, v.pointsCost - points);
+
+  const text =
+    `🎁 <b>${esc(productName)} — ${esc(variantName)}</b>\n\n` +
+    `Цена: <b>${v.pointsCost}</b> ${t(lang, "gifts_tier_friends")}\n` +
+    `У вас: <b>${points}</b> ${t(lang, "gifts_tier_friends")}` +
+    (canAfford ? "" : `\n⚠️ Не хватает: <b>${missing}</b> — пригласите ещё столько друзей.`);
+
+  const kb = new InlineKeyboard();
+  if (canAfford) {
+    kb.text(`✅ Купить за ${v.pointsCost} реф.`, `rb:${v.id}:0:all`).row();
+  } else {
+    kb.text(`🤝 Пригласить друзей`, "ref").row();
+  }
+  kb.text("⬅️ К подаркам", "gifts_show").row();
+
+  await sendOrEdit(ctx, text, { reply_markup: kb });
+  await ctx.answerCallbackQuery().catch(() => {});
 }
 
 // ---------- top-up ----------
@@ -2022,6 +1929,7 @@ bot.on("callback_query:data", async (ctx) => {
     if (data === "topin") { pending.set(String(ctx.from?.id), { type: "topup" }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "enter_amount", { min: money(MIN_TOPUP, lang) })); }
     if (data === "promo") { pending.set(String(ctx.from?.id), { type: "promo" }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "promo_enter")); }
     if (data === "methods_show") { await ctx.answerCallbackQuery().catch(() => {}); return showMethods(ctx); }
+    if (data === "gifts_show") { await ctx.answerCallbackQuery().catch(() => {}); return showGifts(ctx, true, false); }
     if (data === "support_show") { const { text, kb } = await supportView(lang); await sendOrEdit(ctx, text, { reply_markup: kb }); return ctx.answerCallbackQuery().catch(() => {}); }
     if (data === "lang_pick") { await ctx.answerCallbackQuery().catch(() => {}); return showLangPicker(ctx, true); }
     if (data === "profile_show") { const { text, kb } = await profileView(user); await sendOrEdit(ctx, text, { reply_markup: kb }); return ctx.answerCallbackQuery().catch(() => {}); }
@@ -2034,6 +1942,7 @@ bot.on("callback_query:data", async (ctx) => {
     if (tag === "qi") { pending.set(String(ctx.from?.id), { type: "qty", variantId: Number(rest[0]), back: `${rest[1] ?? "0"}:${rest[2] ?? "all"}` }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "enter_qty_msg")); }
     if (tag === "bc") return doBuy(ctx, Number(rest[0]), Number(rest[1]) || 1);
     if (tag === "rb") return buyForReferrals(ctx, Number(rest[0]));
+    if (tag === "gi") return showGiftItem(ctx, Number(rest[0]));
     if (tag === "meth") return viewMethod(ctx, Number(rest[0]));
     if (tag === "mbuy") return buyMethod(ctx, Number(rest[0]));
     if (tag === "top") { await ctx.answerCallbackQuery().catch(() => {}); const b = await buildTopupMethods(lang, Number(rest[0])); await sendOrEdit(ctx, b.text, { reply_markup: b.kb }); return; }
