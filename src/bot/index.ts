@@ -1981,6 +1981,10 @@ bot.on("chat_join_request", async (ctx) => {
   await db.channelJoinRequest
     .upsert({ where: { chatId_tgId: { chatId, tgId } }, create: { chatId, tgId }, update: {} })
     .catch((e) => console.error("[bot] chat_join_request record failed:", (e as Error).message));
+  // Auto-approve so the person actually becomes a channel member instead of
+  // sitting "pending" forever waiting on a human — requires the bot to be an
+  // admin on the channel with rights to invite/manage members.
+  await ctx.approveChatJoinRequest(ctx.chatJoinRequest.from.id).catch((e) => console.error("[bot] auto-approve join request failed:", (e as Error).message));
 });
 
 // ---------- payments ----------
