@@ -43,19 +43,25 @@ const RU: Dict = {
   free: "🎁 Бесплатно",
   choose_plan: "Выберите тариф:",
   back_to_list: "⬅️ Назад к списку",
-  terms_title: "📋 <b>Условия покупки</b>",
+  terms_title: "📜 <b>AI OBUNA — ПРАВИЛА ПОЛЬЗОВАНИЯ И ПУБЛИЧНАЯ ОФЕРТА</b>\nПоследнее обновление: {date}",
+  terms_intro: "Уважаемый пользователь! Оформляя заказ или производя оплату через бота AI OBUNA, вы подтверждаете, что ознакомились с приведёнными ниже условиями и принимаете их в полном объёме.",
   terms_body:
-    "🛡 <b>Гарантия — 15 дней</b>\n" +
-    "На все товары действует гарантия <b>15 дней</b> с момента покупки.\n\n" +
-    "✅ <b>Что покрывается</b>\n" +
-    "Если в течение 15 дней товар перестал работать не по вашей вине — напишите в поддержку. Мы проверим и заменим товар.\n\n" +
-    "⛔️ <b>Что не покрывается</b>\n" +
-    "• Обращения после 15 дней\n" +
-    "• Смена пароля или данных входа\n" +
-    "• Передача доступа третьим лицам\n\n" +
-    "💵 <b>Возврат денег</b>\n" +
-    "Деньги за заказ <b>не возвращаются</b>. При подтверждённой проблеме в гарантийный срок товар заменяется.\n\n" +
-    "🛒 Оформляя заказ, вы соглашаетесь с этими условиями.",
+    "<b>1. Общие положения</b>\n" +
+    "AI OBUNA — автоматизированный сервис по продаже цифровых товаров и подписок (аккаунты, ключи активации, промо-коды и т.п.). Администрация вправе изменять условия в любое время; новая редакция вступает в силу с момента публикации в боте.\n\n" +
+    "<b>2. Оформление заказа</b>\n" +
+    "Заказ формируется на основании данных, указанных пользователем при оплате. За правильность введённых данных отвечает сам пользователь. Изменение или отмена заказа после оплаты невозможны.\n\n" +
+    "<b>3. Предоставление услуги</b>\n" +
+    "Товар выдаётся автоматически либо в течение непродолжительного времени вручную. Сроки могут увеличиваться по причинам, не зависящим от AI OBUNA — техническим сбоям площадок-поставщиков, изменению их политики и т.п.\n\n" +
+    "<b>4. Обязанности пользователя</b>\n" +
+    "Пользователь обязуется использовать полученный товар только в законных целях и не передавать доступ третьим лицам без необходимости. Ответственность за сохранность полученных данных (логин, пароль, ссылка) несёт пользователь.\n\n" +
+    "<b>5. Ограничение ответственности</b>\n" +
+    "AI OBUNA отвечает только за факт передачи заказанного товара. Решения сторонних платформ (блокировка аккаунта, отмена подписки, изменение тарифов), а также неполадки интернета или устройства пользователя находятся вне контроля бота.\n\n" +
+    "<b>6. ⚠️ Оплата и возврат средств</b>\n" +
+    "После успешной выдачи товара заказ считается выполненным, и уплаченная сумма <b>не возвращается</b> — в том числе если подписка была впоследствии отменена третьей стороной, изменились условия площадки-поставщика, либо пользователь передумал использовать товар. На все товары действует гарантия <b>15 дней</b>: при подтверждённой неисправности не по вине пользователя товар подлежит замене (не возврату денег).\n\n" +
+    "<b>7. Заключительные положения</b>\n" +
+    "Нажимая кнопку «✅ Принимаю условия», вы подтверждаете полное и безоговорочное согласие с публичной офертой AI OBUNA.",
+  terms_accept_btn: "✅ Принимаю условия",
+  terms_accepted_toast: "Спасибо! Условия приняты.",
   price_each: "Цена за штуку: {v}",
   in_stock: "В наличии: {n} · мин 1, макс {n}",
   qty: "Количество: {n}",
@@ -176,19 +182,25 @@ const EN: Dict = {
   free: "🎁 Free",
   choose_plan: "Choose a plan:",
   back_to_list: "⬅️ Back to list",
-  terms_title: "📋 <b>Purchase terms</b>",
+  terms_title: "📜 <b>AI OBUNA — TERMS OF USE & PUBLIC OFFER</b>\nLast updated: {date}",
+  terms_intro: "Dear user! By placing an order or making a payment through the AI OBUNA bot, you confirm that you have read and fully accept the terms below.",
   terms_body:
-    "🛡 <b>15-day warranty</b>\n" +
-    "Every item comes with a <b>15-day</b> warranty from the moment of purchase.\n\n" +
-    "✅ <b>Covered</b>\n" +
-    "If the item stops working within 15 days through no fault of your own, contact support — we will check it and send a replacement.\n\n" +
-    "⛔️ <b>Not covered</b>\n" +
-    "• Requests made after 15 days\n" +
-    "• Changed password or login details\n" +
-    "• Access shared with third parties\n\n" +
-    "💵 <b>Refunds</b>\n" +
-    "Money is <b>not refunded</b>. If a problem is confirmed within the warranty period, the item is replaced.\n\n" +
-    "🛒 By placing an order you agree to these terms.",
+    "<b>1. General provisions</b>\n" +
+    "AI OBUNA is an automated service for selling digital goods and subscriptions (accounts, activation keys, promo codes, etc.). The administration may change these terms at any time; the new version takes effect once published in the bot.\n\n" +
+    "<b>2. Placing an order</b>\n" +
+    "An order is created based on the data the user provides at checkout. The user is solely responsible for the accuracy of that data. An order cannot be changed or cancelled after payment.\n\n" +
+    "<b>3. Service delivery</b>\n" +
+    "Items are delivered automatically or manually within a short time. Delivery may take longer for reasons beyond AI OBUNA's control — technical issues on supplier platforms, policy changes, and the like.\n\n" +
+    "<b>4. User obligations</b>\n" +
+    "The user agrees to use the received item only for lawful purposes and not to share access with third parties without need. The user is responsible for keeping received credentials (login, password, link) safe.\n\n" +
+    "<b>5. Limitation of liability</b>\n" +
+    "AI OBUNA is only responsible for delivering the ordered item. Decisions made by third-party platforms (account bans, subscription cancellations, pricing changes), as well as issues with the user's internet or device, are outside the bot's control.\n\n" +
+    "<b>6. ⚠️ Payment and refunds</b>\n" +
+    "Once an item is successfully delivered, the order is considered fulfilled and the amount paid is <b>not refunded</b> — including if the subscription is later cancelled by a third party, supplier terms change, or the user decides not to use the item. Every item carries a <b>15-day</b> warranty: if a confirmed fault occurs through no fault of the user, the item is replaced (not refunded).\n\n" +
+    "<b>7. Final provision</b>\n" +
+    "By tapping “✅ I accept the terms”, you confirm your full and unconditional acceptance of the AI OBUNA public offer.",
+  terms_accept_btn: "✅ I accept the terms",
+  terms_accepted_toast: "Thank you! Terms accepted.",
   price_each: "Price each: {v}",
   in_stock: "In stock: {n} · min 1, max {n}",
   qty: "Quantity: {n}",
@@ -309,19 +321,25 @@ const UZ: Dict = {
   free: "🎁 Bepul",
   choose_plan: "Tarifni tanlang:",
   back_to_list: "⬅️ Ro‘yxatga qaytish",
-  terms_title: "📋 <b>Xarid shartlari</b>",
+  terms_title: "📜 <b>AI OBUNA — FOYDALANISH QOIDALARI VA OMMAVIY OFERTA</b>\nOxirgi yangilanish: {date}",
+  terms_intro: "Hurmatli foydalanuvchi! AI OBUNA boti orqali buyurtma berish yoki to‘lov qilish orqali siz quyidagi shartlarni to‘liq o‘qib, qabul qilganingizni tasdiqlaysiz.",
   terms_body:
-    "🛡 <b>Kafolat — 15 kun</b>\n" +
-    "Barcha mahsulotlarga xarid qilingan paytdan boshlab <b>15 kun</b> kafolat beriladi.\n\n" +
-    "✅ <b>Nima kiradi</b>\n" +
-    "Agar 15 kun ichida mahsulot sizning aybingizsiz ishlamay qolsa — qo‘llab-quvvatlashga yozing. Tekshirib, almashtirib beramiz.\n\n" +
-    "⛔️ <b>Nima kirmaydi</b>\n" +
-    "• 15 kundan keyingi murojaatlar\n" +
-    "• Parol yoki kirish ma’lumotlari o‘zgartirilgan bo‘lsa\n" +
-    "• Kirish uchinchi shaxslarga berilgan bo‘lsa\n\n" +
-    "💵 <b>Pulni qaytarish</b>\n" +
-    "Pul <b>qaytarilmaydi</b>. Kafolat muddatida muammo tasdiqlansa, mahsulot almashtiriladi.\n\n" +
-    "🛒 Buyurtma berish orqali siz ushbu shartlarga rozilik bildirasiz.",
+    "<b>1. Umumiy qoidalar</b>\n" +
+    "AI OBUNA — raqamli tovarlar va obunalarni (akkauntlar, faollashtirish kalitlari, promo-kodlar va h.k.) avtomatik sotish xizmati. Ma’muriyat istalgan vaqtda shartlarga o‘zgartirish kiritishi mumkin; yangi tahrir botda e’lon qilingan lahzadan kuchga kiradi.\n\n" +
+    "<b>2. Buyurtmani rasmiylashtirish</b>\n" +
+    "Buyurtma foydalanuvchi to‘lov paytida kiritgan ma’lumotlar asosida shakllantiriladi. Ma’lumotlarning to‘g‘riligi uchun foydalanuvchi shaxsan javobgar. To‘lovdan so‘ng buyurtmani o‘zgartirish yoki bekor qilish mumkin emas.\n\n" +
+    "<b>3. Xizmat ko‘rsatish</b>\n" +
+    "Tovar avtomatik yoki qisqa vaqt ichida qo‘lda yetkaziladi. Muddat AI OBUNA’ga bog‘liq bo‘lmagan sabablarga ko‘ra — ta’minotchi platformalaridagi texnik nosozliklar, siyosat o‘zgarishi va h.k. — uzayishi mumkin.\n\n" +
+    "<b>4. Foydalanuvchi majburiyatlari</b>\n" +
+    "Foydalanuvchi olingan tovardan faqat qonuniy maqsadlarda foydalanishga va kirish ma’lumotlarini keraksiz uchinchi shaxslarga bermaslikka majburdir. Olingan ma’lumotlar (login, parol, havola)ning saqlanishi uchun foydalanuvchi javobgar.\n\n" +
+    "<b>5. Javobgarlikni cheklash</b>\n" +
+    "AI OBUNA faqat buyurtma qilingan tovarni yetkazib berish faktiga javobgar. Uchinchi tomon platformalarining qarorlari (akkauntni bloklash, obunani bekor qilish, tarif o‘zgarishi), shuningdek foydalanuvchi internet yoki qurilmasidagi nosozliklar bot nazorati doirasidan tashqarida.\n\n" +
+    "<b>6. ⚠️ To‘lov va mablag‘ni qaytarish</b>\n" +
+    "Tovar muvaffaqiyatli yetkazilgach buyurtma bajarilgan hisoblanadi va to‘langan mablag‘ <b>qaytarilmaydi</b> — shu jumladan obuna keyinchalik uchinchi tomon tomonidan bekor qilingan, ta’minotchi shartlari o‘zgargan yoki foydalanuvchi tovardan foydalanishdan voz kechgan holatlarda ham. Barcha tovarlarga <b>15 kunlik</b> kafolat beriladi: foydalanuvchi aybisiz tasdiqlangan nosozlik holida tovar almashtiriladi (pul qaytarilmaydi).\n\n" +
+    "<b>7. Yakuniy qoida</b>\n" +
+    "«✅ Roziman» tugmasini bosish orqali siz AI OBUNA ommaviy ofertasi bilan to‘liq va so‘zsiz rozilik bildirganingizni tasdiqlaysiz.",
+  terms_accept_btn: "✅ Roziman",
+  terms_accepted_toast: "Rahmat! Shartlar qabul qilindi.",
   price_each: "Narxi (dona): {v}",
   in_stock: "Mavjud: {n} · min 1, maks {n}",
   qty: "Miqdor: {n}",

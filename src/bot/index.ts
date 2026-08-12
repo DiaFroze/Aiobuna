@@ -1040,20 +1040,27 @@ async function supportView(lang: string) {
   return { text: `${t(lang, "support_title")}\n\n${text}`, kb };
 }
 
-// Purchase terms, shown once the user passes the subscription gate.
-// Wrapped in an expandable blockquote: collapsed to a few lines, tap to unfold.
-// Override the wording with the `terms` setting (RU source, auto-translated).
-async function sendTerms(ctx: Context, lang: string) {
+const pad2 = (n: number) => String(n).padStart(2, "0");
+const formatDate = (d: Date) => `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.${d.getFullYear()}`;
+
+// Purchase terms / public offer — mandatory onboarding step shown to new users
+// right after they pick a language, and to any existing user who hasn't tapped
+// "Accept" yet (e.g. was created before this feature shipped). Blocks nothing
+// technically — it's just always shown ahead of the shop until accepted once.
+// Override the numbered body with the `terms` setting (RU source, auto-translated);
+// the title/intro/button stay fixed so the accept flow is always recognisable.
+async function sendTermsGate(ctx: Context, lang: string) {
   const custom = (await setting("terms", "")).trim();
   const body = custom ? (lang === "ru" ? custom : await translate(custom, lang)) : t(lang, "terms_body");
+  const title = t(lang, "terms_title", { date: formatDate(new Date()) });
+  const intro = esc(t(lang, "terms_intro"));
+  const kb = new InlineKeyboard().text(t(lang, "terms_accept_btn"), "terms_accept");
+  const text = `${title}\n\n<blockquote>${intro}</blockquote>\n\n${body}`;
   await ctx
-    .reply(`${t(lang, "terms_title")}\n\n<blockquote expandable>${body}</blockquote>`, {
-      parse_mode: "HTML",
-      link_preview_options: { is_disabled: true },
-    })
+    .reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } })
     .catch(async () => {
-      // Fallback if the custom text carries broken markup — deliver it plain.
-      await ctx.reply(stripTags(`${t(lang, "terms_title")}\n\n${body}`)).catch(() => {});
+      // Fallback if custom text carries broken markup — deliver it plain, button intact.
+      await ctx.reply(stripTags(text), { reply_markup: kb }).catch(() => {});
     });
 }
 
@@ -1269,6 +1276,14 @@ async function sendHome(ctx: Context, user: Awaited<ReturnType<typeof getUser>>)
   await ctx.reply(menu.text, { parse_mode: "HTML", reply_markup: menu.kb });
 }
 
+// Gate every entry into the shop behind a one-time terms acceptance: users who
+// haven't tapped "Accept" yet (brand-new, or existing accounts predating this
+// feature) see the terms instead of the home screen.
+async function enterShop(ctx: Context, user: Awaited<ReturnType<typeof getUser>>) {
+  if (!user.termsAcceptedAt) return sendTermsGate(ctx, user.lang);
+  return sendHome(ctx, user);
+}
+
 // ---------- mandatory subscription check middleware ----------
 bot.use(async (ctx, next) => {
   if (String(ctx.from?.id) === ADMIN_ID) {
@@ -1276,7 +1291,7 @@ bot.use(async (ctx, next) => {
   }
 
   const data = ctx.callbackQuery?.data;
-  if (data === "check_subs" || data?.startsWith("lang:")) {
+  if (data === "check_subs" || data === "terms_accept" || data?.startsWith("lang:")) {
     return next();
   }
 
@@ -1334,7 +1349,7 @@ bot.command("start", async (ctx) => {
   const existing = await findUser(ctx);
   const user = await getUser(ctx, ctx.match?.trim() || undefined);
   if (!existing) return showLangPicker(ctx, false); // first visit → pick language
-  await sendHome(ctx, user);
+  await enterShop(ctx, user);
 });
 bot.command("menu", (ctx) => showMenu(ctx, 0, "all", false));
 
@@ -1521,8 +1536,7 @@ bot.on("callback_query:data", async (ctx) => {
       }
       if (unsubscribed.length === 0) {
         await ctx.answerCallbackQuery({ text: t(user.lang, "subs_ok_toast"), show_alert: true }).catch(() => {});
-        await sendTerms(ctx, user.lang);
-        return sendHome(ctx, user);
+        return enterShop(ctx, user);
       } else {
         await ctx.answerCallbackQuery({ text: t(user.lang, "subs_missing_toast"), show_alert: true }).catch(() => {});
         const kb = new InlineKeyboard();
@@ -1541,6 +1555,13 @@ bot.on("callback_query:data", async (ctx) => {
       await ctx.answerCallbackQuery({ text: t(lang, "lang_set") }).catch(() => {});
       await ctx.editMessageText(t(lang, "lang_set")).catch(() => {});
       const user = await getUser(ctx);
+      return enterShop(ctx, user);
+    }
+    if (data === "terms_accept") {
+      const user = await getUser(ctx);
+      await db.botUser.update({ where: { id: user.id }, data: { termsAcceptedAt: new Date() } }).catch(() => {});
+      await ctx.answerCallbackQuery({ text: t(user.lang, "terms_accepted_toast") }).catch(() => {});
+      await ctx.editMessageReplyMarkup().catch(() => {});
       return sendHome(ctx, user);
     }
     const user = await getUser(ctx);
@@ -1807,6 +1828,7 @@ async function ensureSchema() {
     `CREATE INDEX IF NOT EXISTS "MethodPurchase_userId_idx" ON "MethodPurchase"("userId")`,
     `CREATE UNIQUE INDEX IF NOT EXISTS "MethodPurchase_methodId_userId_key" ON "MethodPurchase"("methodId", "userId")`,
     `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "bonusReferrals" INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "termsAcceptedAt" TIMESTAMP(3)`,
   ];
   for (const sql of statements) {
     try {

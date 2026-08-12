@@ -669,6 +669,7 @@ model BotUser {
   refRewardClaimed Boolean @default(false)
   isFormatterAllowed Boolean @default(false)
   bonusReferrals Int     @default(0) // manual referrals added by admin
+  termsAcceptedAt DateTime? // set when the user taps "Accept terms" on /start
   createdAt  DateTime @default(now())
   orders     BotOrder[]
   topups     TopUp[]
