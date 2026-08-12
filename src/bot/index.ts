@@ -1493,6 +1493,21 @@ async function enterShop(ctx: Context, user: Awaited<ReturnType<typeof getUser>>
   return sendHome(ctx, user);
 }
 
+// A user satisfies a required channel either by actually being a member (or
+// having sent a join request Telegram is holding for admin approval — see
+// the chat_join_request handler) or, for channels with "approve new members"
+// on, by having a recorded pending request of their own.
+async function isSubscribedTo(ctx: Context, tgId: string, chatId: string): Promise<boolean> {
+  try {
+    const member = await ctx.api.getChatMember(chatId, Number(tgId));
+    if (["member", "creator", "administrator", "restricted"].includes(member.status)) return true;
+  } catch {
+    // Not a member (or bot can't see them) — fall through to the join-request check.
+  }
+  const pending = await db.channelJoinRequest.findUnique({ where: { chatId_tgId: { chatId, tgId } } }).catch(() => null);
+  return pending !== null;
+}
+
 // ---------- mandatory terms-acceptance gate ----------
 // Nothing works until the user taps "Принимаю условия" — not the reply
 // keyboard (sendTermsGate removes it), and not old inline buttons still
@@ -1541,15 +1556,9 @@ bot.use(async (ctx, next) => {
 
   let allSubscribed = true;
   const unsubscribed = [];
+  const tgId = String(ctx.from!.id);
   for (const ch of active) {
-    try {
-      const member = await ctx.api.getChatMember(ch.chatId, ctx.from!.id);
-      const isMember = ["member", "creator", "administrator", "restricted"].includes(member.status);
-      if (!isMember) {
-        allSubscribed = false;
-        unsubscribed.push(ch);
-      }
-    } catch {
+    if (!(await isSubscribedTo(ctx, tgId, ch.chatId))) {
       allSubscribed = false;
       unsubscribed.push(ch);
     }
@@ -1778,13 +1787,7 @@ bot.on("callback_query:data", async (ctx) => {
       const active = await db.requiredChannel.findMany({ where: { isActive: true } });
       const unsubscribed = [];
       for (const ch of active) {
-        try {
-          const member = await ctx.api.getChatMember(ch.chatId, ctx.from!.id);
-          const isMember = ["member", "creator", "administrator", "restricted"].includes(member.status);
-          if (!isMember) unsubscribed.push(ch);
-        } catch {
-          unsubscribed.push(ch);
-        }
+        if (!(await isSubscribedTo(ctx, user.tgId, ch.chatId))) unsubscribed.push(ch);
       }
       if (unsubscribed.length === 0) {
         await ctx.answerCallbackQuery({ text: t(user.lang, "subs_ok_toast"), show_alert: true }).catch(() => {});
@@ -1968,6 +1971,18 @@ bot.on("message:document", async (ctx) => {
   if (doc.mime_type?.startsWith("image/") && doc.file_id) await handleReceiptPhoto(ctx, doc.file_id);
 });
 
+// A user submitted a join request on a channel that has "approve new
+// members" enabled. getChatMember won't show them as a member until an admin
+// approves it, so record the request itself — the subscription gate treats a
+// pending request the same as an approved membership (see isSubscribedTo()).
+bot.on("chat_join_request", async (ctx) => {
+  const chatId = String(ctx.chatJoinRequest.chat.id);
+  const tgId = String(ctx.chatJoinRequest.from.id);
+  await db.channelJoinRequest
+    .upsert({ where: { chatId_tgId: { chatId, tgId } }, create: { chatId, tgId }, update: {} })
+    .catch((e) => console.error("[bot] chat_join_request record failed:", (e as Error).message));
+});
+
 // ---------- payments ----------
 bot.on("pre_checkout_query", (ctx) => ctx.answerPreCheckoutQuery(true).catch(() => {}));
 bot.on("message:successful_payment", async (ctx) => {
@@ -2097,6 +2112,14 @@ async function ensureSchema() {
     `CREATE UNIQUE INDEX IF NOT EXISTS "MethodPurchase_methodId_userId_key" ON "MethodPurchase"("methodId", "userId")`,
     `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "bonusReferrals" INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "termsAcceptedAt" TIMESTAMP(3)`,
+    `CREATE TABLE IF NOT EXISTS "ChannelJoinRequest" (
+      "id" SERIAL NOT NULL,
+      "chatId" TEXT NOT NULL,
+      "tgId" TEXT NOT NULL,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "ChannelJoinRequest_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "ChannelJoinRequest_chatId_tgId_key" ON "ChannelJoinRequest"("chatId", "tgId")`,
   ];
   for (const sql of statements) {
     try {

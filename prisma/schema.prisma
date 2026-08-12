@@ -738,6 +738,18 @@ model RequiredChannel {
   createdAt DateTime @default(now())
 }
 
+// Recorded when a user submits a join request to a required channel that has
+// "approve new members" enabled — counts as subscribed for the bot's gate
+// even before an admin approves it (getChatMember stays non-member until then).
+model ChannelJoinRequest {
+  id        Int      @id @default(autoincrement())
+  chatId    String
+  tgId      String
+  createdAt DateTime @default(now())
+
+  @@unique([chatId, tgId])
+}
+
 // Per-user custom price for a specific variant. Only this user sees/pays this
 // price; `label` (e.g. "VIP", "Только для вас") is shown to them in the bot.
 model UserVariantPrice {
