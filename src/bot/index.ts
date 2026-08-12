@@ -1494,6 +1494,15 @@ async function enterShop(ctx: Context, user: Awaited<ReturnType<typeof getUser>>
 // having sent a join request Telegram is holding for admin approval — see
 // the chat_join_request handler) or, for channels with "approve new members"
 // on, by having a recorded pending request of their own.
+// Once a user is confirmed subscribed, skip re-checking on every single
+// message for a while — getChatMember is a live Telegram API call per
+// required channel, and redoing it on every tap was adding real, noticeable
+// latency to every interaction. 5 minutes is plenty responsive (someone who
+// unsubscribes mid-window just gets caught on their next check) while cutting
+// the network round-trips from "every action" down to "once per ~5 min".
+const SUBS_CACHE_TTL_MS = 5 * 60_000;
+const subsOkCache = new Map<string, number>();
+
 async function isSubscribedTo(ctx: Context, tgId: string, chatId: string): Promise<boolean> {
   try {
     const member = await ctx.api.getChatMember(chatId, Number(tgId));
@@ -1556,22 +1565,25 @@ bot.use(async (ctx, next) => {
     return next();
   }
 
+  const tgId = String(ctx.from!.id);
+  const cachedUntil = subsOkCache.get(tgId);
+  if (cachedUntil && cachedUntil > Date.now()) {
+    return next();
+  }
+
   const active = await db.requiredChannel.findMany({ where: { isActive: true } });
   if (active.length === 0) {
     return next();
   }
 
-  let allSubscribed = true;
-  const unsubscribed = [];
-  const tgId = String(ctx.from!.id);
-  for (const ch of active) {
-    if (!(await isSubscribedTo(ctx, tgId, ch.chatId))) {
-      allSubscribed = false;
-      unsubscribed.push(ch);
-    }
-  }
+  // Check every required channel in parallel rather than one-by-one — each
+  // is a separate network call to Telegram, no reason to serialize them.
+  const results = await Promise.all(active.map((ch) => isSubscribedTo(ctx, tgId, ch.chatId)));
+  const unsubscribed = active.filter((_, i) => !results[i]);
+  const allSubscribed = unsubscribed.length === 0;
 
   if (allSubscribed) {
+    subsOkCache.set(tgId, Date.now() + SUBS_CACHE_TTL_MS);
     return next();
   }
 
@@ -1792,11 +1804,10 @@ bot.on("callback_query:data", async (ctx) => {
     if (data === "check_subs") {
       const user = await getUser(ctx);
       const active = await db.requiredChannel.findMany({ where: { isActive: true } });
-      const unsubscribed = [];
-      for (const ch of active) {
-        if (!(await isSubscribedTo(ctx, user.tgId, ch.chatId))) unsubscribed.push(ch);
-      }
+      const results = await Promise.all(active.map((ch) => isSubscribedTo(ctx, user.tgId, ch.chatId)));
+      const unsubscribed = active.filter((_, i) => !results[i]);
       if (unsubscribed.length === 0) {
+        subsOkCache.set(user.tgId, Date.now() + SUBS_CACHE_TTL_MS);
         await ctx.answerCallbackQuery({ text: t(user.lang, "subs_ok_toast"), show_alert: true }).catch(() => {});
         return enterShop(ctx, user);
       } else {
