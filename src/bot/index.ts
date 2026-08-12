@@ -33,6 +33,19 @@ function giftsBannerFile(): InputFile | null {
   return giftsBannerBuffer.length > 0 ? new InputFile(giftsBannerBuffer, "gifts-banner.png") : null;
 }
 
+// Promo-code how-to video (assets/promo-instructions.mp4), read once and cached.
+let promoInstructionsBuffer: Buffer | null = null;
+function promoInstructionsFile(): InputFile | null {
+  if (promoInstructionsBuffer === null) {
+    try {
+      promoInstructionsBuffer = fs.readFileSync(path.join(__dirname, "assets", "promo-instructions.mp4"));
+    } catch {
+      promoInstructionsBuffer = Buffer.alloc(0);
+    }
+  }
+  return promoInstructionsBuffer.length > 0 ? new InputFile(promoInstructionsBuffer, "promo-instructions.mp4") : null;
+}
+
 const token = process.env.TELEGRAM_BOT_TOKEN ?? "";
 const ADMIN_ID = String(process.env.TELEGRAM_ADMIN_CHAT_ID ?? "");
 const CARD_PROVIDER_TOKEN = process.env.TELEGRAM_PROVIDER_TOKEN ?? "";
@@ -212,7 +225,7 @@ function mainKeyboard(lang: string) {
   return new Keyboard()
     .text(t(lang, "btn_shop")).row()
     .text(t(lang, "btn_wallet")).text(t(lang, "btn_freebies")).row()
-    .text(t(lang, "btn_profile"))
+    .text(t(lang, "btn_profile")).text(t(lang, "btn_instructions")).row()
     .resized().persistent();
 }
 
@@ -1605,6 +1618,23 @@ bot.command(["referral", "invite", "taklif"], async (ctx) => { const u = await g
 bot.command(["support", "yordam"], async (ctx) => { const u = await getUser(ctx); const { text, kb } = await supportView(u.lang); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } }); });
 bot.command(["language", "lang", "til"], (ctx) => showLangPicker(ctx, false));
 
+// Promo-code how-to video: how to get one and where to enter it in the bot.
+async function showInstructions(ctx: Context) {
+  const user = await getUser(ctx);
+  const lang = user.lang;
+  const video = promoInstructionsFile();
+  const caption = t(lang, "instructions_caption");
+  const kb = new InlineKeyboard().text(t(lang, "promo_btn"), "promo").row().text(t(lang, "to_shop"), "m:0:all");
+  if (video) {
+    await ctx.replyWithVideo(video, { caption, parse_mode: "HTML", reply_markup: kb }).catch(async () => {
+      await ctx.reply(caption, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+    });
+  } else {
+    await ctx.reply(caption, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+  }
+}
+bot.command(["instructions", "howto", "instruksiya"], showInstructions);
+
 // ── Методы / гайды ──────────────────────────────────────────────
 function methodTitle(m: { titleRu: string; titleUz: string; titleEn: string }, lang: string): string {
   return lang === "uz" ? m.titleUz || m.titleRu : lang === "en" ? m.titleEn || m.titleRu : m.titleRu;
@@ -1708,6 +1738,7 @@ bot.hears(btnVariants("btn_freebies"), (ctx) => showGifts(ctx));
 bot.hears(btnVariants("btn_wallet"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = balanceView(u.lang, u.balance); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
 bot.hears(btnVariants("btn_orders"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = await ordersView(u.lang, u.id); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => ctx.reply(stripTags(text), { reply_markup: kb }).catch(() => {})); });
 bot.hears(btnVariants("btn_profile"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = await profileView(u); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
+bot.hears(btnVariants("btn_instructions"), showInstructions);
 bot.hears(btnVariants("btn_refer"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = referView(ctx, u); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
 bot.hears(btnVariants("btn_support"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = await supportView(u.lang); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } }); });
 bot.hears(btnVariants("btn_language"), (ctx) => showLangPicker(ctx, false));
