@@ -16,6 +16,22 @@ import { t, LANGS, LANG_NAMES, normalizeLang, btnVariants, type Lang } from "./i
 import { generateVerificationCode } from "../lib/orderCode";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+
+// Referral-gifts banner (assets/gifts-banner.png), read once and cached.
+// Missing file just means the teaser sends without an image — never fatal.
+let giftsBannerBuffer: Buffer | null = null;
+function giftsBannerFile(): InputFile | null {
+  if (giftsBannerBuffer === null) {
+    try {
+      giftsBannerBuffer = fs.readFileSync(path.join(__dirname, "assets", "gifts-banner.png"));
+    } catch {
+      giftsBannerBuffer = Buffer.alloc(0);
+    }
+  }
+  return giftsBannerBuffer.length > 0 ? new InputFile(giftsBannerBuffer, "gifts-banner.png") : null;
+}
 
 const token = process.env.TELEGRAM_BOT_TOKEN ?? "";
 const ADMIN_ID = String(process.env.TELEGRAM_ADMIN_CHAT_ID ?? "");
@@ -1249,8 +1265,14 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
   kb.text(t(lang, "btn_refer"), "ref").row();
   kb.text(t(lang, "to_shop"), "m:0:all");
 
-  if (edit) await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
-  else await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+  if (edit) {
+    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+    return;
+  }
+  // New message (e.g. the /start teaser): lead with the banner image if we have one.
+  const banner = giftsBannerFile();
+  if (banner) await ctx.replyWithPhoto(banner).catch(() => {});
+  await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
 }
 
 // ---------- top-up ----------
