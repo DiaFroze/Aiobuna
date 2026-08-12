@@ -52,21 +52,6 @@ const promoInstructionsFile = () => videoAssetFile("promo-instructions.mp4");
 const howToPayFile = () => videoAssetFile("how-to-pay.mp4");
 const howToActivateFile = () => videoAssetFile("how-to-activate.mp4");
 
-// Sent once when the qty/buy screen first opens for a purchase (not on every
-// +/- adjustment, which reuses that same screen via editMessageText).
-async function sendHowToPayVideo(ctx: Context, lang: string) {
-  const video = howToPayFile();
-  if (!video) return;
-  await ctx.replyWithVideo(video, { caption: t(lang, "how_to_pay_caption"), parse_mode: "HTML" }).catch(() => {});
-}
-
-// Sent right after a product is successfully delivered (activation link etc).
-async function sendHowToActivateVideo(tgId: string, lang: string) {
-  const video = howToActivateFile();
-  if (!video) return;
-  await bot.api.sendVideo(tgId, video, { caption: t(lang, "how_to_activate_caption"), parse_mode: "HTML" }).catch(() => {});
-}
-
 const token = process.env.TELEGRAM_BOT_TOKEN ?? "";
 const ADMIN_ID = String(process.env.TELEGRAM_ADMIN_CHAT_ID ?? "");
 const CARD_PROVIDER_TOKEN = process.env.TELEGRAM_PROVIDER_TOKEN ?? "";
@@ -960,44 +945,51 @@ async function executePurchase(tgId: string, variantId: number, qty: number) {
       data: { payload: finalPayload, status: "delivered" },
     });
 
-    // Success: show delivery
+    // Success: show delivery. One message: the how-to-activate video with the
+    // order confirmation as its caption (a text message can't gain a video via
+    // edit, so the "processing…" placeholder is deleted and replaced instead
+    // of stacking a separate video on top of it).
     const u = await db.botUser.findUnique({ where: { id: user.id } });
     const isLargeOrder = deliveredQty > 5;
+    const activateVideo = howToActivateFile();
+    const deliveredKb = new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all");
 
     if (isLargeOrder) {
-      // Large order: send as text file (no size limit, guaranteed delivery)
-      if (procMsg) {
-        await bot.api.editMessageText(
-          tgId,
-          procMsg.message_id,
-          `${t(lang, "order_paid", { id: reserve.orderId })}\n\n` +
-            `${esc(label)}\n${t(lang, "charged", { v: money(total, lang) })}\n` +
-            `${t(lang, "remaining", { v: money(u?.balance ?? 0, lang) })}\n\n` +
-            `✅ <b>Файл со ссылками отправляется...</b>`,
-          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all") }
-        ).catch(() => {});
+      // Large order: confirmation (+ video if any) first, links follow as a .txt file.
+      const confirmText =
+        `${t(lang, "order_paid", { id: reserve.orderId })}\n\n` +
+        `${esc(label)}\n${t(lang, "charged", { v: money(total, lang) })}\n` +
+        `${t(lang, "remaining", { v: money(u?.balance ?? 0, lang) })}\n\n` +
+        `✅ <b>Файл со ссылками отправляется...</b>`;
+      if (activateVideo) {
+        if (procMsg) await bot.api.deleteMessage(tgId, procMsg.message_id).catch(() => {});
+        await bot.api.sendVideo(tgId, activateVideo, { caption: confirmText, parse_mode: "HTML", reply_markup: deliveredKb }).catch(async () => {
+          await bot.api.sendMessage(tgId, confirmText, { parse_mode: "HTML", reply_markup: deliveredKb }).catch(() => {});
+        });
+      } else if (procMsg) {
+        await bot.api.editMessageText(tgId, procMsg.message_id, confirmText, { parse_mode: "HTML", reply_markup: deliveredKb }).catch(() => {});
       }
-      // Send payload as .txt file
       const filename = `order_${reserve.orderId}.txt`;
       const fileContent = Buffer.from(finalPayload, "utf-8");
       await bot.api.sendDocument(tgId, new InputFile(fileContent, filename), {
         caption: `📄 ${esc(label)} (${deliveredQty} ссылок)`,
       }).catch(() => {});
     } else {
-      // Small order: show inline in message
-      if (procMsg) {
-        await bot.api.editMessageText(
-          tgId,
-          procMsg.message_id,
-          `${t(lang, "order_paid", { id: reserve.orderId })}\n\n` +
-            `${esc(label)}\n${t(lang, "charged", { v: money(total, lang) })}\n` +
-            `${t(lang, "remaining", { v: money(u?.balance ?? 0, lang) })}\n\n` +
-            `${t(lang, "your_goods")}\n<code>${esc(finalPayload)}</code>`,
-          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all") }
-        ).catch(() => {});
+      // Small order: the delivered goods themselves are the caption.
+      const confirmText =
+        `${t(lang, "order_paid", { id: reserve.orderId })}\n\n` +
+        `${esc(label)}\n${t(lang, "charged", { v: money(total, lang) })}\n` +
+        `${t(lang, "remaining", { v: money(u?.balance ?? 0, lang) })}\n\n` +
+        `${t(lang, "your_goods")}\n<code>${esc(finalPayload)}</code>`;
+      if (activateVideo) {
+        if (procMsg) await bot.api.deleteMessage(tgId, procMsg.message_id).catch(() => {});
+        await bot.api.sendVideo(tgId, activateVideo, { caption: confirmText, parse_mode: "HTML", reply_markup: deliveredKb }).catch(async () => {
+          await bot.api.sendMessage(tgId, confirmText, { parse_mode: "HTML", reply_markup: deliveredKb }).catch(() => {});
+        });
+      } else if (procMsg) {
+        await bot.api.editMessageText(tgId, procMsg.message_id, confirmText, { parse_mode: "HTML", reply_markup: deliveredKb }).catch(() => {});
       }
     }
-    await sendHowToActivateVideo(tgId, lang);
 
     if (ADMIN_ID) {
       const source = stockQty > 0 && supplierQty > 0 ? "склад+поставщик" : stockQty > 0 ? "склад" : "поставщик";
@@ -1074,7 +1066,18 @@ async function doBuy(ctx: Context, variantId: number, qty: number) {
     `Пожалуйста, выберите способ оплаты — после зачисления покупка оформится автоматически:`;
 
   await ctx.answerCallbackQuery().catch(() => {});
-  await ctx.editMessageText(promptText, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+  // One message: the how-to-pay video with the price/payment-options text as
+  // its caption (a text message can't gain a video via edit, so replace the
+  // qty-chooser screen with this instead of stacking a separate video on top).
+  const payVideo = howToPayFile();
+  if (payVideo) {
+    await ctx.deleteMessage().catch(() => {});
+    await ctx.replyWithVideo(payVideo, { caption: promptText, parse_mode: "HTML", reply_markup: kb }).catch(async () => {
+      await ctx.reply(promptText, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+    });
+  } else {
+    await ctx.editMessageText(promptText, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+  }
 }
 
 // ---------- views ----------
@@ -1828,7 +1831,7 @@ bot.on("callback_query:data", async (ctx) => {
     const [tag, ...rest] = data.split(":");
     if (tag === "m") { const page = Number(rest[0]) || 0; const sort = (SORTS.includes(rest[1] as Sort) ? rest[1] : "all") as Sort; await ctx.answerCallbackQuery().catch(() => {}); return showMenu(ctx, page, sort, true); }
     if (tag === "p") return showProduct(ctx, Number(rest[0]), `${Number(rest[1]) || 0}:${rest[2] ?? "all"}`);
-    if (tag === "b") { await showQtyChooser(ctx, Number(rest[0]), 1, `${rest[1] ?? "0"}:${rest[2] ?? "all"}`, true); return sendHowToPayVideo(ctx, lang); }
+    if (tag === "b") return showQtyChooser(ctx, Number(rest[0]), 1, `${rest[1] ?? "0"}:${rest[2] ?? "all"}`, true);
     if (tag === "q") return showQtyChooser(ctx, Number(rest[0]), Number(rest[1]) || 1, `${rest[2] ?? "0"}:${rest[3] ?? "all"}`, true);
     if (tag === "qi") { pending.set(String(ctx.from?.id), { type: "qty", variantId: Number(rest[0]), back: `${rest[1] ?? "0"}:${rest[2] ?? "all"}` }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "enter_qty_msg")); }
     if (tag === "bc") return doBuy(ctx, Number(rest[0]), Number(rest[1]) || 1);
@@ -1946,8 +1949,7 @@ bot.on("message:text", async (ctx) => {
   const n = Math.floor(Number(ctx.message.text.replace(/[^\d]/g, "")));
   if (state.type === "qty") {
     if (!Number.isFinite(n) || n < 1) return ctx.reply(t(lang, "enter_number"));
-    await showQtyChooser(ctx, state.variantId, n, state.back, false);
-    return sendHowToPayVideo(ctx, lang);
+    return showQtyChooser(ctx, state.variantId, n, state.back, false);
   }
   if (!Number.isFinite(n) || n < MIN_TOPUP) return ctx.reply(t(lang, "min_amount", { min: money(MIN_TOPUP, lang) }));
   const b = await buildTopupMethods(lang, n);
