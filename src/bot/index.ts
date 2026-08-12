@@ -694,7 +694,8 @@ async function notifySalesGroup(user: { firstName: string | null; username: stri
   });
 }
 
-async function executePurchase(tgId: string, variantId: number, qty: number) {
+async function executePurchase(tgId: string, variantId: number, qty: number, refPointsCost?: number) {
+  const isRefGift = refPointsCost !== undefined && refPointsCost > 0;
   const user = await db.botUser.findUnique({ where: { tgId } });
   if (!user) return;
   const lang = user.lang;
@@ -713,14 +714,15 @@ async function executePurchase(tgId: string, variantId: number, qty: number) {
   }
   const finalQty = clamp(Math.floor(qty) || 1, 1, max);
   const eff = await effPriceFor(user.id, variantId, v.priceUzs);
-  const total = eff.price * finalQty;
+  const total = isRefGift ? 0 : eff.price * finalQty;
   const label = finalQty > 1 ? `${baseTitle} ×${finalQty}` : baseTitle;
 
   // --- Manual delivery: charge, then the admin sends the goods by hand ---
   if (v.manualDelivery) {
     const reserve = await db.$transaction(async (tx) => {
       const u = await tx.botUser.findUnique({ where: { id: user.id } });
-      if (!u || u.balance < total) return { error: "balance" as const };
+      if (!u) return { error: "unavailable" as const };
+      if (!isRefGift && u.balance < total) return { error: "balance" as const };
       
       const freshV = await tx.variant.findUnique({ where: { id: variantId } });
       if (!freshV || !freshV.isActive) return { error: "unavailable" as const };
@@ -733,8 +735,10 @@ async function executePurchase(tgId: string, variantId: number, qty: number) {
         });
       }
 
-      await tx.botUser.update({ where: { id: user.id }, data: { balance: { decrement: total } } });
-      const order = await tx.botOrder.create({ data: { userId: user.id, variantId, titleRu: label, priceUsdt: total, payload: "", source: "manual", status: "awaiting_delivery" } });
+      if (!isRefGift && total > 0) {
+        await tx.botUser.update({ where: { id: user.id }, data: { balance: { decrement: total } } });
+      }
+      const order = await tx.botOrder.create({ data: { userId: user.id, variantId, titleRu: label, priceUsdt: 0, payload: "", source: isRefGift ? "referral" : "manual", status: "awaiting_delivery" } });
       return { orderId: order.id };
     });
 
@@ -765,15 +769,15 @@ async function executePurchase(tgId: string, variantId: number, qty: number) {
     if (ADMIN_ID) {
       await bot.api.sendMessage(
         ADMIN_ID,
-        `📦 <b>Ручная выдача, заказ #${reserve.orderId}</b>\n` +
-        `Товар: ${esc(label)} — ${money(total, lang)}\n` +
+        `📦 <b>Ручная выдача (${isRefGift ? "🎁 подарок" : "заказ"}, #${reserve.orderId})</b>\n` +
+        `Товар: ${esc(label)} — ${isRefGift ? `${refPointsCost} реф.` : money(total, lang)}\n` +
         `Покупатель: ${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})\n` +
         `Код проверки: <code>${code}</code>\n\n` +
         `Выдать: <code>/give ${reserve.orderId} логин:пароль</code>`,
         { parse_mode: "HTML" }
       ).catch(() => {});
     }
-    await notifySalesGroup(user, label, total);
+    await notifySalesGroup(user, label, 0);
     return;
   }
 
@@ -786,16 +790,19 @@ async function executePurchase(tgId: string, variantId: number, qty: number) {
   // Charge & create order in a transaction
   const reserve = await db.$transaction(async (tx) => {
     const u = await tx.botUser.findUnique({ where: { id: user.id } });
-    if (!u || u.balance < total) return { error: "balance" as const };
-    await tx.botUser.update({ where: { id: user.id }, data: { balance: { decrement: total } } });
+    if (!u) return { error: "unavailable" as const };
+    if (!isRefGift && u.balance < total) return { error: "balance" as const };
+    if (!isRefGift && total > 0) {
+      await tx.botUser.update({ where: { id: user.id }, data: { balance: { decrement: total } } });
+    }
     const order = await tx.botOrder.create({
       data: {
         userId: user.id,
         variantId,
         titleRu: label,
-        priceUsdt: total,
+        priceUsdt: 0,
         payload: "", // populated below as we gather items
-        source: "hybrid", // stock + supplier
+        source: isRefGift ? "referral" : "hybrid", // stock + supplier
         status: "processing",
       },
     });
@@ -893,7 +900,7 @@ async function executePurchase(tgId: string, variantId: number, qty: number) {
         await bot.api.sendMessage(
           ADMIN_ID,
           `⚠️ <b>Довыдать вручную, заказ #${reserve.orderId}</b> (${deliveredQty}/${finalQty})\n` +
-          `Товар: ${esc(label)} — ${money(total, lang)}\n` +
+          `Товар: ${esc(label)} — ${isRefGift ? `${refPointsCost} реф.` : money(total, lang)}\n` +
           `Покупатель: ${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})\n` +
           `Код проверки: <code>${code}</code>\n\n` +
           gotLine +
@@ -901,7 +908,7 @@ async function executePurchase(tgId: string, variantId: number, qty: number) {
           { parse_mode: "HTML" }
         ).catch(() => {});
       }
-      if (deliveredQty > 0) await notifySalesGroup(user, label, total);
+      if (deliveredQty > 0) await notifySalesGroup(user, label, 0);
       return;
     }
 
@@ -919,11 +926,15 @@ async function executePurchase(tgId: string, variantId: number, qty: number) {
     const activateVideo = howToActivateFile();
     const deliveredKb = new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all");
 
+    const chargeLine = isRefGift
+      ? `🎁 <b>Подарок за ${refPointsCost} реф.</b>`
+      : `${t(lang, "charged", { v: money(total, lang) })}`;
+
     if (isLargeOrder) {
       // Large order: confirmation (+ video if any) first, links follow as a .txt file.
       const confirmText =
         `${t(lang, "order_paid", { id: reserve.orderId })}\n\n` +
-        `${esc(label)}\n${t(lang, "charged", { v: money(total, lang) })}\n` +
+        `${esc(label)}\n${chargeLine}\n` +
         `${t(lang, "remaining", { v: money(u?.balance ?? 0, lang) })}\n\n` +
         `✅ <b>Файл со ссылками отправляется...</b>`;
       if (activateVideo) {
@@ -943,7 +954,7 @@ async function executePurchase(tgId: string, variantId: number, qty: number) {
       // Small order: the delivered goods themselves are the caption.
       const confirmText =
         `${t(lang, "order_paid", { id: reserve.orderId })}\n\n` +
-        `${esc(label)}\n${t(lang, "charged", { v: money(total, lang) })}\n` +
+        `${esc(label)}\n${chargeLine}\n` +
         `${t(lang, "remaining", { v: money(u?.balance ?? 0, lang) })}\n\n` +
         `${t(lang, "your_goods")}\n<code>${esc(finalPayload)}</code>`;
       if (activateVideo) {
@@ -959,18 +970,25 @@ async function executePurchase(tgId: string, variantId: number, qty: number) {
     if (ADMIN_ID) {
       const source = stockQty > 0 && supplierQty > 0 ? "склад+поставщик" : stockQty > 0 ? "склад" : "поставщик";
       await bot.api
-        .sendMessage(ADMIN_ID, `🛒 (${source}) <b>${esc(label)}</b>\n${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})\n${money(total, lang)} · #${reserve.orderId}`, {
+        .sendMessage(ADMIN_ID, `🛒 (${source}) <b>${esc(label)}</b>\n${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})\n${isRefGift ? `🎁 ${refPointsCost} реф.` : money(total, lang)} · #${reserve.orderId}`, {
           parse_mode: "HTML",
         })
         .catch(() => {});
     }
-    await notifySalesGroup(user, label, total);
+    await notifySalesGroup(user, label, 0);
   } catch (e) {
     // Critical error: rollback charge
-    await db.$transaction([
-      db.botUser.update({ where: { id: user.id }, data: { balance: { increment: total } } }),
-      db.botOrder.update({ where: { id: reserve.orderId }, data: { status: "failed" } }),
-    ]);
+    if (!isRefGift) {
+      await db.$transaction([
+        db.botUser.update({ where: { id: user.id }, data: { balance: { increment: total } } }),
+        db.botOrder.update({ where: { id: reserve.orderId }, data: { status: "failed" } }),
+      ]);
+    } else if (refPointsCost) {
+      await db.$transaction([
+        db.botUser.update({ where: { id: user.id }, data: { spentReferrals: { decrement: refPointsCost } } }),
+        db.botOrder.update({ where: { id: reserve.orderId }, data: { status: "failed" } }),
+      ]);
+    }
     console.error("[bot] hybrid order failed critically:", (e as Error).message);
     if (procMsg) {
       await bot.api
@@ -1122,11 +1140,7 @@ async function buyForReferrals(ctx: Context, variantId: number) {
   const max = await availableStock(v);
   if (max <= 0) return ctx.answerCallbackQuery({ text: t(lang, "out_of_stock"), show_alert: true });
 
-  const eff = await effPriceFor(user.id, variantId, v.priceUzs);
-  const itemPrice = Math.max(1, eff.price); // needs a positive "amount" for the balance flow
-
-  // Atomically: spend the points, top up the balance with exactly one item's
-  // price. Fails cleanly if the user's points changed between UI and click.
+  // Atomically: spend ONLY points (no money charge or temporary balance increment)
   const reserve = await db.$transaction(async (tx) => {
     const fresh = await tx.botUser.findUnique({ where: { id: user.id } });
     if (!fresh) return { error: "user" as const };
@@ -1135,7 +1149,7 @@ async function buyForReferrals(ctx: Context, variantId: number) {
     if (stillHave < pointsCost) return { error: "points" as const };
     await tx.botUser.update({
       where: { id: user.id },
-      data: { spentReferrals: { increment: pointsCost }, balance: { increment: itemPrice } },
+      data: { spentReferrals: { increment: pointsCost } },
     });
     return { ok: true as const };
   });
