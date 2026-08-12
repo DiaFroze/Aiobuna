@@ -1184,7 +1184,7 @@ async function sendTermsGate(ctx: Context, lang: string) {
   // below is tappable until that's done.
   await ctx.reply(title, { parse_mode: "HTML", reply_markup: { remove_keyboard: true } }).catch(() => {});
 
-  const text = `<blockquote>${intro}</blockquote>\n\n${body}`;
+  const text = `<blockquote>${intro}\n\n${body}</blockquote>`;
   await ctx
     .reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } })
     .catch(async () => {
