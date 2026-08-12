@@ -5,9 +5,9 @@ import { PageHeader, StatCard } from "@/components/admin/ui";
 
 export const dynamic = "force-dynamic";
 
-const UZS_RATE = Number(process.env.USDT_UZS_RATE ?? 12600);
-const uzs = (usdt: number) =>
-  `${Math.round((usdt ?? 0) * UZS_RATE).toLocaleString("ru-RU")} сум`;
+// BotOrder.priceUsdt and BotUser.balance already hold plain UZS amounts (the
+// bot never actually deals in USDT) — format directly, no rate conversion.
+const uzs = (v: number) => `${Math.round(v ?? 0).toLocaleString("ru-RU")} сум`;
 
 export default async function DashboardPage() {
   const admins = await prisma.admin.count();

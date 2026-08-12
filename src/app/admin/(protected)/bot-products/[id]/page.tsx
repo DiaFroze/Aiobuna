@@ -121,7 +121,7 @@ export default async function BotProductEditPage({ params }: { params: { id: str
       {product.plans.map((plan) => (
         <div key={plan.id} className="card p-5 space-y-3">
           <h3 className="font-semibold">Тариф: {plan.titleRu} — варианты (сроки и цены)</h3>
-          {/* Editable variants — set your own price in USDT and UZS per item */}
+          {/* Editable variants — price is set in сум (UZS) per item */}
           {plan.variants.length === 0 ? (
             <p className="text-sm text-muted">Нет вариантов. Добавьте ниже.</p>
           ) : (

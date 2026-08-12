@@ -1,19 +1,16 @@
 import "server-only";
 import { prisma } from "../db";
-import { env } from "../env";
 
 // Global settings with sane defaults. Stored as JSON in Setting table.
+// The shop only ever deals in UZS ("сум") — no markup-percent engine or
+// USDT/currency-rate conversion is applied anywhere in pricing.
 
 export interface GlobalSettings {
-  globalMarkupPercent: number;
   defaultRoundingMode: "NONE" | "NEAREST_05" | "NEAREST_10" | "NEAREST_1000" | "PSYCHOLOGICAL";
-  sellCurrency: string;
 }
 
 const DEFAULTS: GlobalSettings = {
-  globalMarkupPercent: 30,
   defaultRoundingMode: "NEAREST_05",
-  sellCurrency: "USDT",
 };
 
 export async function getGlobalSettings(): Promise<GlobalSettings> {
@@ -30,12 +27,4 @@ export async function setGlobalSettings(patch: Partial<GlobalSettings>): Promise
     update: { value: next },
   });
   return next;
-}
-
-/** USDT->UZS rate: DB CurrencyRate wins, else env fallback. */
-export async function getUsdtUzsRate(): Promise<number> {
-  const rate = await prisma.currencyRate.findUnique({
-    where: { base_quote: { base: "USDT", quote: "UZS" } },
-  });
-  return rate ? Number(rate.rate) : env.usdtUzsRate();
 }

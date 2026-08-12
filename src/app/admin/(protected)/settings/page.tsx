@@ -1,21 +1,16 @@
 import { PageHeader } from "@/components/admin/ui";
-import { getGlobalSettings, getUsdtUzsRate } from "@/lib/services/settings";
+import { getGlobalSettings } from "@/lib/services/settings";
 import { saveSettingsAction } from "./actions";
 
 export const dynamic = "force-dynamic";
 
 export default async function SettingsPage() {
   const settings = await getGlobalSettings();
-  const rate = await getUsdtUzsRate();
 
   return (
     <div className="max-w-lg">
-      <PageHeader title="Настройки" subtitle="Глобальная наценка, округление, курс валют." />
+      <PageHeader title="Настройки" subtitle="Округление цен. Все цены и суммы — в сумах (UZS)." />
       <form action={saveSettingsAction} className="card p-5 space-y-4">
-        <div>
-          <label className="text-sm text-muted">Глобальная наценка по умолчанию, %</label>
-          <input name="globalMarkupPercent" defaultValue={settings.globalMarkupPercent} className="input mt-1" />
-        </div>
         <div>
           <label className="text-sm text-muted">Правило округления</label>
           <select name="defaultRoundingMode" defaultValue={settings.defaultRoundingMode} className="input mt-1">
@@ -25,18 +20,6 @@ export default async function SettingsPage() {
             <option value="NEAREST_1000">До 1000 (8570 → 9000)</option>
             <option value="PSYCHOLOGICAL">Психологическое (.99)</option>
           </select>
-        </div>
-        <div>
-          <label className="text-sm text-muted">Валюта продажи по умолчанию</label>
-          <select name="sellCurrency" defaultValue={settings.sellCurrency} className="input mt-1">
-            <option value="USDT">USDT</option>
-            <option value="USD">USD</option>
-            <option value="UZS">UZS</option>
-          </select>
-        </div>
-        <div>
-          <label className="text-sm text-muted">Курс USDT → UZS</label>
-          <input name="usdtUzsRate" defaultValue={rate} className="input mt-1" />
         </div>
         <button className="btn-primary">Сохранить</button>
       </form>

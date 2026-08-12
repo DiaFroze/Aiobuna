@@ -34,7 +34,7 @@ export default async function BotTopUpsPage() {
       <div className="grid sm:grid-cols-3 gap-4">
         <StatCard label="Ожидают подтверждения" value={String(pending)} tone={pending ? "warning" : "default"} />
         <StatCard label="Пользователей бота" value={String(users)} />
-        <StatCard label="Сумма балансов" value={`${(totalBalanceAgg._sum.balance ?? 0).toFixed(2)} USDT`} />
+        <StatCard label="Сумма балансов" value={`${Math.round(totalBalanceAgg._sum.balance ?? 0).toLocaleString("ru-RU")} сум`} />
       </div>
 
       {/* Manual credit / debit */}
@@ -46,7 +46,7 @@ export default async function BotTopUpsPage() {
             <input name="tgId" required className="input mt-1 font-mono" placeholder="напр. 7797972248" />
           </div>
           <div>
-            <label className="text-sm text-muted">Сумма USDT (можно со знаком −)</label>
+            <label className="text-sm text-muted">Сумма в сумах (можно со знаком −)</label>
             <input name="amount" required className="input mt-1" placeholder="напр. 10 или -5" />
           </div>
           <button className="btn-primary">Применить</button>
@@ -67,7 +67,7 @@ export default async function BotTopUpsPage() {
                 {t.user.firstName ?? "—"} {t.user.username ? `@${t.user.username}` : ""}
               </td>
               <td className="px-4 py-3 font-mono text-xs text-muted">{t.user.tgId}</td>
-              <td className="px-4 py-3 font-medium">{t.amount.toFixed(2)} USDT</td>
+              <td className="px-4 py-3 font-medium">{Math.round(t.amount).toLocaleString("ru-RU")} сум</td>
               <td className="px-4 py-3">
                 <span className={`badge ${STATUS[t.status] ?? ""}`}>{t.status}</span>
               </td>

@@ -21,8 +21,6 @@ export const env = {
   credentialsEncKey: () => required("CREDENTIALS_ENC_KEY"),
   supplierMode: (): "mock" | "live" =>
     (process.env.SUPPLIER_MODE as "mock" | "live") ?? "mock",
-  defaultCurrency: () => process.env.DEFAULT_CURRENCY ?? "USDT",
-  usdtUzsRate: () => Number(process.env.USDT_UZS_RATE ?? "12600"),
   telegramToken: () => process.env.TELEGRAM_BOT_TOKEN ?? "",
   telegramChatId: () => process.env.TELEGRAM_ADMIN_CHAT_ID ?? "",
   seedAdminEmail: () => process.env.SEED_ADMIN_EMAIL ?? "admin@sb.eu",
