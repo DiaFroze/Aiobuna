@@ -33,17 +33,38 @@ function giftsBannerFile(): InputFile | null {
   return giftsBannerBuffer.length > 0 ? new InputFile(giftsBannerBuffer, "gifts-banner.png") : null;
 }
 
-// Promo-code how-to video (assets/promo-instructions.mp4), read once and cached.
-let promoInstructionsBuffer: Buffer | null = null;
-function promoInstructionsFile(): InputFile | null {
-  if (promoInstructionsBuffer === null) {
+// Tutorial video assets — each read from disk once and cached in memory.
+// A missing file just means that step sends text-only, never fatal.
+const videoAssetCache = new Map<string, Buffer>();
+function videoAssetFile(filename: string): InputFile | null {
+  let buf = videoAssetCache.get(filename);
+  if (buf === undefined) {
     try {
-      promoInstructionsBuffer = fs.readFileSync(path.join(__dirname, "assets", "promo-instructions.mp4"));
+      buf = fs.readFileSync(path.join(__dirname, "assets", filename));
     } catch {
-      promoInstructionsBuffer = Buffer.alloc(0);
+      buf = Buffer.alloc(0);
     }
+    videoAssetCache.set(filename, buf);
   }
-  return promoInstructionsBuffer.length > 0 ? new InputFile(promoInstructionsBuffer, "promo-instructions.mp4") : null;
+  return buf.length > 0 ? new InputFile(buf, filename) : null;
+}
+const promoInstructionsFile = () => videoAssetFile("promo-instructions.mp4");
+const howToPayFile = () => videoAssetFile("how-to-pay.mp4");
+const howToActivateFile = () => videoAssetFile("how-to-activate.mp4");
+
+// Sent once when the qty/buy screen first opens for a purchase (not on every
+// +/- adjustment, which reuses that same screen via editMessageText).
+async function sendHowToPayVideo(ctx: Context, lang: string) {
+  const video = howToPayFile();
+  if (!video) return;
+  await ctx.replyWithVideo(video, { caption: t(lang, "how_to_pay_caption"), parse_mode: "HTML" }).catch(() => {});
+}
+
+// Sent right after a product is successfully delivered (activation link etc).
+async function sendHowToActivateVideo(tgId: string, lang: string) {
+  const video = howToActivateFile();
+  if (!video) return;
+  await bot.api.sendVideo(tgId, video, { caption: t(lang, "how_to_activate_caption"), parse_mode: "HTML" }).catch(() => {});
 }
 
 const token = process.env.TELEGRAM_BOT_TOKEN ?? "";
@@ -976,6 +997,7 @@ async function executePurchase(tgId: string, variantId: number, qty: number) {
         ).catch(() => {});
       }
     }
+    await sendHowToActivateVideo(tgId, lang);
 
     if (ADMIN_ID) {
       const source = stockQty > 0 && supplierQty > 0 ? "склад+поставщик" : stockQty > 0 ? "склад" : "поставщик";
@@ -1806,7 +1828,7 @@ bot.on("callback_query:data", async (ctx) => {
     const [tag, ...rest] = data.split(":");
     if (tag === "m") { const page = Number(rest[0]) || 0; const sort = (SORTS.includes(rest[1] as Sort) ? rest[1] : "all") as Sort; await ctx.answerCallbackQuery().catch(() => {}); return showMenu(ctx, page, sort, true); }
     if (tag === "p") return showProduct(ctx, Number(rest[0]), `${Number(rest[1]) || 0}:${rest[2] ?? "all"}`);
-    if (tag === "b") return showQtyChooser(ctx, Number(rest[0]), 1, `${rest[1] ?? "0"}:${rest[2] ?? "all"}`, true);
+    if (tag === "b") { await showQtyChooser(ctx, Number(rest[0]), 1, `${rest[1] ?? "0"}:${rest[2] ?? "all"}`, true); return sendHowToPayVideo(ctx, lang); }
     if (tag === "q") return showQtyChooser(ctx, Number(rest[0]), Number(rest[1]) || 1, `${rest[2] ?? "0"}:${rest[3] ?? "all"}`, true);
     if (tag === "qi") { pending.set(String(ctx.from?.id), { type: "qty", variantId: Number(rest[0]), back: `${rest[1] ?? "0"}:${rest[2] ?? "all"}` }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "enter_qty_msg")); }
     if (tag === "bc") return doBuy(ctx, Number(rest[0]), Number(rest[1]) || 1);
@@ -1924,7 +1946,8 @@ bot.on("message:text", async (ctx) => {
   const n = Math.floor(Number(ctx.message.text.replace(/[^\d]/g, "")));
   if (state.type === "qty") {
     if (!Number.isFinite(n) || n < 1) return ctx.reply(t(lang, "enter_number"));
-    return showQtyChooser(ctx, state.variantId, n, state.back, false);
+    await showQtyChooser(ctx, state.variantId, n, state.back, false);
+    return sendHowToPayVideo(ctx, lang);
   }
   if (!Number.isFinite(n) || n < MIN_TOPUP) return ctx.reply(t(lang, "min_amount", { min: money(MIN_TOPUP, lang) }));
   const b = await buildTopupMethods(lang, n);
