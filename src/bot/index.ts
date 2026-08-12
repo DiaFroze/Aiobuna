@@ -1051,17 +1051,70 @@ async function doBuy(ctx: Context, variantId: number, qty: number) {
 // spending it, atomically incrementing spentReferrals in the same tx.
 // Result: everything downstream (order records, delivery, admin alerts)
 // stays identical to a normal purchase; the "money" is just internal.
+// Helper to resolve active gift variants from admin promo settings (ref_reward_tiers)
+// as well as variants with explicit pointsCost > 0.
+async function getGiftTiersMap(): Promise<{ enabled: boolean; map: Map<number, number> }> {
+  const enabledStr = await setting("ref_reward_enabled", "1");
+  const enabled = enabledStr !== "0";
+
+  const raw = (await setting("ref_reward_tiers", "")).trim();
+  const map = new Map<number, number>(); // variantId -> pointsCost (threshold)
+
+  if (raw) {
+    const pairs = raw.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+    for (const p of pairs) {
+      const [th, vid] = p.split(":").map((x) => Number(x.trim()));
+      if (Number.isFinite(th) && th > 0 && Number.isFinite(vid) && vid > 0) {
+        map.set(vid, th);
+      }
+    }
+  }
+
+  return { enabled, map };
+}
+
+async function getGiftVariants() {
+  const { enabled, map } = await getGiftTiersMap();
+  if (!enabled) return [];
+
+  const tierVariantIds = Array.from(map.keys());
+
+  const dbVariants = await db.variant.findMany({
+    where: {
+      isActive: true,
+      OR: [
+        { id: { in: tierVariantIds } },
+        { pointsCost: { gt: 0 } },
+      ],
+    },
+    include: { plan: { include: { product: true } } },
+  });
+
+  const list: Array<{ variant: typeof dbVariants[0]; pointsCost: number }> = [];
+
+  for (const v of dbVariants) {
+    const cost = map.get(v.id) ?? v.pointsCost;
+    if (cost > 0) {
+      list.push({ variant: v, pointsCost: cost });
+    }
+  }
+
+  list.sort((a, b) => a.pointsCost - b.pointsCost || a.variant.id - b.variant.id);
+  return list;
+}
+
 async function buyForReferrals(ctx: Context, variantId: number) {
   const user = await getUser(ctx);
   const lang = user.lang;
+  const { map } = await getGiftTiersMap();
   const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
-  if (!v || !v.isActive) return ctx.answerCallbackQuery({ text: t(lang, "plan_unavailable"), show_alert: true });
-  if (v.pointsCost <= 0) return ctx.answerCallbackQuery({ text: "Этот товар не продаётся за рефералы.", show_alert: true });
+  const pointsCost = v ? (map.get(v.id) ?? v.pointsCost) : 0;
+  if (!v || !v.isActive || pointsCost <= 0) return ctx.answerCallbackQuery({ text: t(lang, "plan_unavailable"), show_alert: true });
 
   const points = await availableReferralPoints(user);
-  if (points < v.pointsCost) {
+  if (points < pointsCost) {
     return ctx.answerCallbackQuery({
-      text: `Недостаточно рефералов: у вас ${points}, нужно ${v.pointsCost}. Пригласите ещё ${v.pointsCost - points}.`,
+      text: `Недостаточно рефералов: у вас ${points}, нужно ${pointsCost}. Пригласите ещё ${pointsCost - points}.`,
       show_alert: true,
     });
   }
@@ -1079,10 +1132,10 @@ async function buyForReferrals(ctx: Context, variantId: number) {
     if (!fresh) return { error: "user" as const };
     const realRefs = await tx.botUser.count({ where: { referredBy: fresh.tgId } });
     const stillHave = Math.max(0, realRefs + (fresh.bonusReferrals ?? 0) - (fresh.spentReferrals ?? 0));
-    if (stillHave < v.pointsCost) return { error: "points" as const };
+    if (stillHave < pointsCost) return { error: "points" as const };
     await tx.botUser.update({
       where: { id: user.id },
-      data: { spentReferrals: { increment: v.pointsCost }, balance: { increment: itemPrice } },
+      data: { spentReferrals: { increment: pointsCost }, balance: { increment: itemPrice } },
     });
     return { ok: true as const };
   });
@@ -1092,7 +1145,7 @@ async function buyForReferrals(ctx: Context, variantId: number) {
     return;
   }
 
-  await ctx.answerCallbackQuery({ text: `✅ Списано ${v.pointsCost} реф.` }).catch(() => {});
+  await ctx.answerCallbackQuery({ text: `✅ Списано ${pointsCost} реф.` }).catch(() => {});
   await executePurchase(user.tgId, variantId, 1);
 }
 
@@ -1258,13 +1311,9 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
   const lang = user.lang;
   const points = await availableReferralPoints(user);
 
-  const variants = await db.variant.findMany({
-    where: { isActive: true, pointsCost: { gt: 0 } },
-    include: { plan: { include: { product: true } } },
-    orderBy: [{ pointsCost: "asc" }, { id: "asc" }],
-  });
+  const giftItems = await getGiftVariants();
 
-  if (variants.length === 0) {
+  if (giftItems.length === 0) {
     if (silent) return;
     const kb = new InlineKeyboard().text(t(lang, "btn_refer"), "ref").row().text(t(lang, "to_shop"), "m:0:all");
     await sendOrEdit(ctx, t(lang, "gifts_disabled"), { reply_markup: kb });
@@ -1273,12 +1322,12 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
 
   const link = `https://t.me/${ctx.me.username}?start=ref${user.tgId}`;
 
-  const listLines = variants.map((v) => {
+  const listLines = giftItems.map(({ variant: v, pointsCost }) => {
     const productName = lang === "uz" ? v.plan.product.titleUz || v.plan.product.titleRu : v.plan.product.titleRu;
     const variantName = lang === "uz" ? v.titleUz || v.titleRu : v.titleRu;
-    const canAfford = points >= v.pointsCost;
+    const canAfford = points >= pointsCost;
     const icon = canAfford ? "✅" : "🔒";
-    return `${icon} <b>${esc(productName)} — ${esc(variantName)}</b> = ${v.pointsCost} ${t(lang, "gifts_tier_friends")}`;
+    return `${icon} <b>${esc(productName)} — ${esc(variantName)}</b> = ${pointsCost} ${t(lang, "gifts_tier_friends")}`;
   }).join("\n");
 
   const text =
@@ -1287,11 +1336,11 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
     `🔗 ${lang === "ru" ? "Ваша ссылка" : lang === "uz" ? "Havolangiz" : "Your link"}:\n<code>${link}</code>`;
 
   const kb = new InlineKeyboard();
-  for (const v of variants) {
+  for (const { variant: v, pointsCost } of giftItems) {
     const productName = lang === "uz" ? v.plan.product.titleUz || v.plan.product.titleRu : v.plan.product.titleRu;
     const variantName = lang === "uz" ? v.titleUz || v.titleRu : v.titleRu;
-    const canAfford = points >= v.pointsCost;
-    kb.text(`${canAfford ? "🎁" : "🔒"} ${productName} — ${variantName} · ${v.pointsCost} реф.`, `gi:${v.id}`).row();
+    const canAfford = points >= pointsCost;
+    kb.text(`${canAfford ? "🎁" : "🔒"} ${productName} — ${variantName} · ${pointsCost} реф.`, `gi:${v.id}`).row();
   }
   kb.url(t(lang, "gifts_share"), `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(lang === "ru" ? `Заходи в бот и получай подарки! 🎁` : `Join the bot and get gifts! 🎁`)}`).row();
   kb.text(t(lang, "btn_refer"), "ref").row();
@@ -1315,26 +1364,28 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
 async function showGiftItem(ctx: Context, variantId: number) {
   const user = await getUser(ctx);
   const lang = user.lang;
+  const { map } = await getGiftTiersMap();
   const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
-  if (!v || !v.isActive || v.pointsCost <= 0) {
+  const pointsCost = v ? (map.get(v.id) ?? v.pointsCost) : 0;
+  if (!v || !v.isActive || pointsCost <= 0) {
     await ctx.answerCallbackQuery({ text: t(lang, "plan_unavailable"), show_alert: true }).catch(() => {});
     return;
   }
   const points = await availableReferralPoints(user);
   const productName = lang === "uz" ? v.plan.product.titleUz || v.plan.product.titleRu : v.plan.product.titleRu;
   const variantName = lang === "uz" ? v.titleUz || v.titleRu : v.titleRu;
-  const canAfford = points >= v.pointsCost;
-  const missing = Math.max(0, v.pointsCost - points);
+  const canAfford = points >= pointsCost;
+  const missing = Math.max(0, pointsCost - points);
 
   const text =
     `🎁 <b>${esc(productName)} — ${esc(variantName)}</b>\n\n` +
-    `Цена: <b>${v.pointsCost}</b> ${t(lang, "gifts_tier_friends")}\n` +
+    `Цена: <b>${pointsCost}</b> ${t(lang, "gifts_tier_friends")}\n` +
     `У вас: <b>${points}</b> ${t(lang, "gifts_tier_friends")}` +
     (canAfford ? "" : `\n⚠️ Не хватает: <b>${missing}</b> — пригласите ещё столько друзей.`);
 
   const kb = new InlineKeyboard();
   if (canAfford) {
-    kb.text(`✅ Купить за ${v.pointsCost} реф.`, `rb:${v.id}:0:all`).row();
+    kb.text(`✅ Купить за ${pointsCost} реф.`, `rb:${v.id}:0:all`).row();
   } else {
     kb.text(`🤝 Пригласить друзей`, "ref").row();
   }
