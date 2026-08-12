@@ -19,38 +19,27 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-// Referral-gifts banner (assets/gifts-banner.png), read once and cached.
-// Missing file just means the teaser sends without an image — never fatal.
-let giftsBannerBuffer: Buffer | null = null;
-function giftsBannerFile(): InputFile | null {
-  if (giftsBannerBuffer === null) {
-    try {
-      giftsBannerBuffer = fs.readFileSync(path.join(__dirname, "assets", "gifts-banner.png"));
-    } catch {
-      giftsBannerBuffer = Buffer.alloc(0);
-    }
-  }
-  return giftsBannerBuffer.length > 0 ? new InputFile(giftsBannerBuffer, "gifts-banner.png") : null;
-}
-
-// Tutorial video assets — each read from disk once and cached in memory.
-// A missing file just means that step sends text-only, never fatal.
-const videoAssetCache = new Map<string, Buffer>();
-function videoAssetFile(filename: string): InputFile | null {
-  let buf = videoAssetCache.get(filename);
+// Media assets (banners/tutorial videos) under assets/ — each read from disk
+// once and cached in memory. A missing file just means that message sends
+// text-only instead of erroring — never fatal.
+const mediaAssetCache = new Map<string, Buffer>();
+function mediaAssetFile(filename: string): InputFile | null {
+  let buf = mediaAssetCache.get(filename);
   if (buf === undefined) {
     try {
       buf = fs.readFileSync(path.join(__dirname, "assets", filename));
     } catch {
       buf = Buffer.alloc(0);
     }
-    videoAssetCache.set(filename, buf);
+    mediaAssetCache.set(filename, buf);
   }
   return buf.length > 0 ? new InputFile(buf, filename) : null;
 }
-const promoInstructionsFile = () => videoAssetFile("promo-instructions.mp4");
-const howToPayFile = () => videoAssetFile("how-to-pay.mp4");
-const howToActivateFile = () => videoAssetFile("how-to-activate.mp4");
+const giftsBannerFile = () => mediaAssetFile("gifts-banner.png");
+const shopBannerFile = () => mediaAssetFile("shop-banner.jpg");
+const promoInstructionsFile = () => mediaAssetFile("promo-instructions.mp4");
+const howToPayFile = () => mediaAssetFile("how-to-pay.mp4");
+const howToActivateFile = () => mediaAssetFile("how-to-activate.mp4");
 
 const token = process.env.TELEGRAM_BOT_TOKEN ?? "";
 const ADMIN_ID = String(process.env.TELEGRAM_ADMIN_CHAT_ID ?? "");
@@ -1481,8 +1470,16 @@ async function sendHome(ctx: Context, user: Awaited<ReturnType<typeof getUser>>)
   // Referral-gift teaser, right after the header — only sent when there's an
   // active campaign the user hasn't already claimed (silent otherwise).
   await showGifts(ctx, false, true).catch(() => {});
+  // Catalog: one message — the shop banner with the balance/catalog text as its caption.
   const menu = await buildMenu(user.lang, user.balance, 0, "all", user.id);
-  await ctx.reply(menu.text, { parse_mode: "HTML", reply_markup: menu.kb });
+  const banner = shopBannerFile();
+  if (banner) {
+    await ctx.replyWithPhoto(banner, { caption: menu.text, parse_mode: "HTML", reply_markup: menu.kb }).catch(async () => {
+      await ctx.reply(menu.text, { parse_mode: "HTML", reply_markup: menu.kb }).catch(() => {});
+    });
+  } else {
+    await ctx.reply(menu.text, { parse_mode: "HTML", reply_markup: menu.kb });
+  }
 }
 
 // Gate every entry into the shop behind a one-time terms acceptance: users who
@@ -1546,6 +1543,16 @@ bot.use(async (ctx, next) => {
 
   const text = ctx.message?.text;
   if (text?.startsWith("/start")) {
+    return next();
+  }
+
+  // Inviting friends works before subscribing — only the shop/purchase flow
+  // requires it. Growing the referrer's own reach is itself worth letting
+  // through; the subscription gate still applies to everything else.
+  if (data === "ref" || text?.startsWith("/referral") || text?.startsWith("/invite") || text?.startsWith("/taklif")) {
+    return next();
+  }
+  if (text && REFER_TEXTS.has(text)) {
     return next();
   }
 
