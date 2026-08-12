@@ -1,6 +1,6 @@
 import { PageHeader } from "@/components/admin/ui";
 import { getGlobalSettings } from "@/lib/services/settings";
-import { saveSettingsAction } from "./actions";
+import { saveSettingsAction, resetSalesStatsAction } from "./actions";
 
 export const dynamic = "force-dynamic";
 
@@ -28,6 +28,35 @@ export default async function SettingsPage() {
         Настройки Telegram-уведомлений задаются через переменные окружения
         <code className="mx-1">TELEGRAM_BOT_TOKEN</code> и <code>TELEGRAM_ADMIN_CHAT_ID</code>.
       </p>
+
+      <div className="card p-5 mt-8 border-danger/30 bg-danger/5 space-y-3">
+        <h3 className="font-semibold text-danger">⚠ Опасная зона</h3>
+        <p className="text-sm text-muted">
+          Полностью удаляет историю заказов, покупок методов, погашений промокодов и заявок на
+          пополнение (обнуляет «Выручку», «Продаж всего» и счётчики промокодов). Действие
+          необратимо.
+        </p>
+        <p className="text-sm text-muted">
+          <b>Не затрагивает:</b> баланс пользователей, склад, товары и тарифы, каналы, самих
+          пользователей и промокоды (только счётчик использований).
+        </p>
+        <form action={resetSalesStatsAction} className="flex flex-wrap items-end gap-3 pt-2">
+          <div>
+            <label className="text-xs text-muted block mb-1">
+              Введите <b>ОБНУЛИТЬ</b> для подтверждения
+            </label>
+            <input
+              name="confirm"
+              required
+              placeholder="ОБНУЛИТЬ"
+              className="input text-sm font-mono"
+            />
+          </div>
+          <button type="submit" className="btn btn-danger text-sm">
+            🗑 Обнулить выручку и продажи
+          </button>
+        </form>
+      </div>
     </div>
   );
 }

@@ -48,12 +48,57 @@ export default async function BotUsersPage({
   const realRefMap = new Map<string, number>();
   for (const g of refGroups) if (g.referredBy) realRefMap.set(g.referredBy, g._count._all);
 
+  // Purchase stats per user (all orders, matching the dashboard's revenue convention).
+  const orderGroups = await botDb.botOrder.groupBy({
+    by: ["userId"],
+    _count: { _all: true },
+    _sum: { priceUsdt: true },
+  });
+  const orderStatsMap = new Map<number, { count: number; total: number }>();
+  for (const g of orderGroups) orderStatsMap.set(g.userId, { count: g._count._all, total: g._sum.priceUsdt ?? 0 });
+
+  // Top 10 buyers by total spent, across ALL users (not just the current search page).
+  const topBuyerIds = [...orderStatsMap.entries()].sort((a, b) => b[1].total - a[1].total).slice(0, 10);
+  const topBuyers =
+    topBuyerIds.length > 0
+      ? await botDb.botUser.findMany({ where: { id: { in: topBuyerIds.map(([id]) => id) } } })
+      : [];
+  const topBuyersById = new Map(topBuyers.map((u) => [u.id, u]));
+
   return (
     <div className="space-y-6">
       <PageHeader
         title="👤 Пользователи бота"
         subtitle="Просмотр профилей пользователей, управление балансами и правами доступа."
       />
+
+      {/* Top buyers leaderboard */}
+      <div className="card p-5">
+        <h3 className="text-lg font-semibold mb-4">🏆 Топ покупателей</h3>
+        {topBuyerIds.length === 0 ? (
+          <p className="text-sm text-muted">Пока нет покупок.</p>
+        ) : (
+          <ol className="space-y-2">
+            {topBuyerIds.map(([userId, stats], i) => {
+              const u = topBuyersById.get(userId);
+              if (!u) return null;
+              return (
+                <li key={userId} className="flex items-center justify-between text-sm border-b last:border-0 pb-2">
+                  <span className="flex items-center gap-2 min-w-0">
+                    <span className="text-muted w-5 shrink-0">{i + 1}.</span>
+                    <span className="font-semibold truncate">{u.firstName || "—"}</span>
+                    {u.username && <span className="text-xs text-muted shrink-0">@{u.username}</span>}
+                  </span>
+                  <span className="text-right shrink-0 pl-2">
+                    <span className="font-bold text-success">{money(stats.total)}</span>
+                    <span className="text-xs text-muted ml-2">{stats.count} покупок</span>
+                  </span>
+                </li>
+              );
+            })}
+          </ol>
+        )}
+      </div>
 
       {/* Search Input Form */}
       <div className="card p-5">
@@ -91,6 +136,7 @@ export default async function BotUsersPage({
                 <th className="pb-3">Пользователь</th>
                 <th className="pb-3">Telegram ID</th>
                 <th className="pb-3 text-center">Рефералы</th>
+                <th className="pb-3 text-center">Покупки</th>
                 <th className="pb-3 text-right">Текущий баланс</th>
                 <th className="pb-3 text-center">Действия с балансом</th>
               </tr>
@@ -137,6 +183,19 @@ export default async function BotUsersPage({
                             </button>
                           </form>
                         </div>
+                      );
+                    })()}
+                  </td>
+                  <td className="py-3 text-center">
+                    {(() => {
+                      const stats = orderStatsMap.get(u.id);
+                      return stats ? (
+                        <div className="flex flex-col items-center">
+                          <span className="font-semibold">{stats.count}</span>
+                          <span className="text-[10px] text-muted">{money(stats.total)}</span>
+                        </div>
+                      ) : (
+                        <span className="text-muted">—</span>
                       );
                     })()}
                   </td>
