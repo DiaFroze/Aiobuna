@@ -1015,24 +1015,28 @@ async function doBuy(ctx: Context, variantId: number, qty: number) {
     return;
   }
 
-  // Insufficient balance -> prompt payment options for exact purchase sum
-  const stars = soumToStars(total);
+  // Insufficient balance -> only ask for the SHORTFALL (total minus what's
+  // already on the balance), not the full price again. Existing balance
+  // stays working capital instead of sitting unused after a full top-up.
+  const shortfall = total - user.balance;
+  const stars = soumToStars(shortfall);
   const adminUsername = (await setting("support_username", "")).replace(/^@/, "");
 
   const kb = new InlineKeyboard()
-    .text(t(lang, "pay_receipt"), `tcheck_buy:${total}:${variantId}:${qty}`).row()
-    .text(t(lang, "pay_stars", { n: stars }), `tstar_buy:${total}:${variantId}:${qty}`).row();
+    .text(t(lang, "pay_receipt"), `tcheck_buy:${shortfall}:${variantId}:${qty}`).row()
+    .text(t(lang, "pay_stars", { n: stars }), `tstar_buy:${shortfall}:${variantId}:${qty}`).row();
   if (adminUsername) {
     kb.url(t(lang, "admin_topup"), `https://t.me/${adminUsername}`).row();
   } else {
-    kb.text(t(lang, "via_admin"), `tman_buy:${total}:${variantId}:${qty}`).row();
+    kb.text(t(lang, "via_admin"), `tman_buy:${shortfall}:${variantId}:${qty}`).row();
   }
   kb.text(t(lang, "back"), `q:${v.id}:${qty}:0:all`);
 
   const promptText = `👛 <b>Недостаточно средств.</b>\n\n` +
-    `Для покупки <b>${esc(label)}</b> необходимо оплатить <b>${money(total, lang)}</b>.\n\n` +
-    `У вас на балансе: <b>${money(user.balance, lang)}</b>.\n\n` +
-    `Пожалуйста, выберите способ оплаты для пополнения и моментальной покупки:`;
+    `Цена <b>${esc(label)}</b>: <b>${money(total, lang)}</b>.\n\n` +
+    `У вас на балансе: <b>${money(user.balance, lang)}</b>.\n` +
+    `Осталось доплатить: <b>${money(shortfall, lang)}</b>.\n\n` +
+    `Пожалуйста, выберите способ оплаты — после зачисления покупка оформится автоматически:`;
 
   await ctx.answerCallbackQuery().catch(() => {});
   await ctx.editMessageText(promptText, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
