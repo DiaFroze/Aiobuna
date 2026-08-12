@@ -1040,6 +1040,23 @@ async function supportView(lang: string) {
   return { text: `${t(lang, "support_title")}\n\n${text}`, kb };
 }
 
+// Purchase terms, shown once the user passes the subscription gate.
+// Wrapped in an expandable blockquote: collapsed to a few lines, tap to unfold.
+// Override the wording with the `terms` setting (RU source, auto-translated).
+async function sendTerms(ctx: Context, lang: string) {
+  const custom = (await setting("terms", "")).trim();
+  const body = custom ? (lang === "ru" ? custom : await translate(custom, lang)) : t(lang, "terms_body");
+  await ctx
+    .reply(`${t(lang, "terms_title")}\n\n<blockquote expandable>${body}</blockquote>`, {
+      parse_mode: "HTML",
+      link_preview_options: { is_disabled: true },
+    })
+    .catch(async () => {
+      // Fallback if the custom text carries broken markup — deliver it plain.
+      await ctx.reply(stripTags(`${t(lang, "terms_title")}\n\n${body}`)).catch(() => {});
+    });
+}
+
 // ---------- gifts (referral reward) ----------
 async function showGifts(ctx: Context, edit = false) {
   const user = await getUser(ctx);
@@ -1504,6 +1521,7 @@ bot.on("callback_query:data", async (ctx) => {
       }
       if (unsubscribed.length === 0) {
         await ctx.answerCallbackQuery({ text: t(user.lang, "subs_ok_toast"), show_alert: true }).catch(() => {});
+        await sendTerms(ctx, user.lang);
         return sendHome(ctx, user);
       } else {
         await ctx.answerCallbackQuery({ text: t(user.lang, "subs_missing_toast"), show_alert: true }).catch(() => {});

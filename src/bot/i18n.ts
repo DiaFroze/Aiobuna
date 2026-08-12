@@ -43,6 +43,19 @@ const RU: Dict = {
   free: "🎁 Бесплатно",
   choose_plan: "Выберите тариф:",
   back_to_list: "⬅️ Назад к списку",
+  terms_title: "📋 <b>Условия покупки</b>",
+  terms_body:
+    "🛡 <b>Гарантия — 15 дней</b>\n" +
+    "На все товары действует гарантия <b>15 дней</b> с момента покупки.\n\n" +
+    "✅ <b>Что покрывается</b>\n" +
+    "Если в течение 15 дней товар перестал работать не по вашей вине — напишите в поддержку. Мы проверим и заменим товар.\n\n" +
+    "⛔️ <b>Что не покрывается</b>\n" +
+    "• Обращения после 15 дней\n" +
+    "• Смена пароля или данных входа\n" +
+    "• Передача доступа третьим лицам\n\n" +
+    "💵 <b>Возврат денег</b>\n" +
+    "Деньги за заказ <b>не возвращаются</b>. При подтверждённой проблеме в гарантийный срок товар заменяется.\n\n" +
+    "🛒 Оформляя заказ, вы соглашаетесь с этими условиями.",
   price_each: "Цена за штуку: {v}",
   in_stock: "В наличии: {n} · мин 1, макс {n}",
   qty: "Количество: {n}",
@@ -163,6 +176,19 @@ const EN: Dict = {
   free: "🎁 Free",
   choose_plan: "Choose a plan:",
   back_to_list: "⬅️ Back to list",
+  terms_title: "📋 <b>Purchase terms</b>",
+  terms_body:
+    "🛡 <b>15-day warranty</b>\n" +
+    "Every item comes with a <b>15-day</b> warranty from the moment of purchase.\n\n" +
+    "✅ <b>Covered</b>\n" +
+    "If the item stops working within 15 days through no fault of your own, contact support — we will check it and send a replacement.\n\n" +
+    "⛔️ <b>Not covered</b>\n" +
+    "• Requests made after 15 days\n" +
+    "• Changed password or login details\n" +
+    "• Access shared with third parties\n\n" +
+    "💵 <b>Refunds</b>\n" +
+    "Money is <b>not refunded</b>. If a problem is confirmed within the warranty period, the item is replaced.\n\n" +
+    "🛒 By placing an order you agree to these terms.",
   price_each: "Price each: {v}",
   in_stock: "In stock: {n} · min 1, max {n}",
   qty: "Quantity: {n}",
@@ -283,6 +309,19 @@ const UZ: Dict = {
   free: "🎁 Bepul",
   choose_plan: "Tarifni tanlang:",
   back_to_list: "⬅️ Ro‘yxatga qaytish",
+  terms_title: "📋 <b>Xarid shartlari</b>",
+  terms_body:
+    "🛡 <b>Kafolat — 15 kun</b>\n" +
+    "Barcha mahsulotlarga xarid qilingan paytdan boshlab <b>15 kun</b> kafolat beriladi.\n\n" +
+    "✅ <b>Nima kiradi</b>\n" +
+    "Agar 15 kun ichida mahsulot sizning aybingizsiz ishlamay qolsa — qo‘llab-quvvatlashga yozing. Tekshirib, almashtirib beramiz.\n\n" +
+    "⛔️ <b>Nima kirmaydi</b>\n" +
+    "• 15 kundan keyingi murojaatlar\n" +
+    "• Parol yoki kirish ma’lumotlari o‘zgartirilgan bo‘lsa\n" +
+    "• Kirish uchinchi shaxslarga berilgan bo‘lsa\n\n" +
+    "💵 <b>Pulni qaytarish</b>\n" +
+    "Pul <b>qaytarilmaydi</b>. Kafolat muddatida muammo tasdiqlansa, mahsulot almashtiriladi.\n\n" +
+    "🛒 Buyurtma berish orqali siz ushbu shartlarga rozilik bildirasiz.",
   price_each: "Narxi (dona): {v}",
   in_stock: "Mavjud: {n} · min 1, maks {n}",
   qty: "Miqdor: {n}",
