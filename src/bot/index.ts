@@ -147,6 +147,18 @@ const stripTags = (s: string) => s.replace(/<[^>]*>/g, "");
 const stripLeadEmoji = (s: string) =>
   s.replace(/^[\p{Extended_Pictographic}\u2700-\u27BF\u2600-\u26FF✦⭐✨🔥⚡🎁💎🧾💰🤝👤📖🛒🛍️]️?\s*/u, "");
 
+// Brand premium emoji for gift items, matched on the product name. Falls back
+// to whatever premium emoji the admin set on the product itself, then to null
+// (caller then uses a plain emoji). Add a line here for each new brand.
+const GIFT_PREMIUM_EMOJI: Array<{ match: RegExp; id: string }> = [
+  { match: /canva/i, id: "5256251637646787356" },
+  { match: /gemini/i, id: "5255920066171537833" },
+];
+function giftPremiumEmoji(productName: string, fallback?: string | null): string | null {
+  for (const e of GIFT_PREMIUM_EMOJI) if (e.match.test(productName)) return e.id;
+  return fallback ?? null;
+}
+
 function formatItemTitle(productName: string, variantName: string): string {
   const p = (productName || "").trim();
   const v = (variantName || "").trim();
@@ -469,18 +481,19 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
     kb.text(stripLeadEmoji(t(lang, "btn_profile")), "profile_show").icon(profileButtonEmoji).row();
     // Marketing teaser: advertise the priciest referral-shop item right in the
     // catalog, so people see there's a way to get it for free. Tapping it
-    // opens the Подарки shop. Only rendered when such an item exists.
-    const topGift = await db.variant
-      .findFirst({
-        where: { isActive: true, pointsCost: { gt: 0 } },
-        include: { plan: { include: { product: true } } },
-        orderBy: { pointsCost: "desc" },
-      })
-      .catch(() => null);
+    // opens the Подарки shop. Uses getGiftVariants() — the same source the
+    // gifts shop reads — so items configured via the admin's tier settings
+    // (not just Variant.pointsCost) show up here too.
+    const gifts = await getGiftVariants().catch(() => []);
+    const topGift = gifts.length ? gifts[gifts.length - 1] : null; // sorted asc by cost
     if (topGift) {
-      const gp = lang === "uz" ? topGift.plan.product.titleUz || topGift.plan.product.titleRu : topGift.plan.product.titleRu;
-      const gv = lang === "uz" ? topGift.titleUz || topGift.titleRu : topGift.titleRu;
-      kb.text(`🎁 ${gp} ${gv} — ${t(lang, "free")}`, "gifts_show").row();
+      const gp = lang === "uz" ? topGift.variant.plan.product.titleUz || topGift.variant.plan.product.titleRu : topGift.variant.plan.product.titleRu;
+      const gv = lang === "uz" ? topGift.variant.titleUz || topGift.variant.titleRu : topGift.variant.titleRu;
+      const title = formatItemTitle(gp, gv);
+      const premium = giftPremiumEmoji(gp, topGift.variant.plan.product.premiumEmoji);
+      const btn = kb.text(`${premium ? "" : "🎁 "}${title} — ${t(lang, "free")}`, "gifts_show");
+      if (premium) btn.icon(premium);
+      kb.row();
     }
   }
 
@@ -542,8 +555,13 @@ async function showProduct(ctx: Context, id: number, back: string) {
     // whether they can afford it without extra taps.
     if (v.pointsCost > 0 && st > 0) {
       const canAfford = availablePoints >= v.pointsCost;
-      const icon = canAfford ? "🎁" : "⏳";
-      kb.text(`${icon} ${vt} — ${v.pointsCost} реф. (у вас: ${availablePoints})`, `rb:${v.id}:${back}`).row();
+      const premium = giftPremiumEmoji(p.titleRu, p.premiumEmoji);
+      const rbBtn = kb.text(
+        `${premium ? "" : canAfford ? "🎁 " : "⏳ "}${vt} — ${v.pointsCost} реф. (у вас: ${availablePoints})`,
+        `rb:${v.id}:${back}`,
+      );
+      if (premium) rbBtn.icon(premium);
+      kb.row();
     }
   }
   kb.text(t(lang, "back_to_list"), `m:${back}`).row();
@@ -1375,8 +1393,11 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
     const variantName = lang === "uz" ? v.titleUz || v.titleRu : v.titleRu;
     const title = formatItemTitle(productName, variantName);
     const canAfford = points >= pointsCost;
-    const icon = canAfford ? "✅" : "⏳";
-    return `${icon} <b>${esc(title)}</b> = ${pointsCost} ${t(lang, "gifts_tier_friends")}`;
+    const premium = giftPremiumEmoji(productName, v.plan.product.premiumEmoji);
+    // Brand premium emoji as the row icon (HTML <tg-emoji> works in message
+    // text); the ✅ suffix still marks what the user can already afford.
+    const icon = premium ? emojiIcon("🎁", premium) : canAfford ? "✅" : "⏳";
+    return `${icon} <b>${esc(title)}</b> = ${pointsCost} ${t(lang, "gifts_tier_friends")}${canAfford ? " ✅" : ""}`;
   }).join("\n");
 
   const text =
@@ -1390,7 +1411,12 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
     const variantName = lang === "uz" ? v.titleUz || v.titleRu : v.titleRu;
     const title = formatItemTitle(productName, variantName);
     const canAfford = points >= pointsCost;
-    kb.text(`${canAfford ? "🎁" : "⏳"} ${title} · ${pointsCost} реф.`, `gi:${v.id}`).row();
+    const premium = giftPremiumEmoji(productName, v.plan.product.premiumEmoji);
+    // Buttons carry premium emoji through icon_custom_emoji_id (.icon()),
+    // not <tg-emoji> — captions/labels are plain text there.
+    const btn = kb.text(`${premium ? "" : canAfford ? "🎁 " : "⏳ "}${title} · ${pointsCost} реф.`, `gi:${v.id}`);
+    if (premium) btn.icon(premium);
+    kb.row();
   }
   kb.url(t(lang, "gifts_share"), `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(lang === "ru" ? `Заходи в бот и получай подарки! 🎁` : `Join the bot and get gifts! 🎁`)}`).row();
   kb.text(t(lang, "btn_refer"), "ref").row();
@@ -1428,8 +1454,9 @@ async function showGiftItem(ctx: Context, variantId: number) {
   const canAfford = points >= pointsCost;
   const missing = Math.max(0, pointsCost - points);
 
+  const premium = giftPremiumEmoji(productName, v.plan.product.premiumEmoji);
   const text =
-    `🎁 <b>${esc(title)}</b>\n\n` +
+    `${emojiIcon("🎁", premium)} <b>${esc(title)}</b>\n\n` +
     `Цена: <b>${pointsCost}</b> ${t(lang, "gifts_tier_friends")}\n` +
     `У вас: <b>${points}</b> ${t(lang, "gifts_tier_friends")}` +
     (canAfford ? "" : `\n⚠️ Не хватает: <b>${missing}</b> — пригласите ещё столько друзей.`);
