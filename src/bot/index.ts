@@ -467,6 +467,21 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
     kb.text(stripLeadEmoji(t(lang, "btn_wallet")), "bal").icon(walletButtonEmoji)
       .text(stripLeadEmoji(t(lang, "btn_orders")), "ord").icon(ordersButtonEmoji).row();
     kb.text(stripLeadEmoji(t(lang, "btn_profile")), "profile_show").icon(profileButtonEmoji).row();
+    // Marketing teaser: advertise the priciest referral-shop item right in the
+    // catalog, so people see there's a way to get it for free. Tapping it
+    // opens the Подарки shop. Only rendered when such an item exists.
+    const topGift = await db.variant
+      .findFirst({
+        where: { isActive: true, pointsCost: { gt: 0 } },
+        include: { plan: { include: { product: true } } },
+        orderBy: { pointsCost: "desc" },
+      })
+      .catch(() => null);
+    if (topGift) {
+      const gp = lang === "uz" ? topGift.plan.product.titleUz || topGift.plan.product.titleRu : topGift.plan.product.titleRu;
+      const gv = lang === "uz" ? topGift.titleUz || topGift.titleRu : topGift.titleRu;
+      kb.text(`🎁 ${gp} ${gv} — ${t(lang, "free")}`, "gifts_show").row();
+    }
   }
 
   const head = freebies ? t(lang, "promo_title") : t(lang, "products_available");
@@ -527,7 +542,7 @@ async function showProduct(ctx: Context, id: number, back: string) {
     // whether they can afford it without extra taps.
     if (v.pointsCost > 0 && st > 0) {
       const canAfford = availablePoints >= v.pointsCost;
-      const icon = canAfford ? "🎁" : "🔒";
+      const icon = canAfford ? "🎁" : "⏳";
       kb.text(`${icon} ${vt} — ${v.pointsCost} реф. (у вас: ${availablePoints})`, `rb:${v.id}:${back}`).row();
     }
   }
@@ -1360,7 +1375,7 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
     const variantName = lang === "uz" ? v.titleUz || v.titleRu : v.titleRu;
     const title = formatItemTitle(productName, variantName);
     const canAfford = points >= pointsCost;
-    const icon = canAfford ? "✅" : "🔒";
+    const icon = canAfford ? "✅" : "⏳";
     return `${icon} <b>${esc(title)}</b> = ${pointsCost} ${t(lang, "gifts_tier_friends")}`;
   }).join("\n");
 
@@ -1375,7 +1390,7 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
     const variantName = lang === "uz" ? v.titleUz || v.titleRu : v.titleRu;
     const title = formatItemTitle(productName, variantName);
     const canAfford = points >= pointsCost;
-    kb.text(`${canAfford ? "🎁" : "🔒"} ${title} · ${pointsCost} реф.`, `gi:${v.id}`).row();
+    kb.text(`${canAfford ? "🎁" : "⏳"} ${title} · ${pointsCost} реф.`, `gi:${v.id}`).row();
   }
   kb.url(t(lang, "gifts_share"), `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(lang === "ru" ? `Заходи в бот и получай подарки! 🎁` : `Join the bot and get gifts! 🎁`)}`).row();
   kb.text(t(lang, "btn_refer"), "ref").row();
