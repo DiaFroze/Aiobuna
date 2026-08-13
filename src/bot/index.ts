@@ -142,9 +142,26 @@ function tgHtml(s: string): string {
   return out;
 }
 const stripTags = (s: string) => s.replace(/<[^>]*>/g, "");
-// Drop a leading standard emoji (+ optional variation selector + spaces) — used
+// Drop a leading standard or decorative emoji (+ optional variation selector + spaces) — used
 // when a premium emoji icon replaces the plain one on a button.
-const stripLeadEmoji = (s: string) => s.replace(/^\p{Extended_Pictographic}️?\s*/u, "");
+const stripLeadEmoji = (s: string) =>
+  s.replace(/^[\p{Extended_Pictographic}\u2700-\u27BF\u2600-\u26FF✦⭐✨🔥⚡🎁💎🧾💰🤝👤📖🛒🛍️]️?\s*/u, "");
+
+function formatItemTitle(productName: string, variantName: string): string {
+  const p = (productName || "").trim();
+  const v = (variantName || "").trim();
+  if (!v) return p;
+  if (!p) return v;
+  if (p.toLowerCase() === v.toLowerCase()) return p;
+
+  const pBase = p.split(/\s*—\s*/)[0].trim();
+  const pWord = pBase.split(/\s+/)[0].trim().toLowerCase();
+
+  if (v.toLowerCase().includes(pBase.toLowerCase()) || (pWord.length > 2 && v.toLowerCase().startsWith(pWord))) {
+    return v;
+  }
+  return `${p} — ${v}`;
+}
 function emojiIcon(emoji: string, premiumCode: string | null | undefined): string {
   const e = esc(emoji || "✨");
   return premiumCode ? `<tg-emoji emoji-id="${premiumCode}">${e}</tg-emoji>` : e;
@@ -439,10 +456,11 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
   const kb = new InlineKeyboard();
   for (const it of items) {
     const price = it.minPrice > 0 ? money(it.minPrice, lang) : t(lang, "free");
+    const cleanTitle = stripLeadEmoji(it.title);
     if (it.premiumEmoji) {
-      kb.text(`${it.title} - ${price}`, `p:${it.id}:0:${sort}`).icon(it.premiumEmoji).row();
+      kb.text(`${cleanTitle} - ${price}`, `p:${it.id}:0:${sort}`).icon(it.premiumEmoji).row();
     } else {
-      kb.text(`${it.emoji} ${it.title} - ${price}`, `p:${it.id}:0:${sort}`).row();
+      kb.text(`${it.emoji} ${cleanTitle} - ${price}`, `p:${it.id}:0:${sort}`).row();
     }
   }
   if (!freebies && items.length > 0) {
@@ -1340,9 +1358,10 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
   const listLines = giftItems.map(({ variant: v, pointsCost }) => {
     const productName = lang === "uz" ? v.plan.product.titleUz || v.plan.product.titleRu : v.plan.product.titleRu;
     const variantName = lang === "uz" ? v.titleUz || v.titleRu : v.titleRu;
+    const title = formatItemTitle(productName, variantName);
     const canAfford = points >= pointsCost;
     const icon = canAfford ? "✅" : "🔒";
-    return `${icon} <b>${esc(productName)} — ${esc(variantName)}</b> = ${pointsCost} ${t(lang, "gifts_tier_friends")}`;
+    return `${icon} <b>${esc(title)}</b> = ${pointsCost} ${t(lang, "gifts_tier_friends")}`;
   }).join("\n");
 
   const text =
@@ -1354,8 +1373,9 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
   for (const { variant: v, pointsCost } of giftItems) {
     const productName = lang === "uz" ? v.plan.product.titleUz || v.plan.product.titleRu : v.plan.product.titleRu;
     const variantName = lang === "uz" ? v.titleUz || v.titleRu : v.titleRu;
+    const title = formatItemTitle(productName, variantName);
     const canAfford = points >= pointsCost;
-    kb.text(`${canAfford ? "🎁" : "🔒"} ${productName} — ${variantName} · ${pointsCost} реф.`, `gi:${v.id}`).row();
+    kb.text(`${canAfford ? "🎁" : "🔒"} ${title} · ${pointsCost} реф.`, `gi:${v.id}`).row();
   }
   kb.url(t(lang, "gifts_share"), `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(lang === "ru" ? `Заходи в бот и получай подарки! 🎁` : `Join the bot and get gifts! 🎁`)}`).row();
   kb.text(t(lang, "btn_refer"), "ref").row();
@@ -1389,11 +1409,12 @@ async function showGiftItem(ctx: Context, variantId: number) {
   const points = await availableReferralPoints(user);
   const productName = lang === "uz" ? v.plan.product.titleUz || v.plan.product.titleRu : v.plan.product.titleRu;
   const variantName = lang === "uz" ? v.titleUz || v.titleRu : v.titleRu;
+  const title = formatItemTitle(productName, variantName);
   const canAfford = points >= pointsCost;
   const missing = Math.max(0, pointsCost - points);
 
   const text =
-    `🎁 <b>${esc(productName)} — ${esc(variantName)}</b>\n\n` +
+    `🎁 <b>${esc(title)}</b>\n\n` +
     `Цена: <b>${pointsCost}</b> ${t(lang, "gifts_tier_friends")}\n` +
     `У вас: <b>${points}</b> ${t(lang, "gifts_tier_friends")}` +
     (canAfford ? "" : `\n⚠️ Не хватает: <b>${missing}</b> — пригласите ещё столько друзей.`);
