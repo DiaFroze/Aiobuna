@@ -2013,19 +2013,17 @@ bot.use(async (ctx, next) => {
   for (const ch of unsubscribed) {
     kb.url(`📢 ${ch.name}`, ch.url).row();
   }
-  // No manual "check" button — joining the channel triggers auto-verification.
 
   const msgText = t(lang, "subs_required_msg");
 
+  // Always send a fresh message — never try to edit the previous one (it may
+  // be a photo/banner which rejects editMessageText and would silently hide
+  // the channel buttons from the user).
   if (ctx.callbackQuery) {
-    await ctx.answerCallbackQuery({ text: t(lang, "subs_required_toast"), show_alert: true }).catch(() => {});
-    const edited = await ctx.editMessageText(msgText, { parse_mode: "HTML", reply_markup: kb }).catch(() => null);
-    const msgId = (edited as { message_id?: number } | null)?.message_id ?? ctx.callbackQuery.message?.message_id;
-    if (msgId) subsGateMsg.set(tgId, msgId);
-  } else {
-    const sent = await ctx.reply(msgText, { parse_mode: "HTML", reply_markup: kb }).catch(() => null);
-    if (sent?.message_id) subsGateMsg.set(tgId, sent.message_id);
+    await ctx.answerCallbackQuery().catch(() => {});
   }
+  const sent = await ctx.reply(msgText, { parse_mode: "HTML", reply_markup: kb }).catch(() => null);
+  if (sent?.message_id) subsGateMsg.set(tgId, sent.message_id);
 });
 
 // ---------- commands & reply-keyboard ----------
