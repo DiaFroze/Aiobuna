@@ -35,7 +35,16 @@ function mediaAssetFile(filename: string): InputFile | null {
   }
   return buf.length > 0 ? new InputFile(buf, filename) : null;
 }
-const giftsBannerFile = () => mediaAssetFile("gifts-banner.png");
+function giftsBannerAsset(): { file: InputFile; isVideo: boolean } | null {
+  for (const name of ["gifts-banner.mov", "gifts-banner.mp4", "gifts-banner.png", "gifts-banner.jpg"]) {
+    const f = mediaAssetFile(name);
+    if (f) {
+      const isVideo = name.endsWith(".mov") || name.endsWith(".mp4");
+      return { file: f, isVideo };
+    }
+  }
+  return null;
+}
 const shopBannerFile = () => mediaAssetFile("shop-banner.jpg");
 const promoInstructionsFile = () => mediaAssetFile("promo-instructions.mp4");
 const howToPayFile = () => mediaAssetFile("how-to-pay.mp4");
@@ -44,16 +53,27 @@ const howToActivateFile = () => mediaAssetFile("how-to-activate.mp4");
 // Universal "edit or replace" for callback-driven navigation. Works whether
 // the source message is plain text (edit its text) or a media message
 // (edit its caption, or if that fails, delete + resend). Optionally sends a
-// fresh media message with the given photo as its caption target.
-type SendOrEditOpts = { reply_markup?: InlineKeyboard | undefined; photo?: InputFile | null };
+// fresh media message with the given photo or video as its caption target.
+type SendOrEditOpts = {
+  reply_markup?: InlineKeyboard | undefined;
+  photo?: InputFile | null;
+  video?: InputFile | null;
+};
 async function sendOrEdit(ctx: Context, text: string, opts: SendOrEditOpts = {}) {
   const chatId = ctx.chat?.id;
   const messageId = ctx.callbackQuery?.message?.message_id;
   const kb = opts.reply_markup;
   const photo = opts.photo ?? null;
+  const video = opts.video ?? null;
 
-  // Fresh photo-carrying message: replace whatever's there (or reply if the
-  // source is unknown), so the banner is actually visible.
+  if (video) {
+    if (chatId && messageId) await ctx.api.deleteMessage(chatId, messageId).catch(() => {});
+    await ctx.replyWithVideo(video, { caption: text, parse_mode: "HTML", reply_markup: kb }).catch(async () => {
+      await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+    });
+    return;
+  }
+
   if (photo) {
     if (chatId && messageId) await ctx.api.deleteMessage(chatId, messageId).catch(() => {});
     await ctx.replyWithPhoto(photo, { caption: text, parse_mode: "HTML", reply_markup: kb }).catch(async () => {
@@ -62,7 +82,7 @@ async function sendOrEdit(ctx: Context, text: string, opts: SendOrEditOpts = {})
     return;
   }
 
-  // No photo: try text edit → caption edit → delete+resend, in that order.
+  // No media: try text edit → caption edit → delete+resend, in that order.
   if (chatId && messageId) {
     try {
       await ctx.api.editMessageText(chatId, messageId, text, { parse_mode: "HTML", reply_markup: kb });
@@ -1422,15 +1442,82 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
   kb.text(t(lang, "btn_refer"), "ref").row();
   kb.text(t(lang, "to_shop"), "m:0:all");
 
-  const banner = giftsBannerFile();
+  const asset = giftsBannerAsset();
   if (edit) {
-    await sendOrEdit(ctx, text, { reply_markup: kb, photo: banner });
-  } else if (banner) {
-    await ctx.replyWithPhoto(banner, { caption: text, parse_mode: "HTML", reply_markup: kb }).catch(async () => {
-      await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
-    });
+    if (asset?.isVideo) {
+      await sendOrEdit(ctx, text, { reply_markup: kb, video: asset.file });
+    } else {
+      await sendOrEdit(ctx, text, { reply_markup: kb, photo: asset?.file ?? null });
+    }
+  } else if (asset) {
+    if (asset.isVideo) {
+      await ctx.replyWithVideo(asset.file, { caption: text, parse_mode: "HTML", reply_markup: kb }).catch(async () => {
+        await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+      });
+    } else {
+      await ctx.replyWithPhoto(asset.file, { caption: text, parse_mode: "HTML", reply_markup: kb }).catch(async () => {
+        await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+      });
+    }
   } else {
     await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+  }
+}
+
+async function sendGiftsToUser(user: { id: number; tgId: string; lang: string; bonusReferrals?: number | null; spentReferrals?: number | null }): Promise<boolean> {
+  const lang = normalizeLang(user.lang);
+  const points = await availableReferralPoints(user);
+  const giftItems = await getGiftVariants();
+  if (giftItems.length === 0) return false;
+
+  const botInfo = await bot.api.getMe().catch(() => null);
+  const botUsername = botInfo?.username || "Aiobunabot";
+  const link = `https://t.me/${botUsername}?start=ref${user.tgId}`;
+
+  const listLines = giftItems.map(({ variant: v, pointsCost }) => {
+    const productName = lang === "uz" ? v.plan.product.titleUz || v.plan.product.titleRu : v.plan.product.titleRu;
+    const variantName = lang === "uz" ? v.titleUz || v.titleRu : v.titleRu;
+    const title = formatItemTitle(productName, variantName);
+    const canAfford = points >= pointsCost;
+    const premium = giftPremiumEmoji(productName, v.plan.product.premiumEmoji);
+    const icon = premium ? emojiIcon("🎁", premium) : canAfford ? "✅" : "⏳";
+    return `${icon} <b>${esc(title)}</b> = ${pointsCost} ${t(lang, "gifts_tier_friends")}${canAfford ? " ✅" : ""}`;
+  }).join("\n");
+
+  const text =
+    `${t(lang, "gifts_title_v2")}\n\n${listLines}\n\n` +
+    `👤 ${t(lang, "p_invited")}: <b>${points}</b>\n\n` +
+    `🔗 ${lang === "ru" ? "Ваша ссылка" : lang === "uz" ? "Havolangiz" : "Your link"}:\n<code>${link}</code>`;
+
+  const kb = new InlineKeyboard();
+  for (const { variant: v, pointsCost } of giftItems) {
+    const productName = lang === "uz" ? v.plan.product.titleUz || v.plan.product.titleRu : v.plan.product.titleRu;
+    const variantName = lang === "uz" ? v.titleUz || v.titleRu : v.titleRu;
+    const title = formatItemTitle(productName, variantName);
+    const canAfford = points >= pointsCost;
+    const premium = giftPremiumEmoji(productName, v.plan.product.premiumEmoji);
+    const btn = kb.text(`${premium ? "" : canAfford ? "🎁 " : "⏳ "}${title} · ${pointsCost} реф.`, `gi:${v.id}`);
+    if (premium) btn.icon(premium);
+    kb.row();
+  }
+  kb.url(t(lang, "gifts_share"), `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(lang === "ru" ? `Заходи в бот и получай подарки! 🎁` : `Join the bot and get gifts! 🎁`)}`).row();
+  kb.text(t(lang, "btn_refer"), "ref").row();
+  kb.text(t(lang, "to_shop"), "m:0:all");
+
+  const asset = giftsBannerAsset();
+  try {
+    if (asset) {
+      if (asset.isVideo) {
+        await bot.api.sendVideo(user.tgId, asset.file, { caption: text, parse_mode: "HTML", reply_markup: kb });
+      } else {
+        await bot.api.sendPhoto(user.tgId, asset.file, { caption: text, parse_mode: "HTML", reply_markup: kb });
+      }
+    } else {
+      await bot.api.sendMessage(user.tgId, text, { parse_mode: "HTML", reply_markup: kb });
+    }
+    return true;
+  } catch (e) {
+    return false;
   }
 }
 
@@ -1977,6 +2064,28 @@ bot.command("post", async (ctx) => {
     await new Promise((r) => setTimeout(r, 900));
   }
   const done = `📢 Готово: доставлено <b>${ok}</b> · не доставлено <b>${fail}</b> (всего ${users.length})`;
+  if (status) await ctx.api.editMessageText(ctx.chat!.id, status.message_id, done, { parse_mode: "HTML" }).catch(() => {});
+  else await ctx.reply(done, { parse_mode: "HTML" }).catch(() => {});
+});
+
+// Admin broadcast: /sendgifts or /postgifts
+// Sends the video gift banner + each user's unique referral link & gift buttons to all users
+bot.command(["sendgifts", "postgifts"], async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const status = await ctx.reply("🎁 Запущена персональная рассылка подарков с видео всем пользователям…").catch(() => null);
+  const users = await db.botUser.findMany();
+  let ok = 0, fail = 0;
+  const chunk = 15;
+  for (let i = 0; i < users.length; i += chunk) {
+    await Promise.all(
+      users.slice(i, i + chunk).map(async (u) => {
+        const sent = await sendGiftsToUser(u);
+        if (sent) ok++; else fail++;
+      })
+    );
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  const done = `🎁 <b>Рассылка подарков завершена!</b>\n\nУспешно доставлено: <b>${ok}</b>\nОшибка / заблокировали бота: <b>${fail}</b>\nВсего пользователей: <b>${users.length}</b>`;
   if (status) await ctx.api.editMessageText(ctx.chat!.id, status.message_id, done, { parse_mode: "HTML" }).catch(() => {});
   else await ctx.reply(done, { parse_mode: "HTML" }).catch(() => {});
 });
