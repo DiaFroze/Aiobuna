@@ -1916,6 +1916,9 @@ async function enterShop(ctx: Context, user: Awaited<ReturnType<typeof getUser>>
 // the network round-trips from "every action" down to "once per ~5 min".
 const SUBS_CACHE_TTL_MS = 5 * 60_000;
 const subsOkCache = new Map<string, number>();
+// Stores the message_id of the "subscribe to channels" gate message per user
+// so we can delete it automatically when they join.
+const subsGateMsg = new Map<string, number>();
 
 async function isSubscribedTo(ctx: Context, tgId: string, chatId: string): Promise<boolean> {
   try {
@@ -2010,15 +2013,18 @@ bot.use(async (ctx, next) => {
   for (const ch of unsubscribed) {
     kb.url(`📢 ${ch.name}`, ch.url).row();
   }
-  kb.text(t(lang, "check_subs_btn"), "check_subs").row();
+  // No manual "check" button — joining the channel triggers auto-verification.
 
   const msgText = t(lang, "subs_required_msg");
 
   if (ctx.callbackQuery) {
     await ctx.answerCallbackQuery({ text: t(lang, "subs_required_toast"), show_alert: true }).catch(() => {});
-    await ctx.editMessageText(msgText, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+    const edited = await ctx.editMessageText(msgText, { parse_mode: "HTML", reply_markup: kb }).catch(() => null);
+    const msgId = (edited as { message_id?: number } | null)?.message_id ?? ctx.callbackQuery.message?.message_id;
+    if (msgId) subsGateMsg.set(tgId, msgId);
   } else {
-    await ctx.reply(msgText, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+    const sent = await ctx.reply(msgText, { parse_mode: "HTML", reply_markup: kb }).catch(() => null);
+    if (sent?.message_id) subsGateMsg.set(tgId, sent.message_id);
   }
 });
 
@@ -2529,14 +2535,24 @@ bot.on("chat_member", async (ctx) => {
 
   db.botUser.updateMany({ where: { tgId, channelVerifiedAt: null }, data: { channelVerifiedAt: new Date() } }).catch(() => {});
 
+  // Delete the gate message (channel links) if we know its ID.
+  const gateMsgId = subsGateMsg.get(tgId);
+  if (gateMsgId) {
+    bot.api.deleteMessage(tgId, gateMsgId).catch(() => {});
+    subsGateMsg.delete(tgId);
+  }
+
+  // Automatically open the shop — like the user pressed /start.
   const lang = user.lang ?? "ru";
-  const botUsername = (ctx.me as { username?: string }).username ?? "";
-  const kb = new InlineKeyboard().url("🛍 " + t(lang, "to_shop"), `https://t.me/${botUsername}?start=shop`);
-  await bot.api.sendMessage(
-    tgId,
-    `✅ <b>${t(lang, "subs_ok_toast")}</b>\n\n${t(lang, "subs_required_msg").split("\n")[0]}`,
-    { parse_mode: "HTML", reply_markup: kb },
-  ).catch(() => {});
+  const menu = await buildMenu(lang, user.balance, 0, "all", user.id);
+  const banner = shopBannerFile();
+  if (banner) {
+    await bot.api.sendPhoto(tgId, banner, { caption: menu.text, parse_mode: "HTML", reply_markup: menu.kb }).catch(async () => {
+      await bot.api.sendMessage(tgId, menu.text, { parse_mode: "HTML", reply_markup: menu.kb }).catch(() => {});
+    });
+  } else {
+    await bot.api.sendMessage(tgId, menu.text, { parse_mode: "HTML", reply_markup: menu.kb }).catch(() => {});
+  }
 });
 
 bot.on("chat_join_request", async (ctx) => {
