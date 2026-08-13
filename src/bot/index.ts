@@ -251,7 +251,13 @@ async function effPriceFor(userId: number, variantId: number, basePriceUzs: numb
 // if the spentReferrals column hasn't been added yet (pre-migration).
 async function availableReferralPoints(user: { id: number; tgId: string; bonusReferrals?: number | null; spentReferrals?: number | null }): Promise<number> {
   try {
-    const realRefs = await db.botUser.count({ where: { referredBy: user.tgId } });
+    // Only count referrals from users who verified channel subscription (if any channels configured).
+    // If no channels are required, count all invited users.
+    const hasChannels = (await db.requiredChannel.count({ where: { isActive: true } })) > 0;
+    const refWhere = hasChannels
+      ? { referredBy: user.tgId, channelVerifiedAt: { not: null as Date | null } }
+      : { referredBy: user.tgId };
+    const realRefs = await db.botUser.count({ where: refWhere });
     const total = realRefs + (user.bonusReferrals ?? 0);
     return Math.max(0, total - (user.spentReferrals ?? 0));
   } catch (e) {
@@ -1992,6 +1998,8 @@ bot.use(async (ctx, next) => {
 
   if (allSubscribed) {
     subsOkCache.set(tgId, Date.now() + SUBS_CACHE_TTL_MS);
+    // Mark the user as channel-verified so referral points count them.
+    db.botUser.updateMany({ where: { tgId, channelVerifiedAt: null }, data: { channelVerifiedAt: new Date() } }).catch(() => {});
     return next();
   }
 
@@ -2283,6 +2291,7 @@ bot.on("callback_query:data", async (ctx) => {
       const unsubscribed = active.filter((_, i) => !results[i]);
       if (unsubscribed.length === 0) {
         subsOkCache.set(user.tgId, Date.now() + SUBS_CACHE_TTL_MS);
+        db.botUser.updateMany({ where: { tgId: user.tgId, channelVerifiedAt: null }, data: { channelVerifiedAt: new Date() } }).catch(() => {});
         await ctx.answerCallbackQuery({ text: t(user.lang, "subs_ok_toast"), show_alert: true }).catch(() => {});
         return enterShop(ctx, user);
       } else {
@@ -2486,6 +2495,46 @@ bot.on("message:document", async (ctx) => {
 // members" enabled. getChatMember won't show them as a member until an admin
 // approves it, so record the request itself — the subscription gate treats a
 // pending request the same as an approved membership (see isSubscribedTo()).
+// Auto-detect when a user joins a required channel (bot must be admin there).
+// Telegram sends chat_member updates for group/channel member status changes
+// only when the bot is an admin with the right to see members.
+bot.on("chat_member", async (ctx) => {
+  const newStatus = ctx.chatMember.new_chat_member.status;
+  const oldStatus = ctx.chatMember.old_chat_member.status;
+  // Only react when someone actually joins (left/kicked → member/administrator).
+  const joined = (newStatus === "member" || newStatus === "administrator") &&
+    (oldStatus === "left" || oldStatus === "kicked");
+  if (!joined) return;
+
+  const tgId = String(ctx.chatMember.new_chat_member.user.id);
+  const chatId = String(ctx.chat.id);
+
+  // Only care about required channels.
+  const ch = await db.requiredChannel.findFirst({ where: { chatId, isActive: true } }).catch(() => null);
+  if (!ch) return;
+
+  // Check if user is now subscribed to ALL required channels.
+  const allChannels = await db.requiredChannel.findMany({ where: { isActive: true } }).catch(() => []);
+  const results = await Promise.all(allChannels.map((c) => isSubscribedTo(ctx, tgId, c.chatId)));
+  if (!results.every(Boolean)) return;
+
+  // All channels verified — mark user and notify them.
+  subsOkCache.set(tgId, Date.now() + SUBS_CACHE_TTL_MS);
+  const user = await db.botUser.findUnique({ where: { tgId } }).catch(() => null);
+  if (!user) return;
+
+  db.botUser.updateMany({ where: { tgId, channelVerifiedAt: null }, data: { channelVerifiedAt: new Date() } }).catch(() => {});
+
+  const lang = user.lang ?? "ru";
+  const botUsername = (ctx.me as { username?: string }).username ?? "";
+  const kb = new InlineKeyboard().url("🛍 " + t(lang, "to_shop"), `https://t.me/${botUsername}?start=shop`);
+  await bot.api.sendMessage(
+    tgId,
+    `✅ <b>${t(lang, "subs_ok_toast")}</b>\n\n${t(lang, "subs_required_msg").split("\n")[0]}`,
+    { parse_mode: "HTML", reply_markup: kb },
+  ).catch(() => {});
+});
+
 bot.on("chat_join_request", async (ctx) => {
   const chatId = String(ctx.chatJoinRequest.chat.id);
   const tgId = String(ctx.chatJoinRequest.from.id);
@@ -2628,6 +2677,7 @@ async function ensureSchema() {
     `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "bonusReferrals" INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "termsAcceptedAt" TIMESTAMP(3)`,
     `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "spentReferrals" INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "channelVerifiedAt" TIMESTAMP(3)`,
     `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "pointsCost" INTEGER NOT NULL DEFAULT 0`,
     `CREATE TABLE IF NOT EXISTS "ChannelJoinRequest" (
       "id" SERIAL NOT NULL,
@@ -2720,6 +2770,10 @@ async function bootstrap() {
   await maybeResetAdmins();   // one-time admin reset (guarded)
   await bot.start({
     drop_pending_updates: false,
+    allowed_updates: [
+      "message", "callback_query", "chat_member", "chat_join_request",
+      "pre_checkout_query",
+    ],
     onStart: async (me) => {
       buttonEmoji = await setting("button_emoji", "");
       walletButtonEmoji = (await setting("wallet_button_emoji", "")).trim() || PREMIUM_EMOJI_WALLET;

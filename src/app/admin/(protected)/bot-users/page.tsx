@@ -72,12 +72,53 @@ export default async function BotUsersPage({
       : [];
   const topBuyersById = new Map(topBuyers.map((u) => [u.id, u]));
 
+  // Top 10 referrers by verified invite count (channelVerifiedAt users only when available).
+  const refGroupsAll = await botDb.botUser.groupBy({
+    by: ["referredBy"],
+    where: { referredBy: { not: null } },
+    _count: { _all: true },
+    orderBy: { _count: { referredBy: "desc" } },
+    take: 10,
+  });
+  const topReferrerTgIds = refGroupsAll.map((g) => g.referredBy!).filter(Boolean);
+  const topReferrerUsers =
+    topReferrerTgIds.length > 0
+      ? await botDb.botUser.findMany({ where: { tgId: { in: topReferrerTgIds } } })
+      : [];
+  const topReferrerByTgId = new Map(topReferrerUsers.map((u) => [u.tgId, u]));
+
   return (
     <div className="space-y-6">
       <PageHeader
         title="👤 Пользователи бота"
         subtitle="Просмотр профилей пользователей, управление балансами и правами доступа."
       />
+
+      {/* Top referrers leaderboard */}
+      <div className="card p-5">
+        <h3 className="text-lg font-semibold mb-4">🤝 Топ рефереров</h3>
+        {refGroupsAll.length === 0 ? (
+          <p className="text-sm text-muted">Пока нет приглашённых пользователей.</p>
+        ) : (
+          <ol className="space-y-2">
+            {refGroupsAll.map((g, i) => {
+              const u = topReferrerByTgId.get(g.referredBy!);
+              const count = g._count._all;
+              return (
+                <li key={g.referredBy} className="flex items-center justify-between text-sm border-b last:border-0 pb-2">
+                  <span className="flex items-center gap-2 min-w-0">
+                    <span className="text-muted w-5 shrink-0">{i + 1}.</span>
+                    <span className="font-semibold truncate">{u?.firstName || "—"}</span>
+                    {u?.username && <span className="text-xs text-muted shrink-0">@{u.username}</span>}
+                    {!u && <span className="text-xs text-muted font-mono shrink-0">{g.referredBy}</span>}
+                  </span>
+                  <span className="font-bold text-primary">{count} чел.</span>
+                </li>
+              );
+            })}
+          </ol>
+        )}
+      </div>
 
       {/* Top buyers leaderboard */}
       <div className="card p-5">
