@@ -2506,7 +2506,11 @@ bot.on("chat_member", async (ctx) => {
     (oldStatus === "left" || oldStatus === "kicked");
   if (!joined) return;
 
-  const tgId = String(ctx.chatMember.new_chat_member.user.id);
+  const newUser = ctx.chatMember.new_chat_member.user;
+  // Skip bots and anonymous/channel accounts (their IDs are negative or is_bot=true).
+  if (newUser.is_bot || newUser.id <= 0) return;
+
+  const tgId = String(newUser.id);
   const chatId = String(ctx.chat.id);
 
   // Only care about required channels.
