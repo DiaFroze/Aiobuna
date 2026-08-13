@@ -58,6 +58,7 @@ type SendOrEditOpts = {
   reply_markup?: InlineKeyboard | undefined;
   photo?: InputFile | null;
   video?: InputFile | null;
+  link_preview_options?: { url?: string; show_above_text?: boolean; prefer_large_media?: boolean; is_disabled?: boolean } | undefined;
 };
 async function sendOrEdit(ctx: Context, text: string, opts: SendOrEditOpts = {}) {
   const chatId = ctx.chat?.id;
@@ -85,7 +86,11 @@ async function sendOrEdit(ctx: Context, text: string, opts: SendOrEditOpts = {})
   // No media: try text edit → caption edit → delete+resend, in that order.
   if (chatId && messageId) {
     try {
-      await ctx.api.editMessageText(chatId, messageId, text, { parse_mode: "HTML", reply_markup: kb });
+      await ctx.api.editMessageText(chatId, messageId, text, {
+        parse_mode: "HTML",
+        reply_markup: kb,
+        link_preview_options: opts.link_preview_options,
+      });
       return;
     } catch {}
     try {
@@ -94,7 +99,7 @@ async function sendOrEdit(ctx: Context, text: string, opts: SendOrEditOpts = {})
     } catch {}
     await ctx.api.deleteMessage(chatId, messageId).catch(() => {});
   }
-  await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+  await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: opts.link_preview_options }).catch(() => {});
 }
 
 const token = process.env.TELEGRAM_BOT_TOKEN ?? "";
@@ -1442,6 +1447,17 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
   kb.text(t(lang, "btn_refer"), "ref").row();
   kb.text(t(lang, "to_shop"), "m:0:all");
 
+  const videoUrl = (await setting("gifts_video_url", "https://youtu.be/S60i8c1ZRoo?si=pl5dhs9FjNG_Yz5C")).trim();
+  if (videoUrl) {
+    const linkOpts = { url: videoUrl, show_above_text: true, prefer_large_media: true };
+    if (edit) {
+      await sendOrEdit(ctx, text, { reply_markup: kb, link_preview_options: linkOpts });
+    } else {
+      await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: linkOpts }).catch(() => {});
+    }
+    return;
+  }
+
   const asset = giftsBannerAsset();
   if (edit) {
     if (asset?.isVideo) {
@@ -1463,6 +1479,9 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
     await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
   }
 }
+
+let cachedGiftsVideoFileId: string | null = null;
+let cachedGiftsPhotoFileId: string | null = null;
 
 async function sendGiftsToUser(user: { id: number; tgId: string; lang: string; bonusReferrals?: number | null; spentReferrals?: number | null }): Promise<boolean> {
   const lang = normalizeLang(user.lang);
@@ -1504,13 +1523,31 @@ async function sendGiftsToUser(user: { id: number; tgId: string; lang: string; b
   kb.text(t(lang, "btn_refer"), "ref").row();
   kb.text(t(lang, "to_shop"), "m:0:all");
 
-  const asset = giftsBannerAsset();
+  const videoUrl = (await setting("gifts_video_url", "https://youtu.be/S60i8c1ZRoo?si=pl5dhs9FjNG_Yz5C")).trim();
   try {
+    if (videoUrl) {
+      await bot.api.sendMessage(user.tgId, text, {
+        parse_mode: "HTML",
+        reply_markup: kb,
+        link_preview_options: {
+          url: videoUrl,
+          show_above_text: true,
+          prefer_large_media: true,
+        },
+      });
+      return true;
+    }
+
+    const asset = giftsBannerAsset();
     if (asset) {
       if (asset.isVideo) {
-        await bot.api.sendVideo(user.tgId, asset.file, { caption: text, parse_mode: "HTML", reply_markup: kb });
+        const media = cachedGiftsVideoFileId ?? asset.file;
+        const msg = await bot.api.sendVideo(user.tgId, media, { caption: text, parse_mode: "HTML", reply_markup: kb });
+        if (msg.video?.file_id) cachedGiftsVideoFileId = msg.video.file_id;
       } else {
-        await bot.api.sendPhoto(user.tgId, asset.file, { caption: text, parse_mode: "HTML", reply_markup: kb });
+        const media = cachedGiftsPhotoFileId ?? asset.file;
+        const msg = await bot.api.sendPhoto(user.tgId, media, { caption: text, parse_mode: "HTML", reply_markup: kb });
+        if (msg.photo?.[0]?.file_id) cachedGiftsPhotoFileId = msg.photo[0].file_id;
       }
     } else {
       await bot.api.sendMessage(user.tgId, text, { parse_mode: "HTML", reply_markup: kb });
