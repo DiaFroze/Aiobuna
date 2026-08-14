@@ -254,8 +254,16 @@ async function availableReferralPoints(user: { id: number; tgId: string; bonusRe
     // Only count referrals from users who verified channel subscription (if any channels configured).
     // If no channels are required, count all invited users.
     const hasChannels = (await db.requiredChannel.count({ where: { isActive: true } })) > 0;
+    // Count users who verified via channel (channelVerifiedAt) OR accepted terms
+    // (termsAcceptedAt — proxy for users who subscribed before the column existed).
     const refWhere = hasChannels
-      ? { referredBy: user.tgId, channelVerifiedAt: { not: null as Date | null } }
+      ? {
+          referredBy: user.tgId,
+          OR: [
+            { channelVerifiedAt: { not: null as Date | null } },
+            { termsAcceptedAt: { not: null as Date | null } },
+          ],
+        }
       : { referredBy: user.tgId };
     const realRefs = await db.botUser.count({ where: refWhere });
     const total = realRefs + (user.bonusReferrals ?? 0);
@@ -2359,7 +2367,15 @@ bot.on("callback_query:data", async (ctx) => {
     }
     if (data === "terms_accept") {
       const user = await getUser(ctx);
-      await db.botUser.update({ where: { id: user.id }, data: { termsAcceptedAt: new Date() } }).catch(() => {});
+      const now = new Date();
+      await db.botUser.update({
+        where: { id: user.id },
+        data: {
+          termsAcceptedAt: now,
+          // Accepting terms means they passed the subscription gate — mark as verified.
+          channelVerifiedAt: user.channelVerifiedAt ?? now,
+        },
+      }).catch(() => {});
       await ctx.answerCallbackQuery({ text: t(user.lang, "terms_accepted_toast") }).catch(() => {});
       await ctx.editMessageReplyMarkup().catch(() => {});
       return sendHome(ctx, user);
@@ -2760,6 +2776,9 @@ async function ensureSchema() {
     `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "termsAcceptedAt" TIMESTAMP(3)`,
     `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "spentReferrals" INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "channelVerifiedAt" TIMESTAMP(3)`,
+    // Backfill: users who already accepted terms must have passed the subscription
+    // gate — mark them as channel-verified so referral points count them correctly.
+    `UPDATE "BotUser" SET "channelVerifiedAt" = "termsAcceptedAt" WHERE "channelVerifiedAt" IS NULL AND "termsAcceptedAt" IS NOT NULL`,
     `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "pointsCost" INTEGER NOT NULL DEFAULT 0`,
     `CREATE TABLE IF NOT EXISTS "ChannelJoinRequest" (
       "id" SERIAL NOT NULL,
