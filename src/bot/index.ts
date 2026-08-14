@@ -251,21 +251,9 @@ async function effPriceFor(userId: number, variantId: number, basePriceUzs: numb
 // if the spentReferrals column hasn't been added yet (pre-migration).
 async function availableReferralPoints(user: { id: number; tgId: string; bonusReferrals?: number | null; spentReferrals?: number | null }): Promise<number> {
   try {
-    // Only count referrals from users who verified channel subscription (if any channels configured).
-    // If no channels are required, count all invited users.
-    const hasChannels = (await db.requiredChannel.count({ where: { isActive: true } })) > 0;
-    // Count users who verified via channel (channelVerifiedAt) OR accepted terms
-    // (termsAcceptedAt — proxy for users who subscribed before the column existed).
-    const refWhere = hasChannels
-      ? {
-          referredBy: user.tgId,
-          OR: [
-            { channelVerifiedAt: { not: null as Date | null } },
-            { termsAcceptedAt: { not: null as Date | null } },
-          ],
-        }
-      : { referredBy: user.tgId };
-    const realRefs = await db.botUser.count({ where: refWhere });
+    // Each invited user is counted exactly once (unique referredBy entry).
+    // spentReferrals tracks already-redeemed points, preventing double-spend.
+    const realRefs = await db.botUser.count({ where: { referredBy: user.tgId } });
     const total = realRefs + (user.bonusReferrals ?? 0);
     return Math.max(0, total - (user.spentReferrals ?? 0));
   } catch (e) {
@@ -1449,18 +1437,9 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
     return `${icon} <b>${esc(title)}</b> = ${pointsCost} ${t(lang, "gifts_tier_friends")}${canAfford ? " ✅" : ""}`;
   }).join("\n");
 
-  const hasChannels = (await db.requiredChannel.count({ where: { isActive: true } })) > 0;
-  const channelNote = hasChannels
-    ? (lang === "uz"
-      ? "\n⚠️ <i>Taklif qilingan odam kanalga obuna bo'lgandan keyingina hisoblanadi.</i>"
-      : lang === "en"
-      ? "\n⚠️ <i>Invited friends count only after they subscribe to the channel.</i>"
-      : "\n⚠️ <i>Приглашённый засчитывается только после подписки на канал.</i>")
-    : "";
-
   const text =
     `${t(lang, "gifts_title_v2")}\n\n${listLines}\n\n` +
-    `👤 ${t(lang, "p_invited")}: <b>${points}</b>${channelNote}\n\n` +
+    `👤 ${t(lang, "p_invited")}: <b>${points}</b>\n\n` +
     `🔗 ${lang === "ru" ? "Ваша ссылка" : lang === "uz" ? "Havolangiz" : "Your link"}:\n<code>${link}</code>`;
 
   const kb = new InlineKeyboard();
@@ -2776,9 +2755,6 @@ async function ensureSchema() {
     `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "termsAcceptedAt" TIMESTAMP(3)`,
     `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "spentReferrals" INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "channelVerifiedAt" TIMESTAMP(3)`,
-    // Backfill: users who already accepted terms must have passed the subscription
-    // gate — mark them as channel-verified so referral points count them correctly.
-    `UPDATE "BotUser" SET "channelVerifiedAt" = "termsAcceptedAt" WHERE "channelVerifiedAt" IS NULL AND "termsAcceptedAt" IS NOT NULL`,
     `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "pointsCost" INTEGER NOT NULL DEFAULT 0`,
     `CREATE TABLE IF NOT EXISTS "ChannelJoinRequest" (
       "id" SERIAL NOT NULL,
