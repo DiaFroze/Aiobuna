@@ -55,6 +55,37 @@ export async function importStockAction(formData: FormData) {
     metadata: { variantId, links: links.length, copies, created: rows.length, duplicates },
   });
 
+  // Notify users who requested "notify me when back in stock" for this variant.
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (botToken && rows.length > 0) {
+    const variant = await botDb.variant.findUnique({
+      where: { id: variantId },
+      include: { plan: { include: { product: true } } },
+    });
+    if (variant) {
+      const productLabel = `${variant.plan.product.titleRu} — ${variant.titleRu}`;
+      const alerts = await botDb.$queryRawUnsafe<{ tgId: string }[]>(
+        `SELECT "tgId" FROM "StockAlert" WHERE "variantId" = $1`, variantId,
+      ).catch(() => [] as { tgId: string }[]);
+      if (alerts.length > 0) {
+        const shopUrl = `https://t.me/Aiobunabot?start=shop`;
+        for (const a of alerts) {
+          await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: a.tgId,
+              text: `✅ Товар снова в наличии!\n\n<b>${productLabel}</b>\n\nЖмите кнопку чтобы купить:`,
+              parse_mode: "HTML",
+              reply_markup: { inline_keyboard: [[{ text: "🛍 Перейти в магазин", url: shopUrl }]] },
+            }),
+          }).catch(() => {});
+        }
+        await botDb.$executeRawUnsafe(`DELETE FROM "StockAlert" WHERE "variantId" = $1`, variantId).catch(() => {});
+      }
+    }
+  }
+
   revalidatePath("/admin/bot-stock");
 }
 

@@ -752,6 +752,16 @@ model ChannelJoinRequest {
   @@unique([chatId, tgId])
 }
 
+model StockAlert {
+  id        Int      @id @default(autoincrement())
+  tgId      String
+  variantId Int
+  createdAt DateTime @default(now())
+
+  @@unique([tgId, variantId])
+  @@index([variantId])
+}
+
 // Per-user custom price for a specific variant. Only this user sees/pays this
 // price; `label` (e.g. "VIP", "Только для вас") is shown to them in the bot.
 model UserVariantPrice {

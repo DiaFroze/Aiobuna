@@ -736,7 +736,17 @@ async function showQtyChooser(ctx: Context, variantId: number, qty: number, back
   if (!v || !v.isActive) return ack({ text: t(lang, "plan_unavailable"), show_alert: true });
   const eff = await effPriceFor(user.id, variantId, v.priceUzs);
   const built = await buildQtyChooser(v, lang, user.balance, qty, back, eff.price, eff.label);
-  if (!built) return ack({ text: t(lang, "out_of_stock"), show_alert: true });
+  if (!built) {
+    const pt = await pick3(v.plan.product.titleRu, v.plan.product.titleEn, v.plan.product.titleUz, lang);
+    const vt = await locName(v.titleRu, v.titleUz, lang);
+    const noStockText = `😔 <b>${esc(pt)} — ${esc(vt)}</b>\n\n${t(lang, "out_of_stock_msg")}`;
+    const noStockKb = new InlineKeyboard()
+      .text("🔔 " + t(lang, "notify_btn"), `na:${variantId}`).row()
+      .text(t(lang, "back"), `p:${v.plan.product.id}:${back}`);
+    if (edit) await sendOrEdit(ctx, noStockText, { reply_markup: noStockKb });
+    else await ctx.reply(noStockText, { parse_mode: "HTML", reply_markup: noStockKb });
+    return ack();
+  }
   if (edit) {
     await sendOrEdit(ctx, built.text, { reply_markup: built.kb });
   } else {
@@ -1431,9 +1441,18 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
     return `${icon} <b>${esc(title)}</b> = ${pointsCost} ${t(lang, "gifts_tier_friends")}${canAfford ? " ✅" : ""}`;
   }).join("\n");
 
+  const hasChannels = (await db.requiredChannel.count({ where: { isActive: true } })) > 0;
+  const channelNote = hasChannels
+    ? (lang === "uz"
+      ? "\n⚠️ <i>Taklif qilingan odam kanalga obuna bo'lgandan keyingina hisoblanadi.</i>"
+      : lang === "en"
+      ? "\n⚠️ <i>Invited friends count only after they subscribe to the channel.</i>"
+      : "\n⚠️ <i>Приглашённый засчитывается только после подписки на канал.</i>")
+    : "";
+
   const text =
     `${t(lang, "gifts_title_v2")}\n\n${listLines}\n\n` +
-    `👤 ${t(lang, "p_invited")}: <b>${points}</b>\n\n` +
+    `👤 ${t(lang, "p_invited")}: <b>${points}</b>${channelNote}\n\n` +
     `🔗 ${lang === "ru" ? "Ваша ссылка" : lang === "uz" ? "Havolangiz" : "Your link"}:\n<code>${link}</code>`;
 
   const kb = new InlineKeyboard();
@@ -1878,9 +1897,6 @@ async function showLangPicker(ctx: Context, edit: boolean) {
 async function sendHome(ctx: Context, user: Awaited<ReturnType<typeof getUser>>) {
   const { text, entities } = await buildHeader();
   await ctx.reply(text, { entities, reply_markup: mainKeyboard(user.lang) });
-  // Referral-gift teaser, right after the header — only sent when there's an
-  // active campaign the user hasn't already claimed (silent otherwise).
-  await showGifts(ctx, false, true).catch(() => {});
   // Shop banner + catalog text + product buttons all as ONE photo message.
   // Product/qty callbacks now use sendOrEdit(), which correctly handles
   // media-source messages via delete+resend when a plain text edit isn't
@@ -2030,6 +2046,29 @@ bot.use(async (ctx, next) => {
 bot.command("start", async (ctx) => {
   const existing = await findUser(ctx);
   const user = await getUser(ctx, ctx.match?.trim() || undefined);
+
+  // Check required channels BEFORE showing anything else (except for admin).
+  if (!isAdmin(ctx)) {
+    const tgId = String(ctx.from!.id);
+    const active = await db.requiredChannel.findMany({ where: { isActive: true } });
+    if (active.length > 0) {
+      const cachedUntil = subsOkCache.get(tgId);
+      if (!cachedUntil || cachedUntil <= Date.now()) {
+        const results = await Promise.all(active.map((ch) => isSubscribedTo(ctx, tgId, ch.chatId)));
+        const unsubscribed = active.filter((_, i) => !results[i]);
+        if (unsubscribed.length > 0) {
+          const kb = new InlineKeyboard();
+          for (const ch of unsubscribed) kb.url(`📢 ${ch.name}`, ch.url).row();
+          const sent = await ctx.reply(t(user.lang, "subs_required_msg"), { parse_mode: "HTML", reply_markup: kb }).catch(() => null);
+          if (sent?.message_id) subsGateMsg.set(tgId, sent.message_id);
+          return;
+        }
+        subsOkCache.set(tgId, Date.now() + SUBS_CACHE_TTL_MS);
+        db.botUser.updateMany({ where: { tgId, channelVerifiedAt: null }, data: { channelVerifiedAt: new Date() } }).catch(() => {});
+      }
+    }
+  }
+
   if (!existing) return showLangPicker(ctx, false); // first visit → pick language
   await enterShop(ctx, user);
 });
@@ -2346,6 +2385,18 @@ bot.on("callback_query:data", async (ctx) => {
     if (tag === "qi") { pending.set(String(ctx.from?.id), { type: "qty", variantId: Number(rest[0]), back: `${rest[1] ?? "0"}:${rest[2] ?? "all"}` }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "enter_qty_msg")); }
     if (tag === "bc") return doBuy(ctx, Number(rest[0]), Number(rest[1]) || 1);
     if (tag === "rb") return buyForReferrals(ctx, Number(rest[0]));
+    if (tag === "na") {
+      // "Notify me when back in stock" — save a StockAlert for this variant.
+      const variantId = Number(rest[0]);
+      await ctx.answerCallbackQuery().catch(() => {});
+      if (!variantId) return;
+      await db.$executeRawUnsafe(
+        `INSERT INTO "StockAlert" ("tgId", "variantId") VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        user.tgId, variantId,
+      ).catch(() => {});
+      await ctx.reply(t(lang, "notify_saved")).catch(() => {});
+      return;
+    }
     if (tag === "gi") return showGiftItem(ctx, Number(rest[0]));
     if (tag === "meth") return viewMethod(ctx, Number(rest[0]));
     if (tag === "mbuy") return buyMethod(ctx, Number(rest[0]));
@@ -2540,8 +2591,21 @@ bot.on("chat_member", async (ctx) => {
     subsGateMsg.delete(tgId);
   }
 
-  // Automatically open the shop — like the user pressed /start.
   const lang = user.lang ?? "ru";
+
+  if (!user.termsAcceptedAt) {
+    // New user: show terms gate next (they'll see the shop after accepting).
+    const termsCustom = await db.setting.findUnique({ where: { key: "terms" } }).then((r) => r?.valueRu?.trim() ?? "").catch(() => "");
+    const body = termsCustom || t(lang, "terms_body");
+    const termsText = `${t(lang, "terms_title")}\n\n<blockquote>${esc(t(lang, "terms_intro"))}\n\n${body}</blockquote>`;
+    const termsKb = new InlineKeyboard().text(t(lang, "terms_accept_btn"), "terms_accept");
+    await bot.api.sendMessage(tgId, termsText, { parse_mode: "HTML", reply_markup: termsKb, link_preview_options: { is_disabled: true } }).catch(async () => {
+      await bot.api.sendMessage(tgId, stripTags(termsText), { reply_markup: termsKb }).catch(() => {});
+    });
+    return;
+  }
+
+  // Returning user: open shop directly.
   const menu = await buildMenu(lang, user.balance, 0, "all", user.id);
   const banner = shopBannerFile();
   if (banner) {
@@ -2705,6 +2769,14 @@ async function ensureSchema() {
       CONSTRAINT "ChannelJoinRequest_pkey" PRIMARY KEY ("id")
     )`,
     `CREATE UNIQUE INDEX IF NOT EXISTS "ChannelJoinRequest_chatId_tgId_key" ON "ChannelJoinRequest"("chatId", "tgId")`,
+    `CREATE TABLE IF NOT EXISTS "StockAlert" (
+      "id" SERIAL NOT NULL,
+      "tgId" TEXT NOT NULL,
+      "variantId" INTEGER NOT NULL,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "StockAlert_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "StockAlert_tgId_variantId_key" ON "StockAlert"("tgId", "variantId")`,
   ];
   for (const sql of statements) {
     try {
