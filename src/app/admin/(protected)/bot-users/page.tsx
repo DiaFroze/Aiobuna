@@ -46,10 +46,13 @@ export default async function BotUsersPage({
   ]);
   const totalPages = Math.max(1, Math.ceil(totalUsers / PAGE_SIZE));
 
-  // Real invited counts (referredBy = referrer's tgId), aggregated in one query.
+  // Invited counts (referredBy = referrer's tgId), aggregated in one query.
+  // Only invitees who passed the channel-subscription gate count — this must
+  // stay in sync with countVerifiedRefs() in the bot, or the admin panel would
+  // show more points than a user can actually spend.
   const refGroups = await botDb.botUser.groupBy({
     by: ["referredBy"],
-    where: { referredBy: { not: null } },
+    where: { referredBy: { not: null }, channelVerifiedAt: { not: null } },
     _count: { _all: true },
   });
   const realRefMap = new Map<string, number>();
@@ -72,10 +75,10 @@ export default async function BotUsersPage({
       : [];
   const topBuyersById = new Map(topBuyers.map((u) => [u.id, u]));
 
-  // Top 10 referrers by verified invite count (channelVerifiedAt users only when available).
+  // Top 10 referrers by verified invite count (channel-subscribed invitees only).
   const refGroupsAll = await botDb.botUser.groupBy({
     by: ["referredBy"],
-    where: { referredBy: { not: null } },
+    where: { referredBy: { not: null }, channelVerifiedAt: { not: null } },
     _count: { _all: true },
     orderBy: { _count: { referredBy: "desc" } },
     take: 10,

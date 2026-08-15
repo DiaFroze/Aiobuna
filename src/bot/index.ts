@@ -133,14 +133,6 @@ const pending = new Map<
   | { type: "reject_custom_reason"; topupId: number }
 >();
 
-// Referral CAPTCHA: new users who arrive via a referral link must solve a
-// simple math problem before referredBy is written to the DB. This blocks
-// bots that spam /start?start=refXXX without human interaction.
-// newUserTgId → referrerTgId (cleared on any CAPTCHA answer)
-const pendingRefCaptcha = new Map<string, string>();
-// Correct answer (sum) for each user currently seeing the CAPTCHA.
-const captchaAnswers = new Map<string, number>();
-
 const bot = new Bot(token);
 
 // Telegram Bot API requires icon_custom_emoji_id as a JSON number,
@@ -254,14 +246,23 @@ async function effPriceFor(userId: number, variantId: number, basePriceUzs: numb
   }
 }
 
-// Referral "points" a user currently has to spend: real invitees + admin
+// An invited user only counts once they have actually subscribed to the
+// required channels (channelVerifiedAt is stamped the moment the subscription
+// gate passes). A bare /start?start=refXXX from a bot never sets it, so
+// referral spam earns nothing.
+const VERIFIED_REFERRAL = { channelVerifiedAt: { not: null } } as const;
+function countVerifiedRefs(referrerTgId: string): Promise<number> {
+  return db.botUser.count({ where: { referredBy: referrerTgId, ...VERIFIED_REFERRAL } });
+}
+
+// Referral "points" a user currently has to spend: verified invitees + admin
 // bonus - already spent on referral-priced purchases. Falls back gracefully
 // if the spentReferrals column hasn't been added yet (pre-migration).
 async function availableReferralPoints(user: { id: number; tgId: string; bonusReferrals?: number | null; spentReferrals?: number | null }): Promise<number> {
   try {
     // Each invited user is counted exactly once (unique referredBy entry).
     // spentReferrals tracks already-redeemed points, preventing double-spend.
-    const realRefs = await db.botUser.count({ where: { referredBy: user.tgId } });
+    const realRefs = await countVerifiedRefs(user.tgId);
     const total = realRefs + (user.bonusReferrals ?? 0);
     return Math.max(0, total - (user.spentReferrals ?? 0));
   } catch (e) {
@@ -1251,7 +1252,9 @@ async function buyForReferrals(ctx: Context, variantId: number) {
   const reserve = await db.$transaction(async (tx) => {
     const fresh = await tx.botUser.findUnique({ where: { id: user.id } });
     if (!fresh) return { error: "user" as const };
-    const realRefs = await tx.botUser.count({ where: { referredBy: fresh.tgId } });
+    // Must use the same verified-only filter as availableReferralPoints(),
+    // otherwise unverified invitees would be spendable through this path.
+    const realRefs = await tx.botUser.count({ where: { referredBy: fresh.tgId, ...VERIFIED_REFERRAL } });
     const stillHave = Math.max(0, realRefs + (fresh.bonusReferrals ?? 0) - (fresh.spentReferrals ?? 0));
     if (stillHave < pointsCost) return { error: "points" as const };
     await tx.botUser.update({
@@ -1353,7 +1356,7 @@ async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
   const lang = user.lang;
   const [ordersCount, realRefs] = await Promise.all([
     db.botOrder.count({ where: { userId: user.id } }),
-    db.botUser.count({ where: { referredBy: user.tgId } }),
+    countVerifiedRefs(user.tgId),
   ]);
   const refCount = realRefs + (user.bonusReferrals || 0);
 
@@ -1949,35 +1952,14 @@ async function enterShop(ctx: Context, user: Awaited<ReturnType<typeof getUser>>
 const SUBS_CACHE_TTL_MS = 5 * 60_000;
 const subsOkCache = new Map<string, number>();
 
-// ---------- referral CAPTCHA helpers ----------
-function generateCaptcha(): { n1: number; n2: number; correct: number; choices: number[] } {
-  const n1 = Math.floor(Math.random() * 9) + 1;
-  const n2 = Math.floor(Math.random() * 9) + 1;
-  const correct = n1 + n2;
-  const taken = new Set([correct]);
-  const wrongs: number[] = [];
-  while (wrongs.length < 2) {
-    const delta = (Math.floor(Math.random() * 6) + 1) * (Math.random() < 0.5 ? -1 : 1);
-    const candidate = correct + delta;
-    if (candidate > 0 && candidate <= 25 && !taken.has(candidate)) {
-      wrongs.push(candidate);
-      taken.add(candidate);
-    }
-  }
-  const choices = [correct, ...wrongs].sort(() => Math.random() - 0.5);
-  return { n1, n2, correct, choices };
-}
-
-async function showRefCaptcha(ctx: Context, _lang: string) {
-  const { n1, n2, correct, choices } = generateCaptcha();
-  const tgId = String(ctx.from!.id);
-  captchaAnswers.set(tgId, correct);
-  const kb = new InlineKeyboard();
-  for (const c of choices) kb.text(String(c), `cap:${c}`);
-  await ctx.reply(
-    `🤖 <b>Подтвердите, что вы не бот</b>\n\nСколько будет <b>${n1} + ${n2}</b>?\n\nВыберите правильный ответ:`,
-    { parse_mode: "HTML", reply_markup: kb },
-  ).catch(() => {});
+// Stamp the moment a user is known to satisfy the channel requirement. This is
+// the single gate a referral has to pass: countVerifiedRefs() only counts
+// invitees with this set, so a /start?start=refXXX that never subscribes earns
+// the referrer nothing. Idempotent — the null guard keeps the first timestamp.
+async function markChannelVerified(tgId: string): Promise<void> {
+  await db.botUser
+    .updateMany({ where: { tgId, channelVerifiedAt: null }, data: { channelVerifiedAt: new Date() } })
+    .catch(() => {});
 }
 
 // ---------- maintenance mode cache (30 s TTL) ----------
@@ -2035,7 +2017,7 @@ bot.use(async (ctx, next) => {
   if (String(ctx.from?.id) === ADMIN_ID) return next();
 
   const data = ctx.callbackQuery?.data;
-  if (data === "terms_accept" || data?.startsWith("lang:") || data?.startsWith("cap:")) return next();
+  if (data === "terms_accept" || data?.startsWith("lang:")) return next();
 
   const text = ctx.message?.text;
   if (text?.startsWith("/start")) return next();
@@ -2058,7 +2040,7 @@ bot.use(async (ctx, next) => {
   }
 
   const data = ctx.callbackQuery?.data;
-  if (data === "check_subs" || data === "terms_accept" || data?.startsWith("lang:") || data?.startsWith("cap:")) {
+  if (data === "check_subs" || data === "terms_accept" || data?.startsWith("lang:")) {
     return next();
   }
 
@@ -2085,6 +2067,9 @@ bot.use(async (ctx, next) => {
 
   const active = await db.requiredChannel.findMany({ where: { isActive: true } });
   if (active.length === 0) {
+    // No channels configured → nothing to gate on, so the requirement is
+    // trivially met. Stamp it, otherwise referral points could never accrue.
+    await markChannelVerified(tgId);
     return next();
   }
 
@@ -2097,7 +2082,7 @@ bot.use(async (ctx, next) => {
   if (allSubscribed) {
     subsOkCache.set(tgId, Date.now() + SUBS_CACHE_TTL_MS);
     // Mark the user as channel-verified so referral points count them.
-    db.botUser.updateMany({ where: { tgId, channelVerifiedAt: null }, data: { channelVerifiedAt: new Date() } }).catch(() => {});
+    await markChannelVerified(tgId);
     return next();
   }
 
@@ -2108,6 +2093,7 @@ bot.use(async (ctx, next) => {
   for (const ch of unsubscribed) {
     kb.url(`📢 ${ch.name}`, ch.url).row();
   }
+  kb.text(t(lang, "check_subs_btn"), "check_subs").row();
 
   const msgText = t(lang, "subs_required_msg");
 
@@ -2124,49 +2110,33 @@ bot.use(async (ctx, next) => {
 // ---------- commands & reply-keyboard ----------
 bot.command("start", async (ctx) => {
   const existing = await findUser(ctx);
-  // Create user without referredBy — CAPTCHA will credit the referrer only
-  // after the new user answers correctly. This stops bot-driven referral fraud.
-  const user = await getUser(ctx, undefined);
+  // The referral link is recorded on the BotUser row right away so it survives
+  // a bot restart. It does NOT earn a point yet: availableReferralPoints only
+  // counts invitees whose channelVerifiedAt is set, which happens once they
+  // actually pass the subscription gate below.
+  const user = await getUser(ctx, ctx.match?.trim() || undefined);
+  const tgId = user.tgId;
 
   // Check required channels BEFORE showing anything else (except for admin).
   if (!isAdmin(ctx)) {
-    const tgId = String(ctx.from!.id);
     const active = await db.requiredChannel.findMany({ where: { isActive: true } });
-    if (active.length > 0) {
-      const cachedUntil = subsOkCache.get(tgId);
-      if (!cachedUntil || cachedUntil <= Date.now()) {
-        const results = await Promise.all(active.map((ch) => isSubscribedTo(ctx, tgId, ch.chatId)));
-        const unsubscribed = active.filter((_, i) => !results[i]);
-        if (unsubscribed.length > 0) {
-          const kb = new InlineKeyboard();
-          for (const ch of unsubscribed) kb.url(`📢 ${ch.name}`, ch.url).row();
-          const sent = await ctx.reply(t(user.lang, "subs_required_msg"), { parse_mode: "HTML", reply_markup: kb }).catch(() => null);
-          if (sent?.message_id) subsGateMsg.set(tgId, sent.message_id);
-          return;
-        }
-        subsOkCache.set(tgId, Date.now() + SUBS_CACHE_TTL_MS);
-        db.botUser.updateMany({ where: { tgId, channelVerifiedAt: null }, data: { channelVerifiedAt: new Date() } }).catch(() => {});
+    const cachedUntil = subsOkCache.get(tgId);
+    if (active.length > 0 && (!cachedUntil || cachedUntil <= Date.now())) {
+      const results = await Promise.all(active.map((ch) => isSubscribedTo(ctx, tgId, ch.chatId)));
+      const unsubscribed = active.filter((_, i) => !results[i]);
+      if (unsubscribed.length > 0) {
+        const kb = new InlineKeyboard();
+        for (const ch of unsubscribed) kb.url(`📢 ${ch.name}`, ch.url).row();
+        kb.text(t(user.lang, "check_subs_btn"), "check_subs").row();
+        const sent = await ctx.reply(t(user.lang, "subs_required_msg"), { parse_mode: "HTML", reply_markup: kb }).catch(() => null);
+        if (sent?.message_id) subsGateMsg.set(tgId, sent.message_id);
+        return;
       }
+      subsOkCache.set(tgId, Date.now() + SUBS_CACHE_TTL_MS);
     }
-  }
-
-  // New user arriving via a referral link → show CAPTCHA before crediting.
-  if (!existing && (await isReferralsEnabled())) {
-    const rawMatch = (ctx.match?.trim() ?? "");
-    if (rawMatch.startsWith("ref")) {
-      const refId = rawMatch.slice(3);
-      if (refId && refId !== user.tgId) {
-        const referrer = await db.botUser.findUnique({
-          where: { tgId: refId },
-          select: { refBanned: true },
-        }).catch(() => null);
-        if (referrer && !referrer.refBanned) {
-          pendingRefCaptcha.set(user.tgId, refId);
-          await showRefCaptcha(ctx, user.lang);
-          return; // Wait for CAPTCHA answer — lang picker shown after cap: callback
-        }
-      }
-    }
+    // Nothing left to gate on — either every required channel is satisfied or
+    // none are configured. Stamp the verification that referral points key off.
+    await markChannelVerified(tgId);
   }
 
   if (!existing) return showLangPicker(ctx, false); // first visit → pick language
@@ -2195,7 +2165,12 @@ bot.command("refs", async (ctx) => {
     return ctx.reply(`👤 ${referrer.firstName ?? "—"} (@${referrer.username ?? referrer.tgId})\n\nПриглашённых нет.`);
   }
 
-  const header = `👤 <b>${esc(referrer.firstName ?? "—")}</b> (@${referrer.username ?? referrer.tgId}) — приглашено: <b>${invited.length}</b>\n\n`;
+  const verified = invited.filter((u) => u.channelVerifiedAt !== null).length;
+  const header =
+    `👤 <b>${esc(referrer.firstName ?? "—")}</b> (@${referrer.username ?? referrer.tgId})\n` +
+    `Перешли по ссылке: <b>${invited.length}</b>\n` +
+    `✅ Подписались (засчитано): <b>${verified}</b>\n` +
+    `⏳ Не подписались (не в счёт): <b>${invited.length - verified}</b>\n\n`;
   const CHUNK_SIZE = 50;
   for (let i = 0; i < invited.length; i += CHUNK_SIZE) {
     const chunk = invited.slice(i, i + CHUNK_SIZE);
@@ -2203,7 +2178,8 @@ bot.command("refs", async (ctx) => {
       const name = u.firstName ? esc(u.firstName) : "—";
       const uname = u.username ? ` @${u.username}` : "";
       const date = u.createdAt.toISOString().slice(0, 10);
-      return `${i + idx + 1}. <code>${u.tgId}</code> ${name}${uname} · ${date}`;
+      const mark = u.channelVerifiedAt ? "✅" : "⏳";
+      return `${i + idx + 1}. ${mark} <code>${u.tgId}</code> ${name}${uname} · ${date}`;
     });
     const text = (i === 0 ? header : "") + lines.join("\n");
     await ctx.reply(text, { parse_mode: "HTML" }).catch(() => {});
@@ -2261,7 +2237,7 @@ bot.command("refzero", async (ctx) => {
   });
   if (!u) return ctx.reply(`❌ Не найден: ${arg}`);
 
-  const realRefs = await db.botUser.count({ where: { referredBy: u.tgId } });
+  const realRefs = await countVerifiedRefs(u.tgId);
   const total = realRefs + (u.bonusReferrals ?? 0);
   const wasAvailable = Math.max(0, total - (u.spentReferrals ?? 0));
 
@@ -2327,11 +2303,15 @@ bot.command("auditfraud", async (ctx) => {
       continue;
     }
 
-    const totalRefs = await db.botUser.count({ where: { referredBy: user.tgId } }).catch(() => 0);
+    const [totalRefs, verifiedRefs] = await Promise.all([
+      db.botUser.count({ where: { referredBy: user.tgId } }).catch(() => 0),
+      countVerifiedRefs(user.tgId).catch(() => 0),
+    ]);
 
     lines.push(`  tgId:        ${user.tgId}`);
     lines.push(`  Имя:         ${user.firstName ?? "—"}`);
-    lines.push(`  Приглашено:  ${totalRefs} чел.`);
+    lines.push(`  Переходов:   ${totalRefs} чел.`);
+    lines.push(`  Засчитано:   ${verifiedRefs} чел. (подписались)`);
     lines.push(`  Бонус:       ${user.bonusReferrals ?? 0}`);
     lines.push(`  Потрачено:   ${user.spentReferrals ?? 0}`);
     lines.push(`  Рег:         ${user.createdAt?.toISOString() ?? "—"}`);
@@ -2636,8 +2616,16 @@ bot.on("callback_query:data", async (ctx) => {
       const unsubscribed = active.filter((_, i) => !results[i]);
       if (unsubscribed.length === 0) {
         subsOkCache.set(user.tgId, Date.now() + SUBS_CACHE_TTL_MS);
-        db.botUser.updateMany({ where: { tgId: user.tgId, channelVerifiedAt: null }, data: { channelVerifiedAt: new Date() } }).catch(() => {});
+        // Subscription confirmed → this is what makes the user count towards
+        // their referrer's points.
+        await markChannelVerified(user.tgId);
         await ctx.answerCallbackQuery({ text: t(user.lang, "subs_ok_toast"), show_alert: true }).catch(() => {});
+        // Remove the gate message instead of leaving it in the chat.
+        const gateId = subsGateMsg.get(user.tgId) ?? ctx.callbackQuery.message?.message_id;
+        if (gateId) {
+          await ctx.api.deleteMessage(user.tgId, gateId).catch(() => {});
+          subsGateMsg.delete(user.tgId);
+        }
         return enterShop(ctx, user);
       } else {
         await ctx.answerCallbackQuery({ text: t(user.lang, "subs_missing_toast"), show_alert: true }).catch(() => {});
@@ -2661,56 +2649,18 @@ bot.on("callback_query:data", async (ctx) => {
     }
     if (data === "terms_accept") {
       const user = await getUser(ctx);
-      const now = new Date();
+      // Only termsAcceptedAt here. channelVerifiedAt is deliberately NOT set:
+      // this middleware runs before the subscription gate, so an unsubscribed
+      // user can reach the terms screen. Stamping verification here would
+      // credit their referrer without them ever joining the channel.
       await db.botUser.update({
         where: { id: user.id },
-        data: {
-          termsAcceptedAt: now,
-          // Accepting terms means they passed the subscription gate — mark as verified.
-          channelVerifiedAt: user.channelVerifiedAt ?? now,
-        },
+        data: { termsAcceptedAt: new Date() },
       }).catch(() => {});
       await ctx.answerCallbackQuery({ text: t(user.lang, "terms_accepted_toast") }).catch(() => {});
       await ctx.editMessageReplyMarkup().catch(() => {});
       return sendHome(ctx, user);
     }
-    // CAPTCHA answer from a new referral user — must be handled BEFORE getUser()
-    // so the middleware bypass for cap: works correctly even for users who just
-    // registered but haven't accepted terms yet.
-    if (data.startsWith("cap:")) {
-      const tgId = String(ctx.from?.id);
-      const chosen = Number(data.split(":")[1]);
-      const correct = captchaAnswers.get(tgId);
-      const referrerId = pendingRefCaptcha.get(tgId);
-      captchaAnswers.delete(tgId);
-      pendingRefCaptcha.delete(tgId);
-
-      const passed = correct !== undefined && chosen === correct && !!referrerId;
-      if (passed) {
-        // Credit referral atomically — only if referredBy is still null
-        // (race-safe: someone could call /start twice quickly).
-        await db.botUser.updateMany({
-          where: { tgId, referredBy: null },
-          data: { referredBy: referrerId },
-        }).catch(() => {});
-      }
-
-      const resultLine = passed
-        ? `✅ <b>Верно!</b> Реферал засчитан — ваш пригласитель получит 1 очко.`
-        : `❌ <b>Неверно.</b> Реферал не засчитан.`;
-
-      await ctx.editMessageText(
-        `${resultLine}\n\n🌐 Выберите язык / Choose language / Tilni tanlang:`,
-        { parse_mode: "HTML", reply_markup: langKeyboard() },
-      ).catch(async () => {
-        await ctx.reply(
-          `${passed ? "✅ Реферал засчитан!" : "❌ Реферал не засчитан."}\n\n🌐 Выберите язык:`,
-          { reply_markup: langKeyboard() },
-        ).catch(() => {});
-      });
-      return ctx.answerCallbackQuery().catch(() => {});
-    }
-
     const user = await getUser(ctx);
     const lang = user.lang;
     if (data === "bal") { const { text, kb } = balanceView(lang, user.balance); await sendOrEdit(ctx, text, { reply_markup: kb }); return ctx.answerCallbackQuery().catch(() => {}); }
@@ -2929,7 +2879,9 @@ bot.on("chat_member", async (ctx) => {
   const user = await db.botUser.findUnique({ where: { tgId } }).catch(() => null);
   if (!user) return;
 
-  db.botUser.updateMany({ where: { tgId, channelVerifiedAt: null }, data: { channelVerifiedAt: new Date() } }).catch(() => {});
+  // Subscription detected automatically → this is what makes the user count
+  // towards their referrer's points.
+  await markChannelVerified(tgId);
 
   // Delete the gate message (channel links) if we know its ID.
   const gateMsgId = subsGateMsg.get(tgId);
@@ -3125,6 +3077,8 @@ async function ensureSchema() {
       CONSTRAINT "StockAlert_pkey" PRIMARY KEY ("id")
     )`,
     `CREATE UNIQUE INDEX IF NOT EXISTS "StockAlert_tgId_variantId_key" ON "StockAlert"("tgId", "variantId")`,
+    `CREATE INDEX IF NOT EXISTS "BotUser_referredBy_verified_idx"
+       ON "BotUser"("referredBy") WHERE "channelVerifiedAt" IS NOT NULL`,
   ];
   for (const sql of statements) {
     try {
@@ -3132,6 +3086,35 @@ async function ensureSchema() {
     } catch (e) {
       console.error("[bot] ensureSchema failed:", (e as Error).message);
     }
+  }
+}
+
+// Referral points now only count invitees with channelVerifiedAt set. Users who
+// onboarded before that rule existed have it NULL, so their referrer would lose
+// points they had already legitimately earned. Anyone who accepted the terms
+// back then had to clear the subscription gate first, so their termsAcceptedAt
+// is a safe stand-in.
+//
+// Runs exactly once, guarded by a marker row — re-running it after every
+// restart would keep re-verifying people who accept the terms without ever
+// subscribing, which is precisely what the new rule exists to prevent.
+const REF_BACKFILL_KEY = "channel_verified_backfill_done";
+async function backfillChannelVerified() {
+  try {
+    const done = await db.setting.findUnique({ where: { key: REF_BACKFILL_KEY } });
+    if (done) return;
+    const n = await db.$executeRawUnsafe(
+      `UPDATE "BotUser" SET "channelVerifiedAt" = "termsAcceptedAt"
+         WHERE "channelVerifiedAt" IS NULL AND "termsAcceptedAt" IS NOT NULL`,
+    );
+    await db.setting.upsert({
+      where: { key: REF_BACKFILL_KEY },
+      create: { key: REF_BACKFILL_KEY, valueRu: new Date().toISOString() },
+      update: {},
+    });
+    console.info(`[bot] channelVerifiedAt backfill: ${n} row(s) updated (one-time)`);
+  } catch (e) {
+    console.error("[bot] backfillChannelVerified failed:", (e as Error).message);
   }
 }
 
@@ -3204,8 +3187,9 @@ async function maybeResetAdmins() {
 }
 
 async function bootstrap() {
-  await ensureSchema();       // create missing tables before serving anything
-  await maybeResetAdmins();   // one-time admin reset (guarded)
+  await ensureSchema();             // create missing tables before serving anything
+  await backfillChannelVerified();  // one-time referral verification backfill (guarded)
+  await maybeResetAdmins();         // one-time admin reset (guarded)
   await bot.start({
     drop_pending_updates: false,
     allowed_updates: [
