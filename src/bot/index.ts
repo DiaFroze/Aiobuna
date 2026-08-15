@@ -133,6 +133,14 @@ const pending = new Map<
   | { type: "reject_custom_reason"; topupId: number }
 >();
 
+// Referral CAPTCHA: new users who arrive via a referral link must solve a
+// simple math problem before referredBy is written to the DB. This blocks
+// bots that spam /start?start=refXXX without human interaction.
+// newUserTgId → referrerTgId (cleared on any CAPTCHA answer)
+const pendingRefCaptcha = new Map<string, string>();
+// Correct answer (sum) for each user currently seeing the CAPTCHA.
+const captchaAnswers = new Map<string, number>();
+
 const bot = new Bot(token);
 
 // Telegram Bot API requires icon_custom_emoji_id as a JSON number,
@@ -1370,10 +1378,13 @@ function referView(ctx: Context, user: Awaited<ReturnType<typeof getUser>>) {
   return { text: `${t(lang, "refer_title")}\n\n${t(lang, "refer_text")}\n\n<code>${link}</code>`, kb };
 }
 async function supportView(lang: string) {
-  const custom = await setting("support", "");
+  const [custom, supportUsername] = await Promise.all([
+    setting("support", ""),
+    setting("support_username", "").then((s) => s.replace(/^@/, "")),
+  ]);
   const text = custom ? (lang === "ru" ? custom : await translate(custom, lang)) : t(lang, "support_none");
   const kb = new InlineKeyboard();
-  kb.url(t(lang, "support_write"), "https://t.me/Abdulloh_Zokirov").row();
+  if (supportUsername) kb.url(t(lang, "support_write"), `https://t.me/${supportUsername}`).row();
   kb.text(t(lang, "to_shop"), "m:0:all");
   return { text: `${t(lang, "support_title")}\n\n${text}`, kb };
 }
@@ -1934,6 +1945,37 @@ async function enterShop(ctx: Context, user: Awaited<ReturnType<typeof getUser>>
 const SUBS_CACHE_TTL_MS = 5 * 60_000;
 const subsOkCache = new Map<string, number>();
 
+// ---------- referral CAPTCHA helpers ----------
+function generateCaptcha(): { n1: number; n2: number; correct: number; choices: number[] } {
+  const n1 = Math.floor(Math.random() * 9) + 1;
+  const n2 = Math.floor(Math.random() * 9) + 1;
+  const correct = n1 + n2;
+  const taken = new Set([correct]);
+  const wrongs: number[] = [];
+  while (wrongs.length < 2) {
+    const delta = (Math.floor(Math.random() * 6) + 1) * (Math.random() < 0.5 ? -1 : 1);
+    const candidate = correct + delta;
+    if (candidate > 0 && candidate <= 25 && !taken.has(candidate)) {
+      wrongs.push(candidate);
+      taken.add(candidate);
+    }
+  }
+  const choices = [correct, ...wrongs].sort(() => Math.random() - 0.5);
+  return { n1, n2, correct, choices };
+}
+
+async function showRefCaptcha(ctx: Context, _lang: string) {
+  const { n1, n2, correct, choices } = generateCaptcha();
+  const tgId = String(ctx.from!.id);
+  captchaAnswers.set(tgId, correct);
+  const kb = new InlineKeyboard();
+  for (const c of choices) kb.text(String(c), `cap:${c}`);
+  await ctx.reply(
+    `🤖 <b>Подтвердите, что вы не бот</b>\n\nСколько будет <b>${n1} + ${n2}</b>?\n\nВыберите правильный ответ:`,
+    { parse_mode: "HTML", reply_markup: kb },
+  ).catch(() => {});
+}
+
 // ---------- maintenance mode cache (30 s TTL) ----------
 let maintenanceCache: { on: boolean; until: number } = { on: false, until: 0 };
 async function isMaintenanceOn(): Promise<boolean> {
@@ -1989,7 +2031,7 @@ bot.use(async (ctx, next) => {
   if (String(ctx.from?.id) === ADMIN_ID) return next();
 
   const data = ctx.callbackQuery?.data;
-  if (data === "terms_accept" || data?.startsWith("lang:")) return next();
+  if (data === "terms_accept" || data?.startsWith("lang:") || data?.startsWith("cap:")) return next();
 
   const text = ctx.message?.text;
   if (text?.startsWith("/start")) return next();
@@ -2012,7 +2054,7 @@ bot.use(async (ctx, next) => {
   }
 
   const data = ctx.callbackQuery?.data;
-  if (data === "check_subs" || data === "terms_accept" || data?.startsWith("lang:")) {
+  if (data === "check_subs" || data === "terms_accept" || data?.startsWith("lang:") || data?.startsWith("cap:")) {
     return next();
   }
 
@@ -2078,7 +2120,9 @@ bot.use(async (ctx, next) => {
 // ---------- commands & reply-keyboard ----------
 bot.command("start", async (ctx) => {
   const existing = await findUser(ctx);
-  const user = await getUser(ctx, ctx.match?.trim() || undefined);
+  // Create user without referredBy — CAPTCHA will credit the referrer only
+  // after the new user answers correctly. This stops bot-driven referral fraud.
+  const user = await getUser(ctx, undefined);
 
   // Check required channels BEFORE showing anything else (except for admin).
   if (!isAdmin(ctx)) {
@@ -2098,6 +2142,25 @@ bot.command("start", async (ctx) => {
         }
         subsOkCache.set(tgId, Date.now() + SUBS_CACHE_TTL_MS);
         db.botUser.updateMany({ where: { tgId, channelVerifiedAt: null }, data: { channelVerifiedAt: new Date() } }).catch(() => {});
+      }
+    }
+  }
+
+  // New user arriving via a referral link → show CAPTCHA before crediting.
+  if (!existing && (await isReferralsEnabled())) {
+    const rawMatch = (ctx.match?.trim() ?? "");
+    if (rawMatch.startsWith("ref")) {
+      const refId = rawMatch.slice(3);
+      if (refId && refId !== user.tgId) {
+        const referrer = await db.botUser.findUnique({
+          where: { tgId: refId },
+          select: { refBanned: true },
+        }).catch(() => null);
+        if (referrer && !referrer.refBanned) {
+          pendingRefCaptcha.set(user.tgId, refId);
+          await showRefCaptcha(ctx, user.lang);
+          return; // Wait for CAPTCHA answer — lang picker shown after cap: callback
+        }
       }
     }
   }
@@ -2565,6 +2628,43 @@ bot.on("callback_query:data", async (ctx) => {
       await ctx.editMessageReplyMarkup().catch(() => {});
       return sendHome(ctx, user);
     }
+    // CAPTCHA answer from a new referral user — must be handled BEFORE getUser()
+    // so the middleware bypass for cap: works correctly even for users who just
+    // registered but haven't accepted terms yet.
+    if (data.startsWith("cap:")) {
+      const tgId = String(ctx.from?.id);
+      const chosen = Number(data.split(":")[1]);
+      const correct = captchaAnswers.get(tgId);
+      const referrerId = pendingRefCaptcha.get(tgId);
+      captchaAnswers.delete(tgId);
+      pendingRefCaptcha.delete(tgId);
+
+      const passed = correct !== undefined && chosen === correct && !!referrerId;
+      if (passed) {
+        // Credit referral atomically — only if referredBy is still null
+        // (race-safe: someone could call /start twice quickly).
+        await db.botUser.updateMany({
+          where: { tgId, referredBy: null },
+          data: { referredBy: referrerId },
+        }).catch(() => {});
+      }
+
+      const resultLine = passed
+        ? `✅ <b>Верно!</b> Реферал засчитан — ваш пригласитель получит 1 очко.`
+        : `❌ <b>Неверно.</b> Реферал не засчитан.`;
+
+      await ctx.editMessageText(
+        `${resultLine}\n\n🌐 Выберите язык / Choose language / Tilni tanlang:`,
+        { parse_mode: "HTML", reply_markup: langKeyboard() },
+      ).catch(async () => {
+        await ctx.reply(
+          `${passed ? "✅ Реферал засчитан!" : "❌ Реферал не засчитан."}\n\n🌐 Выберите язык:`,
+          { reply_markup: langKeyboard() },
+        ).catch(() => {});
+      });
+      return ctx.answerCallbackQuery().catch(() => {});
+    }
+
     const user = await getUser(ctx);
     const lang = user.lang;
     if (data === "bal") { const { text, kb } = balanceView(lang, user.balance); await sendOrEdit(ctx, text, { reply_markup: kb }); return ctx.answerCallbackQuery().catch(() => {}); }
