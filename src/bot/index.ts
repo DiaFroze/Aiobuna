@@ -2097,6 +2097,22 @@ bot.command("refs", async (ctx) => {
   }
 });
 
+// Admin: /unref <tgId> — remove a user from their referrer's count
+bot.command("unref", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const arg = (ctx.match ?? "").trim().replace(/^@/, "");
+  if (!arg) return ctx.reply("Формат: /unref <tgId или @username>");
+
+  const u = await db.botUser.findFirst({
+    where: isNaN(Number(arg)) ? { username: arg } : { tgId: arg },
+  });
+  if (!u) return ctx.reply(`❌ Не найден: ${arg}`);
+  if (!u.referredBy) return ctx.reply(`ℹ️ У ${u.firstName ?? u.tgId} нет реферера — ничего не изменено.`);
+
+  await db.botUser.update({ where: { id: u.id }, data: { referredBy: null } });
+  await ctx.reply(`✅ Реферальная связь удалена.\n\n${u.firstName ?? "—"} (@${u.username ?? u.tgId}) больше не считается чьим-либо рефералом.`);
+});
+
 // Admin: manually deliver goods for a "manual delivery" order → /give <orderId> <login:pass or link>
 bot.command("give", async (ctx) => {
   if (!isAdmin(ctx)) return;
