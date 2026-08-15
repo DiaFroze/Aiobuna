@@ -368,8 +368,14 @@ async function getUser(ctx: Context, refParam?: string) {
     }
     return existing;
   }
+  // Record who invited this person REGARDLESS of whether referrals are
+  // currently enabled. The flag pauses earning and spending, not remembering:
+  // the ref id lives only in this one /start payload, so skipping the write
+  // threw it away forever and the invite could never be credited once the
+  // admin switched referrals back on. Storing it is safe on its own — a point
+  // additionally requires channelVerifiedAt, and spending is gated separately.
   let referredBy: string | null = null;
-  if (refParam && refParam.startsWith("ref") && (await isReferralsEnabled())) {
+  if (refParam && refParam.startsWith("ref")) {
     const refId = refParam.slice(3).trim();
     if (refId && refId !== tgId) {
       const referrer = await db.botUser.findUnique({ where: { tgId: refId }, select: { refBanned: true } }).catch(() => null);
@@ -2053,7 +2059,11 @@ bot.use(async (ctx, next) => {
   if (String(ctx.from?.id) === ADMIN_ID) return next();
 
   const data = ctx.callbackQuery?.data;
-  if (data === "terms_accept" || data?.startsWith("lang:")) return next();
+  // check_subs MUST pass through: a brand-new user has termsAcceptedAt = null,
+  // so without this the terms screen swallowed their "Проверить подписку" tap.
+  // channelVerifiedAt then never got stamped and their referrer never earned
+  // the point, even though the person really had subscribed.
+  if (data === "terms_accept" || data === "check_subs" || data?.startsWith("lang:")) return next();
 
   const text = ctx.message?.text;
   if (text?.startsWith("/start")) return next();
@@ -2236,6 +2246,141 @@ bot.command("unref", async (ctx) => {
 
   await db.botUser.update({ where: { id: u.id }, data: { referredBy: null } });
   await ctx.reply(`✅ Реферальная связь удалена.\n\n${u.firstName ?? "—"} (@${u.username ?? u.tgId}) больше не считается чьим-либо рефералом.`);
+});
+
+// Admin: /refwhy <tgId|@username> — explain, per invitee, exactly why a
+// referral is or isn't counting. Answers "я пригласил, а очко не пришло".
+bot.command("refwhy", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const arg = (ctx.match ?? "").trim().replace(/^@/, "");
+  if (!arg) return ctx.reply("Формат: /refwhy <tgId или @username>\n\nПокажет по каждому приглашённому, засчитан он или нет и почему.");
+
+  const u = await db.botUser.findFirst({ where: isNaN(Number(arg)) ? { username: arg } : { tgId: arg } });
+  if (!u) return ctx.reply(`❌ Не найден: ${arg}`);
+
+  const invited = await db.botUser.findMany({
+    where: { referredBy: u.tgId },
+    orderBy: { createdAt: "desc" },
+    take: 100,
+  });
+  const verified = invited.filter((x) => x.channelVerifiedAt !== null).length;
+  const points = await availableReferralPoints(u);
+  const refsOn = await isReferralsEnabled();
+
+  const lines = [
+    `👤 <b>${esc(u.firstName ?? "—")}</b> @${u.username ?? u.tgId}`,
+    `ID: <code>${u.tgId}</code>`,
+    ``,
+    `Рефералка сейчас: ${refsOn ? "✅ включена" : "⏸ ВЫКЛЮЧЕНА"}`,
+    `Забанен в рефералке: ${u.refBanned ? "🚫 да" : "нет"}`,
+    ``,
+    `Перешли по ссылке: <b>${invited.length}</b>`,
+    `✅ Засчитано (подписаны): <b>${verified}</b>`,
+    `⏳ Не подписаны: <b>${invited.length - verified}</b>`,
+    `Бонус от админа: <b>${u.bonusReferrals ?? 0}</b>`,
+    `Потрачено: <b>${u.spentReferrals ?? 0}</b>`,
+    `<b>Доступно сейчас: ${points}</b>`,
+    ``,
+  ];
+
+  if (invited.length === 0) {
+    lines.push(`⚠️ По ссылке этого человека никто не зарегистрирован.`);
+    lines.push(`Если он уверяет, что приглашал — скорее всего те люди зашли,`);
+    lines.push(`когда рефералка была выключена: тогда ссылка не сохранялась.`);
+    lines.push(`Восстановить их автоматически нельзя — начислите вручную:`);
+    lines.push(`<code>/refgive ${u.tgId} 1</code>`);
+  } else {
+    lines.push(`<b>Последние приглашённые:</b>`);
+    for (const x of invited.slice(0, 25)) {
+      const mark = x.channelVerifiedAt ? "✅" : "⏳ не подписан";
+      lines.push(`${mark} <code>${x.tgId}</code> ${esc(x.firstName ?? "—")}${x.username ? " @" + x.username : ""}`);
+    }
+    if (invited.length - verified > 0) {
+      lines.push(``);
+      lines.push(`💡 Если «не подписан» на самом деле подписан — запустите <code>/reffix</code>:`);
+      lines.push(`он перепроверит всех через Telegram и засчитает подтверждённых.`);
+    }
+  }
+
+  await ctx.reply(lines.join("\n"), { parse_mode: "HTML" }).catch(() => {});
+});
+
+// Admin: /refgive <tgId|@username> <n> — manually credit referral points.
+// For invites that were lost while referrals were switched off (the ref id
+// lived only in that one /start payload and is unrecoverable).
+bot.command("refgive", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const parts = (ctx.match ?? "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return ctx.reply("Формат: /refgive <tgId или @username> <сколько>\n\nНачисляет очки вручную (bonusReferrals).");
+  const arg = parts[0].replace(/^@/, "");
+  const n = Math.trunc(Number(parts[1]));
+  if (!Number.isFinite(n) || n === 0) return ctx.reply("❌ Укажите число (можно отрицательное, чтобы отнять).");
+
+  const u = await db.botUser.findFirst({ where: isNaN(Number(arg)) ? { username: arg } : { tgId: arg } });
+  if (!u) return ctx.reply(`❌ Не найден: ${arg}`);
+
+  const updated = await db.botUser.update({
+    where: { id: u.id },
+    data: { bonusReferrals: Math.max(0, (u.bonusReferrals ?? 0) + n) },
+  });
+  const points = await availableReferralPoints(updated);
+  await ctx.reply(
+    `✅ ${n > 0 ? "Начислено" : "Списано"} ${Math.abs(n)} очк.\n\n` +
+    `👤 ${esc(u.firstName ?? "—")} @${u.username ?? u.tgId}\n` +
+    `Бонус: ${u.bonusReferrals ?? 0} → <b>${updated.bonusReferrals}</b>\n` +
+    `Доступно сейчас: <b>${points}</b>`,
+    { parse_mode: "HTML" },
+  );
+});
+
+// Admin: /reffix — repair pass. Re-checks every invitee that has a referrer but
+// no channelVerifiedAt against the live Telegram membership, and stamps the
+// ones who really are subscribed. This is the recovery path for people who
+// subscribed but were never stamped (e.g. their "Проверить подписку" tap was
+// swallowed by the terms gate before that was fixed).
+bot.command("reffix", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+
+  const active = await db.requiredChannel.findMany({ where: { isActive: true } });
+  if (active.length === 0) {
+    const n = await db.botUser.updateMany({
+      where: { referredBy: { not: null }, channelVerifiedAt: null },
+      data: { channelVerifiedAt: new Date() },
+    });
+    return ctx.reply(`✅ Обязательных каналов нет — засчитаны все приглашённые.\n\nОбновлено: ${n.count}`);
+  }
+
+  const pendingUsers = await db.botUser.findMany({
+    where: { referredBy: { not: null }, channelVerifiedAt: null },
+    select: { id: true, tgId: true },
+  });
+  if (pendingUsers.length === 0) return ctx.reply("✅ Все приглашённые уже проверены — чинить нечего.");
+
+  const status = await ctx.reply(`🔍 Проверяю ${pendingUsers.length} чел. через Telegram…`).catch(() => null);
+
+  let fixed = 0, stillNot = 0;
+  const CHUNK = 20;
+  for (let i = 0; i < pendingUsers.length; i += CHUNK) {
+    const batch = pendingUsers.slice(i, i + CHUNK);
+    await Promise.all(batch.map(async (u) => {
+      const results = await Promise.all(active.map((ch) => isSubscribedTo(ctx, u.tgId, ch.chatId)));
+      if (results.every(Boolean)) {
+        await markChannelVerified(u.tgId);
+        fixed++;
+      } else {
+        stillNot++;
+      }
+    }));
+    await new Promise((r) => setTimeout(r, 600)); // stay under Telegram's rate limit
+  }
+
+  const done =
+    `✅ <b>Проверка завершена</b>\n\n` +
+    `Проверено: <b>${pendingUsers.length}</b>\n` +
+    `Засчитано (реально подписаны): <b>${fixed}</b>\n` +
+    `Действительно не подписаны: <b>${stillNot}</b>`;
+  if (status) await ctx.api.editMessageText(ctx.chat!.id, status.message_id, done, { parse_mode: "HTML" }).catch(() => {});
+  else await ctx.reply(done, { parse_mode: "HTML" }).catch(() => {});
 });
 
 // Admin: /refban <tgId|@username> — ban a user from inviting others
