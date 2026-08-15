@@ -484,8 +484,17 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
     stockMap(),
     priceOverridesFor(userId),
   ]);
-  const stOf = (v: { id: number; autoSupplier: boolean; supplierStock: number; manualDelivery: boolean }) =>
-    v.manualDelivery ? STOCK_UNLIMITED : v.autoSupplier ? v.supplierStock : stock.get(v.id) ?? 0;
+  // Mirrors availableStock() exactly, but reads the batched stockMap() instead
+  // of one COUNT per variant. The two used to disagree: this ignored local
+  // stock whenever autoSupplier was on (a product with 5 in local stock but 0
+  // at the supplier read as sold out) and ignored manualStockLimit entirely
+  // (a sold-out manual item still looked available). Keep the two in sync.
+  const stOf = (v: { id: number; autoSupplier: boolean; supplierStock: number; manualDelivery: boolean; manualStockLimit?: number }) => {
+    if (v.manualDelivery) {
+      return v.manualStockLimit !== undefined && v.manualStockLimit >= 0 ? v.manualStockLimit : STOCK_UNLIMITED;
+    }
+    return (stock.get(v.id) ?? 0) + (v.autoSupplier ? v.supplierStock : 0);
+  };
   const priceOf = (v: { id: number; priceUzs: number }) => overrides.get(v.id)?.priceUzs ?? v.priceUzs;
 
   let items = await Promise.all(
@@ -795,24 +804,36 @@ async function notifySalesGroup(user: { firstName: string | null; username: stri
   });
 }
 
+// buyForReferrals() increments spentReferrals BEFORE calling executePurchase,
+// so every path that aborts the purchase has to hand those points back — or the
+// user pays referrals and receives nothing. Clamped at 0 so a double refund can
+// never mint points out of thin air.
+async function refundRefPoints(userId: number, points: number | undefined) {
+  if (!points || points <= 0) return;
+  await db.$executeRawUnsafe(
+    `UPDATE "BotUser" SET "spentReferrals" = GREATEST(0, "spentReferrals" - $1) WHERE "id" = $2`,
+    points, userId,
+  ).catch((e) => console.error("[bot] refundRefPoints failed:", (e as Error).message));
+}
+
 async function executePurchase(tgId: string, variantId: number, qty: number, refPointsCost?: number) {
   const isRefGift = refPointsCost !== undefined && refPointsCost > 0;
   const user = await db.botUser.findUnique({ where: { tgId } });
   if (!user) return;
   const lang = user.lang;
+  // Points are already spent at this point — give them back on every abort.
+  const abort = async (msgKey: string) => {
+    if (isRefGift) await refundRefPoints(user.id, refPointsCost);
+    const suffix = isRefGift ? `\n\n♻️ ${refPointsCost} реф. возвращены на ваш счёт.` : "";
+    await bot.api.sendMessage(tgId, t(lang, msgKey) + suffix, { parse_mode: "HTML" }).catch(() => {});
+  };
   const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
-  if (!v || !v.isActive) {
-    await bot.api.sendMessage(tgId, t(lang, "plan_unavailable")).catch(() => {});
-    return;
-  }
+  if (!v || !v.isActive) return abort("plan_unavailable");
   const pt = await pick3(v.plan.product.titleRu, v.plan.product.titleEn, v.plan.product.titleUz, lang);
   const vt = await locName(v.titleRu, v.titleUz, lang);
   const baseTitle = `${pt} — ${vt}`;
   const max = await availableStock(v);
-  if (max <= 0) {
-    await bot.api.sendMessage(tgId, t(lang, "out_of_stock")).catch(() => {});
-    return;
-  }
+  if (max <= 0) return abort("out_of_stock");
   const finalQty = clamp(Math.floor(qty) || 1, 1, max);
   const eff = await effPriceFor(user.id, variantId, v.priceUzs);
   const total = isRefGift ? 0 : eff.price * finalQty;
@@ -844,13 +865,11 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
     });
 
     if ("error" in reserve) {
-      const errText = reserve.error === "balance"
-        ? t(lang, "not_enough_funds")
-        : reserve.error === "stock"
-        ? t(lang, "no_stock_left")
-        : t(lang, "plan_unavailable");
-      await bot.api.sendMessage(tgId, errText).catch(() => {});
-      return;
+      return abort(
+        reserve.error === "balance" ? "not_enough_funds"
+        : reserve.error === "stock" ? "no_stock_left"
+        : "plan_unavailable",
+      );
     }
 
     const code = generateVerificationCode(reserve.orderId);
@@ -911,8 +930,9 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
   });
 
   if ("error" in reserve) {
-    await bot.api.sendMessage(tgId, t(lang, "not_enough_funds")).catch(() => {});
-    return;
+    // A referral gift never hits the balance check, so "unavailable" is the
+    // only error it can produce — reporting "not enough funds" would be wrong.
+    return abort(reserve.error === "balance" ? "not_enough_funds" : "plan_unavailable");
   }
 
   const procMsg = await bot.api.sendMessage(tgId, t(lang, "processing")).catch(() => {});
@@ -1078,17 +1098,18 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
     }
     await notifySalesGroup(user, label, 0);
   } catch (e) {
-    // Critical error: rollback charge
+    // Critical error: rollback whatever was charged.
     if (!isRefGift) {
       await db.$transaction([
         db.botUser.update({ where: { id: user.id }, data: { balance: { increment: total } } }),
         db.botOrder.update({ where: { id: reserve.orderId }, data: { status: "failed" } }),
-      ]);
-    } else if (refPointsCost) {
-      await db.$transaction([
-        db.botUser.update({ where: { id: user.id }, data: { spentReferrals: { decrement: refPointsCost } } }),
-        db.botOrder.update({ where: { id: reserve.orderId }, data: { status: "failed" } }),
-      ]);
+      ]).catch((err) => console.error("[bot] balance rollback failed:", (err as Error).message));
+    } else {
+      // GREATEST(0, …) rather than a bare decrement — a raw decrement could
+      // drive spentReferrals negative and hand out points that never existed.
+      await refundRefPoints(user.id, refPointsCost);
+      await db.botOrder.update({ where: { id: reserve.orderId }, data: { status: "failed" } })
+        .catch(() => {});
     }
     console.error("[bot] hybrid order failed critically:", (e as Error).message);
     if (procMsg) {
@@ -1529,6 +1550,9 @@ let cachedGiftsPhotoFileId: string | null = null;
 
 async function sendGiftsToUser(user: { id: number; tgId: string; lang: string; bonusReferrals?: number | null; spentReferrals?: number | null }): Promise<boolean> {
   const lang = normalizeLang(user.lang);
+  // Don't advertise the gifts shop while referrals are paused — every button in
+  // this message dead-ends on "программа приостановлена".
+  if (!(await isReferralsEnabled())) return false;
   const points = await availableReferralPoints(user);
   const giftItems = await getGiftVariants();
   if (giftItems.length === 0) return false;
@@ -1591,7 +1615,10 @@ async function sendGiftsToUser(user: { id: number; tgId: string; lang: string; b
       } else {
         const media = cachedGiftsPhotoFileId ?? asset.file;
         const msg = await bot.api.sendPhoto(user.tgId, media, { caption: text, parse_mode: "HTML", reply_markup: kb });
-        if (msg.photo?.[0]?.file_id) cachedGiftsPhotoFileId = msg.photo[0].file_id;
+        // photo[] is ordered smallest→largest; caching photo[0] would re-send a
+        // thumbnail to every subsequent recipient.
+        const largest = msg.photo?.[msg.photo.length - 1];
+        if (largest?.file_id) cachedGiftsPhotoFileId = largest.file_id;
       }
     } else {
       await bot.api.sendMessage(user.tgId, text, { parse_mode: "HTML", reply_markup: kb });
@@ -1990,9 +2017,18 @@ const subsGateMsg = new Map<string, number>();
 async function isSubscribedTo(ctx: Context, tgId: string, chatId: string): Promise<boolean> {
   try {
     const member = await ctx.api.getChatMember(chatId, Number(tgId));
-    if (["member", "creator", "administrator", "restricted"].includes(member.status)) return true;
+    if (["member", "creator", "administrator", "restricted"].includes(member.status)) {
+      // Confirmed member → the join-request row has served its purpose. Drop it,
+      // otherwise it outlives the membership: someone who joins via a request
+      // link and then leaves would keep passing this gate forever (and keep
+      // counting as a verified referral).
+      db.channelJoinRequest.deleteMany({ where: { chatId, tgId } }).catch(() => {});
+      return true;
+    }
   } catch {
-    // Not a member (or bot can't see them) — fall through to the join-request check.
+    // Not a member (or bot can't see them) — fall through to the join-request
+    // check, which covers channels where the bot cannot read membership and
+    // requests Telegram is still holding for approval.
   }
   const pending = await db.channelJoinRequest.findUnique({ where: { chatId_tgId: { chatId, tgId } } }).catch(() => null);
   return pending !== null;
@@ -2442,6 +2478,13 @@ bot.command("post", async (ctx) => {
 // Sends the video gift banner + each user's unique referral link & gift buttons to all users
 bot.command(["sendgifts", "postgifts"], async (ctx) => {
   if (!isAdmin(ctx)) return;
+  // Fail loudly instead of reporting "0 доставлено" for a non-obvious reason.
+  if (!(await isReferralsEnabled())) {
+    return ctx.reply("⏸ Реферальная программа выключена — рассылка подарков отменена.\n\nВключите её в админ-панели и повторите.");
+  }
+  if ((await getGiftVariants()).length === 0) {
+    return ctx.reply("⚠️ Нет ни одного подарочного товара (pointsCost > 0) — рассылать нечего.");
+  }
   const status = await ctx.reply("🎁 Запущена персональная рассылка подарков с видео всем пользователям…").catch(() => null);
   const users = await db.botUser.findMany();
   let ok = 0, fail = 0;
@@ -2509,7 +2552,7 @@ async function showMethods(ctx: Context) {
   const lang = user.lang;
   const enabled = (await setting("methods_enabled", "1")) === "1";
   if (!enabled) {
-    return ctx.reply(t(lang, "methods_disabled") || "Методы отключены.", {
+    return ctx.reply(t(lang, "methods_disabled"), {
       reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all"),
     });
   }
@@ -2580,14 +2623,38 @@ async function buyMethod(ctx: Context, id: number) {
       show_alert: true,
     }).catch(() => {});
   }
-  try {
-    await db.$transaction(async (tx) => {
-      if (price > 0) await tx.botUser.update({ where: { id: user.id }, data: { balance: { decrement: price } } });
-      await tx.methodPurchase.create({ data: { methodId: id, userId: user.id, pricePaid: price } });
-    });
-  } catch {
-    // гонка по уникальному ключу — считаем, что уже куплено
+
+  // Re-check the balance INSIDE the transaction against a fresh row. The check
+  // above reads a snapshot taken before this handler ran, so two quick taps
+  // could both pass it and debit twice, driving the balance negative.
+  const result = await db.$transaction(async (tx) => {
+    const already = await tx.methodPurchase
+      .findUnique({ where: { methodId_userId: { methodId: id, userId: user.id } } })
+      .catch(() => null);
+    if (already) return { status: "already" as const };
+    const fresh = await tx.botUser.findUnique({ where: { id: user.id } });
+    if (!fresh) return { status: "error" as const };
+    if (price > 0 && fresh.balance < price) return { status: "funds" as const, balance: fresh.balance };
+    if (price > 0) await tx.botUser.update({ where: { id: user.id }, data: { balance: { decrement: price } } });
+    await tx.methodPurchase.create({ data: { methodId: id, userId: user.id, pricePaid: price } });
+    return { status: "ok" as const };
+  }).catch((e) => {
+    console.error("[bot] buyMethod tx failed:", (e as Error).message);
+    return { status: "error" as const };
+  });
+
+  // Only "ok" and "already" mean the user is entitled to the content — a failed
+  // charge must never fall through to delivery.
+  if (result.status === "funds") {
+    return ctx.answerCallbackQuery({
+      text: t(lang, "method_need_balance", { v: money(price - result.balance, lang) }),
+      show_alert: true,
+    }).catch(() => {});
   }
+  if (result.status === "error") {
+    return ctx.answerCallbackQuery({ text: t(lang, "plan_unavailable"), show_alert: true }).catch(() => {});
+  }
+
   await ctx.answerCallbackQuery({ text: t(lang, "method_delivered") }).catch(() => {});
   return deliverMethod(ctx, lang, m);
 }
