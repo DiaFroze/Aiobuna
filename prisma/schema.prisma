@@ -665,7 +665,8 @@ model BotUser {
   firstName  String?
   lang       String   @default("ru")
   balance    Float    @default(0)
-  referredBy String?
+  referredBy  String?
+  refBanned   Boolean   @default(false)
   refRewardClaimed Boolean @default(false)
   isFormatterAllowed Boolean @default(false)
   bonusReferrals    Int       @default(0)

@@ -362,7 +362,10 @@ async function getUser(ctx: Context, refParam?: string) {
   let referredBy: string | null = null;
   if (refParam && refParam.startsWith("ref")) {
     const refId = refParam.slice(3).trim();
-    if (refId && refId !== tgId) referredBy = refId;
+    if (refId && refId !== tgId) {
+      const referrer = await db.botUser.findUnique({ where: { tgId: refId }, select: { refBanned: true } }).catch(() => null);
+      if (referrer && !referrer.refBanned) referredBy = refId;
+    }
   }
   const created = await db.botUser.create({
     data: { tgId, username: from.username ?? null, firstName: from.first_name ?? null, referredBy },
@@ -2113,6 +2116,38 @@ bot.command("unref", async (ctx) => {
   await ctx.reply(`✅ Реферальная связь удалена.\n\n${u.firstName ?? "—"} (@${u.username ?? u.tgId}) больше не считается чьим-либо рефералом.`);
 });
 
+// Admin: /refban <tgId|@username> — ban a user from inviting others
+bot.command("refban", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const arg = (ctx.match ?? "").trim().replace(/^@/, "");
+  if (!arg) return ctx.reply("Формат: /refban <tgId или @username>");
+
+  const u = await db.botUser.findFirst({
+    where: isNaN(Number(arg)) ? { username: arg } : { tgId: arg },
+  });
+  if (!u) return ctx.reply(`❌ Не найден: ${arg}`);
+  if (u.refBanned) return ctx.reply(`ℹ️ ${u.firstName ?? u.tgId} уже заблокирован от приглашений.`);
+
+  await db.botUser.update({ where: { id: u.id }, data: { refBanned: true } });
+  await ctx.reply(`🚫 ${u.firstName ?? "—"} (@${u.username ?? u.tgId}) теперь не может приглашать людей.\n\nЕго реферальная ссылка перестанет давать баллы.`);
+});
+
+// Admin: /refunban <tgId|@username> — restore referral invite ability
+bot.command("refunban", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const arg = (ctx.match ?? "").trim().replace(/^@/, "");
+  if (!arg) return ctx.reply("Формат: /refunban <tgId или @username>");
+
+  const u = await db.botUser.findFirst({
+    where: isNaN(Number(arg)) ? { username: arg } : { tgId: arg },
+  });
+  if (!u) return ctx.reply(`❌ Не найден: ${arg}`);
+  if (!u.refBanned) return ctx.reply(`ℹ️ ${u.firstName ?? u.tgId} не был заблокирован — ничего не изменено.`);
+
+  await db.botUser.update({ where: { id: u.id }, data: { refBanned: false } });
+  await ctx.reply(`✅ ${u.firstName ?? "—"} (@${u.username ?? u.tgId}) снова может приглашать людей.`);
+});
+
 // Admin: manually deliver goods for a "manual delivery" order → /give <orderId> <login:pass or link>
 bot.command("give", async (ctx) => {
   if (!isAdmin(ctx)) return;
@@ -2807,6 +2842,7 @@ async function ensureSchema() {
     `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "termsAcceptedAt" TIMESTAMP(3)`,
     `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "spentReferrals" INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "channelVerifiedAt" TIMESTAMP(3)`,
+    `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "refBanned" BOOLEAN NOT NULL DEFAULT false`,
     `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "pointsCost" INTEGER NOT NULL DEFAULT 0`,
     `CREATE TABLE IF NOT EXISTS "ChannelJoinRequest" (
       "id" SERIAL NOT NULL,
