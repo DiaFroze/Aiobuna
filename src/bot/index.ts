@@ -1314,7 +1314,7 @@ async function ordersView(lang: string, userId: number) {
     orders = await db.botOrder.findMany({
       where: { userId, status: { in: ["delivered", "awaiting_delivery"] } },
       orderBy: { id: "desc" },
-      take: 10,
+      take: 5,
     });
   } catch (e) {
     console.error("[bot] ordersView query failed:", (e as Error).message);
@@ -1331,7 +1331,7 @@ async function ordersView(lang: string, userId: number) {
         .map((o) =>
           o.status === "awaiting_delivery"
             ? `#${o.id} · ${esc(clip(o.titleRu, 80))} — ${money(o.priceUsdt, lang)}\n⏳ ${t(lang, "order_pending")}`
-            : `#${o.id} · ${esc(clip(o.titleRu, 80))} — ${money(o.priceUsdt, lang)}\n<code>${esc(clip(o.payload, 150))}</code>`,
+            : `#${o.id} · ${esc(clip(o.titleRu, 80))} — ${money(o.priceUsdt, lang)}\n<code>${esc(clip(o.payload, 500))}</code>`,
         )
         .join("\n\n")
     : t(lang, "no_orders");
