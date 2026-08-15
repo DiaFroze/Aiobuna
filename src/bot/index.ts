@@ -2061,6 +2061,42 @@ bot.command("start", async (ctx) => {
 });
 bot.command("menu", (ctx) => showMenu(ctx, 0, "all", false));
 
+// Admin: /refs <tgId|@username> — list users invited by that person
+bot.command("refs", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const arg = (ctx.match ?? "").trim().replace(/^@/, "");
+  if (!arg) return ctx.reply("Формат: /refs <tgId или @username>");
+
+  const referrer = await db.botUser.findFirst({
+    where: isNaN(Number(arg)) ? { username: arg } : { tgId: arg },
+  });
+  if (!referrer) return ctx.reply(`❌ Пользователь не найден: ${arg}`);
+
+  const invited = await db.botUser.findMany({
+    where: { referredBy: referrer.tgId },
+    orderBy: { createdAt: "desc" },
+    take: 200,
+  });
+
+  if (invited.length === 0) {
+    return ctx.reply(`👤 ${referrer.firstName ?? "—"} (@${referrer.username ?? referrer.tgId})\n\nПриглашённых нет.`);
+  }
+
+  const header = `👤 <b>${esc(referrer.firstName ?? "—")}</b> (@${referrer.username ?? referrer.tgId}) — приглашено: <b>${invited.length}</b>\n\n`;
+  const CHUNK_SIZE = 50;
+  for (let i = 0; i < invited.length; i += CHUNK_SIZE) {
+    const chunk = invited.slice(i, i + CHUNK_SIZE);
+    const lines = chunk.map((u, idx) => {
+      const name = u.firstName ? esc(u.firstName) : "—";
+      const uname = u.username ? ` @${u.username}` : "";
+      const date = u.createdAt.toISOString().slice(0, 10);
+      return `${i + idx + 1}. <code>${u.tgId}</code> ${name}${uname} · ${date}`;
+    });
+    const text = (i === 0 ? header : "") + lines.join("\n");
+    await ctx.reply(text, { parse_mode: "HTML" }).catch(() => {});
+  }
+});
+
 // Admin: manually deliver goods for a "manual delivery" order → /give <orderId> <login:pass or link>
 bot.command("give", async (ctx) => {
   if (!isAdmin(ctx)) return;
