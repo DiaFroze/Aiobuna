@@ -1227,6 +1227,10 @@ async function buyForReferrals(ctx: Context, variantId: number) {
   if (!(await isReferralsEnabled())) {
     return ctx.answerCallbackQuery({ text: "⏸ Реферальная программа временно приостановлена.", show_alert: true });
   }
+  // refBanned users cannot spend points either — not just invite.
+  if (user.refBanned) {
+    return ctx.answerCallbackQuery({ text: "🚫 Ваш аккаунт заблокирован в реферальной программе.", show_alert: true });
+  }
   const { map } = await getGiftTiersMap();
   const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
   const pointsCost = v ? (map.get(v.id) ?? v.pointsCost) : 0;
@@ -2236,6 +2240,48 @@ bot.command("refban", async (ctx) => {
 
   await db.botUser.update({ where: { id: u.id }, data: { refBanned: true } });
   await ctx.reply(`🚫 ${u.firstName ?? "—"} (@${u.username ?? u.tgId}) теперь не может приглашать людей.\n\nЕго реферальная ссылка перестанет давать баллы.`);
+});
+
+// Admin: /refzero <tgId|@username> — zero out all available referral points
+// Use this BEFORE enabling referrals to freeze fraudulent accumulated points.
+// Sets spentReferrals = realRefs + bonusReferrals so available becomes 0.
+bot.command("refzero", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const arg = (ctx.match ?? "").trim().replace(/^@/, "");
+  if (!arg) {
+    return ctx.reply(
+      "Формат: /refzero <tgId или @username>\n\n" +
+      "Обнуляет доступные реферальные очки пользователя.\n" +
+      "Используйте перед включением рефералок чтобы заморозить накрученные очки мошенников.",
+    );
+  }
+
+  const u = await db.botUser.findFirst({
+    where: isNaN(Number(arg)) ? { username: arg } : { tgId: arg },
+  });
+  if (!u) return ctx.reply(`❌ Не найден: ${arg}`);
+
+  const realRefs = await db.botUser.count({ where: { referredBy: u.tgId } });
+  const total = realRefs + (u.bonusReferrals ?? 0);
+  const wasAvailable = Math.max(0, total - (u.spentReferrals ?? 0));
+
+  // Freeze all points: spentReferrals = total → available = 0
+  await db.botUser.update({
+    where: { id: u.id },
+    data: { spentReferrals: total },
+  });
+
+  await ctx.reply(
+    `✅ <b>Очки обнулены</b>\n\n` +
+    `👤 ${esc(u.firstName ?? "—")} @${u.username ?? u.tgId}\n` +
+    `ID: <code>${u.tgId}</code>\n\n` +
+    `Приглашённых: ${realRefs}\n` +
+    `Бонусов от админа: ${u.bonusReferrals ?? 0}\n` +
+    `Было доступно: <b>${wasAvailable}</b>\n` +
+    `Теперь доступно: <b>0</b>\n\n` +
+    `(spentReferrals установлен в ${total})`,
+    { parse_mode: "HTML" },
+  );
 });
 
 // Admin: /refunban <tgId|@username> — restore referral invite ability
