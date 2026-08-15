@@ -1,6 +1,6 @@
 import { botDb, botConfigured } from "@/lib/botDb";
 import { PageHeader, EmptyState } from "@/components/admin/ui";
-import { upsertBotSettingAction, deleteBotSettingAction, saveMenuConfigAction } from "./actions";
+import { upsertBotSettingAction, deleteBotSettingAction, saveMenuConfigAction, toggleMaintenanceModeAction } from "./actions";
 
 export const dynamic = "force-dynamic";
 
@@ -37,7 +37,8 @@ export default async function BotSettingsPage({
 
   const allSettings = await botDb.setting.findMany({ orderBy: { key: "asc" } });
   const val = (key: string) => allSettings.find((s) => s.key === key)?.valueRu ?? "";
-  const settings = allSettings.filter((s) => !MENU_KEYS.includes(s.key));
+  const maintenanceOn = val("maintenance_mode") === "1";
+  const settings = allSettings.filter((s) => !MENU_KEYS.includes(s.key) && s.key !== "maintenance_mode");
   const existingKeys = new Set(allSettings.map((s) => s.key));
   const missingSuggested = SUGGESTED.filter((s) => !existingKeys.has(s.key));
 
@@ -47,6 +48,30 @@ export default async function BotSettingsPage({
         title="Тексты и оплата бота"
         subtitle="Сообщения и настройки, которые показываются в Telegram-боте. Сохранение применяется сразу."
       />
+
+      {/* Maintenance mode toggle */}
+      <div className={`card p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-2 ${maintenanceOn ? "border-danger/60 bg-danger/5" : "border-border"}`}>
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="text-lg">{maintenanceOn ? "🔴" : "🟢"}</span>
+            <h2 className="font-semibold">{maintenanceOn ? "Бот выключен (техперерыв)" : "Бот работает"}</h2>
+          </div>
+          <p className="text-xs text-muted mt-1">
+            {maintenanceOn
+              ? "Пользователи видят сообщение о техническом обслуживании. Вы (админ) работаете в обычном режиме."
+              : "Все пользователи могут пользоваться ботом."}
+          </p>
+        </div>
+        <form action={toggleMaintenanceModeAction} className="shrink-0">
+          <input type="hidden" name="enable" value={maintenanceOn ? "0" : "1"} />
+          <button
+            type="submit"
+            className={`btn text-sm px-5 ${maintenanceOn ? "btn-primary" : "btn-danger"}`}
+          >
+            {maintenanceOn ? "▶ Включить бота" : "⏸ Выключить бота"}
+          </button>
+        </form>
+      </div>
 
       {searchParams.error === "missing" && (
         <div className="card p-3 border-danger/30 bg-danger/5 text-danger text-sm">

@@ -1922,6 +1922,16 @@ async function enterShop(ctx: Context, user: Awaited<ReturnType<typeof getUser>>
 // the network round-trips from "every action" down to "once per ~5 min".
 const SUBS_CACHE_TTL_MS = 5 * 60_000;
 const subsOkCache = new Map<string, number>();
+
+// ---------- maintenance mode cache (30 s TTL) ----------
+let maintenanceCache: { on: boolean; until: number } = { on: false, until: 0 };
+async function isMaintenanceOn(): Promise<boolean> {
+  if (Date.now() < maintenanceCache.until) return maintenanceCache.on;
+  const row = await db.setting.findUnique({ where: { key: "maintenance_mode" } }).catch(() => null);
+  const on = row?.valueRu === "1";
+  maintenanceCache = { on, until: Date.now() + 30_000 };
+  return on;
+}
 // Stores the message_id of the "subscribe to channels" gate message per user
 // so we can delete it automatically when they join.
 const subsGateMsg = new Map<string, number>();
@@ -1936,6 +1946,16 @@ async function isSubscribedTo(ctx: Context, tgId: string, chatId: string): Promi
   const pending = await db.channelJoinRequest.findUnique({ where: { chatId_tgId: { chatId, tgId } } }).catch(() => null);
   return pending !== null;
 }
+
+// ---------- maintenance mode gate ----------
+bot.use(async (ctx, next) => {
+  if (String(ctx.from?.id) === ADMIN_ID) return next();
+  if (!(await isMaintenanceOn())) return next();
+  await ctx.reply(
+    "🔧 Магазин временно приостановлен на техническое обслуживание.\n\nПожалуйста, вернитесь позже.",
+    { parse_mode: "HTML" },
+  ).catch(() => {});
+});
 
 // ---------- mandatory terms-acceptance gate ----------
 // Nothing works until the user taps "Принимаю условия" — not the reply

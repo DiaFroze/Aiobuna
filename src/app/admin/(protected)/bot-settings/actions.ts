@@ -64,6 +64,23 @@ export async function saveMenuConfigAction(formData: FormData) {
   revalidatePath("/admin/bot-settings");
 }
 
+export async function toggleMaintenanceModeAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
+  const enable = formData.get("enable") === "1";
+  await botDb.setting.upsert({
+    where: { key: "maintenance_mode" },
+    create: { key: "maintenance_mode", valueRu: enable ? "1" : "0", type: "text" },
+    update: { valueRu: enable ? "1" : "0" },
+  });
+  await audit({
+    adminId: admin.id,
+    action: enable ? "bot.maintenance.on" : "bot.maintenance.off",
+    entityType: "BotSetting",
+    entityId: "maintenance_mode",
+  });
+  revalidatePath("/admin/bot-settings");
+}
+
 export async function deleteBotSettingAction(formData: FormData) {
   const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
   const key = str(formData.get("key"));
