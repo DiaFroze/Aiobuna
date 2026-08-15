@@ -1386,6 +1386,12 @@ async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
     countVerifiedRefs(user.tgId),
   ]);
   const refCount = realRefs + (user.bonusReferrals || 0);
+  // The gifts screen shows points left to spend, the profile used to show the
+  // lifetime total — under the SAME label. Someone who had invited 13 and spent
+  // them saw "13" here and "0" there and reasonably concluded the bot was
+  // broken. Show the whole picture instead.
+  const spentRefs = user.spentReferrals ?? 0;
+  const availableRefs = Math.max(0, refCount - spentRefs);
 
   // Professional profile layout with all actions
   const kb = new InlineKeyboard()
@@ -1402,7 +1408,9 @@ async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
     `ID: <code>${user.tgId}</code>\n` +
     `${emojiIcon("💰", walletButtonEmoji)} ${t(lang, "your_balance", { v: money(user.balance, lang) })}\n` +
     `${emojiIcon("🧾", ordersButtonEmoji)} ${t(lang, "p_orders")}: ${ordersCount}\n` +
-    `${emojiIcon("🤝", referButtonEmoji)} ${t(lang, "p_invited")}: ${refCount}`;
+    `${emojiIcon("🤝", referButtonEmoji)} ${t(lang, "p_invited")}: ${refCount}` +
+    (spentRefs > 0 ? `\n➖ ${t(lang, "p_ref_spent")}: ${spentRefs}` : "") +
+    `\n🎁 <b>${t(lang, "p_ref_available")}: ${availableRefs}</b>`;
   return { text, kb };
 }
 function referView(ctx: Context, user: Awaited<ReturnType<typeof getUser>>) {
@@ -1498,7 +1506,7 @@ async function showGifts(ctx: Context, edit = false, silent = false) {
 
   const text =
     `${t(lang, "gifts_title_v2")}\n\n${listLines}\n\n` +
-    `👤 ${t(lang, "p_invited")}: <b>${points}</b>\n\n` +
+    `🎁 ${t(lang, "p_ref_available")}: <b>${points}</b>\n\n` +
     `🔗 ${lang === "ru" ? "Ваша ссылка" : lang === "uz" ? "Havolangiz" : "Your link"}:\n<code>${link}</code>`;
 
   const kb = new InlineKeyboard();
@@ -1579,7 +1587,7 @@ async function sendGiftsToUser(user: { id: number; tgId: string; lang: string; b
 
   const text =
     `${t(lang, "gifts_title_v2")}\n\n${listLines}\n\n` +
-    `👤 ${t(lang, "p_invited")}: <b>${points}</b>\n\n` +
+    `🎁 ${t(lang, "p_ref_available")}: <b>${points}</b>\n\n` +
     `🔗 ${lang === "ru" ? "Ваша ссылка" : lang === "uz" ? "Havolangiz" : "Your link"}:\n<code>${link}</code>`;
 
   const kb = new InlineKeyboard();
@@ -2248,6 +2256,28 @@ bot.command("unref", async (ctx) => {
   await ctx.reply(`✅ Реферальная связь удалена.\n\n${u.firstName ?? "—"} (@${u.username ?? u.tgId}) больше не считается чьим-либо рефералом.`);
 });
 
+// How many points a user's gift orders actually justify having spent.
+// spentReferrals is incremented up front by buyForReferrals(); before the
+// refund fix, an aborted delivery left it incremented with nothing to show for
+// it, so points silently evaporated. Orders are the ground truth: replay them
+// and compare. Failed orders don't count — those were (or should have been)
+// refunded. Cost is resolved the same way buyForReferrals() resolves it: the
+// admin tier map first, then the variant's own pointsCost.
+async function reconciledSpend(userId: number): Promise<{ expected: number; orders: number }> {
+  const { map } = await getGiftTiersMap();
+  const orders = await db.botOrder.findMany({
+    where: { userId, source: "referral", status: { not: "failed" } },
+    select: { variantId: true },
+  });
+  let expected = 0;
+  for (const o of orders) {
+    if (o.variantId == null) continue;
+    const v = await db.variant.findUnique({ where: { id: o.variantId }, select: { pointsCost: true } }).catch(() => null);
+    expected += map.get(o.variantId) ?? v?.pointsCost ?? 0;
+  }
+  return { expected, orders: orders.length };
+}
+
 // Admin: /refwhy <tgId|@username> — explain, per invitee, exactly why a
 // referral is or isn't counting. Answers "я пригласил, а очко не пришло".
 bot.command("refwhy", async (ctx) => {
@@ -2266,6 +2296,9 @@ bot.command("refwhy", async (ctx) => {
   const verified = invited.filter((x) => x.channelVerifiedAt !== null).length;
   const points = await availableReferralPoints(u);
   const refsOn = await isReferralsEnabled();
+  const spent = u.spentReferrals ?? 0;
+  const { expected, orders } = await reconciledSpend(u.id);
+  const lost = spent - expected;
 
   const lines = [
     `👤 <b>${esc(u.firstName ?? "—")}</b> @${u.username ?? u.tgId}`,
@@ -2278,10 +2311,20 @@ bot.command("refwhy", async (ctx) => {
     `✅ Засчитано (подписаны): <b>${verified}</b>`,
     `⏳ Не подписаны: <b>${invited.length - verified}</b>`,
     `Бонус от админа: <b>${u.bonusReferrals ?? 0}</b>`,
-    `Потрачено: <b>${u.spentReferrals ?? 0}</b>`,
+    ``,
+    `Списано по счётчику: <b>${spent}</b>`,
+    `Подарков реально получено: <b>${orders}</b> на <b>${expected}</b> очк.`,
     `<b>Доступно сейчас: ${points}</b>`,
     ``,
   ];
+
+  if (lost > 0) {
+    lines.push(`🔴 <b>РАСХОЖДЕНИЕ: ${lost} очк. списано впустую.</b>`);
+    lines.push(`Столько очков ушло без выданного подарка (сорвавшаяся выдача`);
+    lines.push(`или ручное обнуление через /refzero).`);
+    lines.push(`Вернуть этому человеку: <code>/refrepair ${u.tgId}</code>`);
+    lines.push(``);
+  }
 
   if (invited.length === 0) {
     lines.push(`⚠️ По ссылке этого человека никто не зарегистрирован.`);
@@ -2303,6 +2346,103 @@ bot.command("refwhy", async (ctx) => {
   }
 
   await ctx.reply(lines.join("\n"), { parse_mode: "HTML" }).catch(() => {});
+});
+
+// Admin: /refrepair [tgId|@username | all] — return points that were debited
+// without a gift ever being delivered, by resetting spentReferrals to what the
+// user's actual gift orders justify. "all" previews every affected user; add
+// "apply" to write the changes.
+//
+// NOTE: this also undoes a deliberate /refzero, since both look identical in
+// the data — points spent with no order behind them. Re-run /refzero on the
+// fraudsters afterwards.
+bot.command("refrepair", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const parts = (ctx.match ?? "").trim().split(/\s+/).filter(Boolean);
+  const target = (parts[0] ?? "").replace(/^@/, "");
+  if (!target) {
+    return ctx.reply(
+      "Формат:\n" +
+      "  <code>/refrepair &lt;tgId или @username&gt;</code> — вернуть очки одному\n" +
+      "  <code>/refrepair all</code> — показать всех пострадавших (без изменений)\n" +
+      "  <code>/refrepair all apply</code> — вернуть очки всем\n\n" +
+      "Возвращает очки, списанные без выданного подарка.\n" +
+      "⚠️ Отменяет и ручное /refzero — мошенников придётся обнулить заново.",
+      { parse_mode: "HTML" },
+    );
+  }
+
+  // ---- single user ----
+  if (target !== "all") {
+    const u = await db.botUser.findFirst({ where: isNaN(Number(target)) ? { username: target } : { tgId: target } });
+    if (!u) return ctx.reply(`❌ Не найден: ${target}`);
+    const spent = u.spentReferrals ?? 0;
+    const { expected, orders } = await reconciledSpend(u.id);
+    if (spent <= expected) {
+      return ctx.reply(`✅ У ${u.firstName ?? u.tgId} расхождений нет (списано ${spent}, подарков на ${expected}). Ничего не изменено.`);
+    }
+    await db.botUser.update({ where: { id: u.id }, data: { spentReferrals: expected } });
+    const after = await availableReferralPoints({ ...u, spentReferrals: expected });
+    return ctx.reply(
+      `✅ <b>Очки возвращены</b>\n\n` +
+      `👤 ${esc(u.firstName ?? "—")} @${u.username ?? u.tgId}\n` +
+      `Было списано: <b>${spent}</b>\n` +
+      `Подарков получено: <b>${orders}</b> на <b>${expected}</b> очк.\n` +
+      `Возвращено: <b>${spent - expected}</b>\n` +
+      `Доступно теперь: <b>${after}</b>`,
+      { parse_mode: "HTML" },
+    );
+  }
+
+  // ---- everyone ----
+  const apply = parts[1] === "apply";
+  const candidates = await db.botUser.findMany({
+    where: { spentReferrals: { gt: 0 } },
+    select: { id: true, tgId: true, username: true, firstName: true, spentReferrals: true },
+  });
+  if (candidates.length === 0) return ctx.reply("✅ Ни у кого нет списанных очков — чинить нечего.");
+
+  const status = await ctx.reply(`🔍 Сверяю ${candidates.length} чел. с их заказами…`).catch(() => null);
+
+  const affected: Array<{ id: number; tgId: string; name: string; spent: number; expected: number }> = [];
+  for (const c of candidates) {
+    const { expected } = await reconciledSpend(c.id);
+    const spent = c.spentReferrals ?? 0;
+    if (spent > expected) {
+      affected.push({ id: c.id, tgId: c.tgId, name: c.firstName ?? c.username ?? c.tgId, spent, expected });
+    }
+  }
+
+  if (affected.length === 0) {
+    const msg = "✅ Расхождений не найдено — у всех списания совпадают с полученными подарками.";
+    if (status) await ctx.api.editMessageText(ctx.chat!.id, status.message_id, msg).catch(() => {});
+    else await ctx.reply(msg).catch(() => {});
+    return;
+  }
+
+  const totalLost = affected.reduce((s, a) => s + (a.spent - a.expected), 0);
+  if (apply) {
+    for (const a of affected) {
+      await db.botUser.update({ where: { id: a.id }, data: { spentReferrals: a.expected } }).catch(() => {});
+    }
+  }
+
+  const head =
+    (apply ? `✅ <b>Очки возвращены</b>\n\n` : `📋 <b>Предпросмотр (ничего не изменено)</b>\n\n`) +
+    `Пострадавших: <b>${affected.length}</b>\n` +
+    `Всего очков ${apply ? "возвращено" : "к возврату"}: <b>${totalLost}</b>\n\n`;
+  const rows = affected
+    .sort((a, b) => (b.spent - b.expected) - (a.spent - a.expected))
+    .slice(0, 40)
+    .map((a) => `• ${esc(a.name)} <code>${a.tgId}</code> — +${a.spent - a.expected}`);
+  const tail = affected.length > 40 ? `\n\n…и ещё ${affected.length - 40} чел.` : "";
+  const foot = apply
+    ? `\n\n⚠️ Если среди них есть мошенники — обнулите заново: <code>/refzero &lt;id&gt;</code>`
+    : `\n\nПрименить: <code>/refrepair all apply</code>`;
+
+  const done = head + rows.join("\n") + tail + foot;
+  if (status) await ctx.api.editMessageText(ctx.chat!.id, status.message_id, done, { parse_mode: "HTML" }).catch(() => {});
+  else await ctx.reply(done, { parse_mode: "HTML" }).catch(() => {});
 });
 
 // Admin: /refgive <tgId|@username> <n> — manually credit referral points.
