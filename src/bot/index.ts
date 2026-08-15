@@ -360,7 +360,7 @@ async function getUser(ctx: Context, refParam?: string) {
     return existing;
   }
   let referredBy: string | null = null;
-  if (refParam && refParam.startsWith("ref")) {
+  if (refParam && refParam.startsWith("ref") && (await isReferralsEnabled())) {
     const refId = refParam.slice(3).trim();
     if (refId && refId !== tgId) {
       const referrer = await db.botUser.findUnique({ where: { tgId: refId }, select: { refBanned: true } }).catch(() => null);
@@ -1216,6 +1216,9 @@ async function getGiftVariants() {
 async function buyForReferrals(ctx: Context, variantId: number) {
   const user = await getUser(ctx);
   const lang = user.lang;
+  if (!(await isReferralsEnabled())) {
+    return ctx.answerCallbackQuery({ text: "⏸ Реферальная программа временно приостановлена.", show_alert: true });
+  }
   const { map } = await getGiftTiersMap();
   const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
   const pointsCost = v ? (map.get(v.id) ?? v.pointsCost) : 0;
@@ -1415,6 +1418,14 @@ async function sendTermsGate(ctx: Context, lang: string) {
 async function showGifts(ctx: Context, edit = false, silent = false) {
   const user = await getUser(ctx);
   const lang = user.lang;
+
+  if (!(await isReferralsEnabled())) {
+    if (silent) return;
+    const kb = new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all");
+    await sendOrEdit(ctx, "⏸ <b>Реферальная программа временно приостановлена.</b>\n\nПожалуйста, возвращайтесь позже.", { reply_markup: kb });
+    return;
+  }
+
   const points = await availableReferralPoints(user);
 
   const giftItems = await getGiftVariants();
@@ -1931,6 +1942,18 @@ async function isMaintenanceOn(): Promise<boolean> {
   const on = row?.valueRu === "1";
   maintenanceCache = { on, until: Date.now() + 30_000 };
   return on;
+}
+
+// ---------- referrals enabled cache (30 s TTL) ----------
+// When off: new invites don't count, gifts tab and buy-for-refs are blocked.
+let referralsEnabledCache: { enabled: boolean; until: number } = { enabled: true, until: 0 };
+async function isReferralsEnabled(): Promise<boolean> {
+  if (Date.now() < referralsEnabledCache.until) return referralsEnabledCache.enabled;
+  const row = await db.setting.findUnique({ where: { key: "referrals_enabled" } }).catch(() => null);
+  // Default on (if key absent). Disabled only when explicitly set to "0".
+  const enabled = row === null || row.valueRu !== "0";
+  referralsEnabledCache = { enabled, until: Date.now() + 30_000 };
+  return enabled;
 }
 // Stores the message_id of the "subscribe to channels" gate message per user
 // so we can delete it automatically when they join.

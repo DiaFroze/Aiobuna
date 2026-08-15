@@ -1,6 +1,6 @@
 import { botDb, botConfigured } from "@/lib/botDb";
 import { PageHeader, EmptyState } from "@/components/admin/ui";
-import { upsertBotSettingAction, deleteBotSettingAction, saveMenuConfigAction, toggleMaintenanceModeAction } from "./actions";
+import { upsertBotSettingAction, deleteBotSettingAction, saveMenuConfigAction, toggleMaintenanceModeAction, toggleReferralsModeAction } from "./actions";
 
 export const dynamic = "force-dynamic";
 
@@ -38,7 +38,12 @@ export default async function BotSettingsPage({
   const allSettings = await botDb.setting.findMany({ orderBy: { key: "asc" } });
   const val = (key: string) => allSettings.find((s) => s.key === key)?.valueRu ?? "";
   const maintenanceOn = val("maintenance_mode") === "1";
-  const settings = allSettings.filter((s) => !MENU_KEYS.includes(s.key) && s.key !== "maintenance_mode");
+  // referrals_enabled defaults to on when key is absent
+  const referralsRow = allSettings.find((s) => s.key === "referrals_enabled");
+  const referralsOn = referralsRow === undefined || referralsRow.valueRu !== "0";
+  const settings = allSettings.filter(
+    (s) => !MENU_KEYS.includes(s.key) && s.key !== "maintenance_mode" && s.key !== "referrals_enabled",
+  );
   const existingKeys = new Set(allSettings.map((s) => s.key));
   const missingSuggested = SUGGESTED.filter((s) => !existingKeys.has(s.key));
 
@@ -49,8 +54,11 @@ export default async function BotSettingsPage({
         subtitle="Сообщения и настройки, которые показываются в Telegram-боте. Сохранение применяется сразу."
       />
 
+      {/* Quick toggles row */}
+      <div className="grid sm:grid-cols-2 gap-4">
+
       {/* Maintenance mode toggle */}
-      <div className={`card p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-2 ${maintenanceOn ? "border-danger/60 bg-danger/5" : "border-border"}`}>
+      <div className={`card p-5 flex flex-col items-start justify-between gap-4 border-2 ${maintenanceOn ? "border-danger/60 bg-danger/5" : "border-border"}`}>
         <div>
           <div className="flex items-center gap-2">
             <span className="text-lg">{maintenanceOn ? "🔴" : "🟢"}</span>
@@ -62,16 +70,42 @@ export default async function BotSettingsPage({
               : "Все пользователи могут пользоваться ботом."}
           </p>
         </div>
-        <form action={toggleMaintenanceModeAction} className="shrink-0">
+        <form action={toggleMaintenanceModeAction} className="shrink-0 w-full">
           <input type="hidden" name="enable" value={maintenanceOn ? "0" : "1"} />
           <button
             type="submit"
-            className={`btn text-sm px-5 ${maintenanceOn ? "btn-primary" : "btn-danger"}`}
+            className={`btn text-sm px-5 w-full ${maintenanceOn ? "btn-primary" : "btn-danger"}`}
           >
             {maintenanceOn ? "▶ Включить бота" : "⏸ Выключить бота"}
           </button>
         </form>
       </div>
+
+      {/* Referrals toggle */}
+      <div className={`card p-5 flex flex-col items-start justify-between gap-4 border-2 ${!referralsOn ? "border-warning/60 bg-warning/5" : "border-border"}`}>
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="text-lg">{referralsOn ? "🤝" : "⏸"}</span>
+            <h2 className="font-semibold">{referralsOn ? "Рефералы включены" : "Рефералы выключены"}</h2>
+          </div>
+          <p className="text-xs text-muted mt-1">
+            {referralsOn
+              ? "Новые приглашения считаются. Подарки за рефералов доступны."
+              : "Новые приглашения не считаются. Вкладка подарков заблокирована."}
+          </p>
+        </div>
+        <form action={toggleReferralsModeAction} className="shrink-0 w-full">
+          <input type="hidden" name="enable" value={referralsOn ? "0" : "1"} />
+          <button
+            type="submit"
+            className={`btn text-sm px-5 w-full ${referralsOn ? "btn-danger" : "btn-primary"}`}
+          >
+            {referralsOn ? "⏸ Выключить рефералы" : "▶ Включить рефералы"}
+          </button>
+        </form>
+      </div>
+
+      </div>{/* end quick toggles row */}
 
       {searchParams.error === "missing" && (
         <div className="card p-3 border-danger/30 bg-danger/5 text-danger text-sm">

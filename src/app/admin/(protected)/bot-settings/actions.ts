@@ -64,6 +64,23 @@ export async function saveMenuConfigAction(formData: FormData) {
   revalidatePath("/admin/bot-settings");
 }
 
+export async function toggleReferralsModeAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
+  const enable = formData.get("enable") === "1";
+  await botDb.setting.upsert({
+    where: { key: "referrals_enabled" },
+    create: { key: "referrals_enabled", valueRu: enable ? "1" : "0", type: "text" },
+    update: { valueRu: enable ? "1" : "0" },
+  });
+  await audit({
+    adminId: admin.id,
+    action: enable ? "bot.referrals.on" : "bot.referrals.off",
+    entityType: "BotSetting",
+    entityId: "referrals_enabled",
+  });
+  revalidatePath("/admin/bot-settings");
+}
+
 export async function toggleMaintenanceModeAction(formData: FormData) {
   const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
   const enable = formData.get("enable") === "1";
