@@ -2191,6 +2191,82 @@ bot.command("refunban", async (ctx) => {
   await ctx.reply(`✅ ${u.firstName ?? "—"} (@${u.username ?? u.tgId}) снова может приглашать людей.`);
 });
 
+// Admin: /auditfraud — dump all referral/free orders for the 4 suspect accounts as a .txt file
+bot.command("auditfraud", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  await ctx.reply("🔍 Запрашиваю базу данных, подождите...");
+
+  const TARGETS = ["wasd006", "KhayrulloyevAzizbek", "evgeniy1009", "Kamolbek_uz"];
+
+  const lines: string[] = [];
+  lines.push("=== АУДИТ БЕСПЛАТНЫХ ЗАКАЗОВ ===");
+  lines.push(`Дата: ${new Date().toISOString()}`);
+  lines.push("Подозреваемые: " + TARGETS.map((u) => "@" + u).join(", "));
+  lines.push("=".repeat(60));
+  lines.push("");
+
+  for (const username of TARGETS) {
+    const user = await db.botUser.findFirst({
+      where: { username: { equals: username, mode: "insensitive" } },
+    }).catch(() => null);
+
+    lines.push(`━━━ @${username} ━━━`);
+
+    if (!user) {
+      lines.push("  ❌ Пользователь не найден в базе.");
+      lines.push("");
+      continue;
+    }
+
+    const totalRefs = await db.botUser.count({ where: { referredBy: user.tgId } }).catch(() => 0);
+
+    lines.push(`  tgId:        ${user.tgId}`);
+    lines.push(`  Имя:         ${user.firstName ?? "—"}`);
+    lines.push(`  Приглашено:  ${totalRefs} чел.`);
+    lines.push(`  Бонус:       ${user.bonusReferrals ?? 0}`);
+    lines.push(`  Потрачено:   ${user.spentReferrals ?? 0}`);
+    lines.push(`  Рег:         ${user.createdAt?.toISOString() ?? "—"}`);
+    lines.push("");
+
+    const freeOrders = await db.botOrder.findMany({
+      where: {
+        userId: user.id,
+        OR: [{ source: "referral" }, { priceUsdt: 0 }],
+        status: { in: ["delivered", "awaiting_delivery"] },
+      },
+      orderBy: { id: "asc" },
+    }).catch(() => []);
+
+    if (freeOrders.length === 0) {
+      lines.push("  Бесплатных заказов: нет");
+    } else {
+      lines.push(`  Бесплатных заказов: ${freeOrders.length}`);
+      lines.push("");
+      for (const o of freeOrders) {
+        lines.push(`  Заказ #${o.id}  |  ${o.titleRu}  |  source=${o.source}`);
+        lines.push(`  ${o.payload}`);
+        lines.push("");
+      }
+    }
+    lines.push("");
+  }
+
+  lines.push("=".repeat(60));
+  lines.push("Конец отчёта.");
+
+  const content = lines.join("\n");
+  const buf = Buffer.from(content, "utf-8");
+  const file = new InputFile(buf, `audit_${Date.now()}.txt`);
+
+  await ctx.replyWithDocument(file, { caption: "📋 Аудит бесплатных заказов" }).catch(async (e) => {
+    // fallback: send as text chunks
+    const CHUNK = 4000;
+    for (let i = 0; i < content.length; i += CHUNK) {
+      await ctx.reply("<pre>" + esc(content.slice(i, i + CHUNK)) + "</pre>", { parse_mode: "HTML" }).catch(() => {});
+    }
+  });
+});
+
 // Admin: manually deliver goods for a "manual delivery" order → /give <orderId> <login:pass or link>
 bot.command("give", async (ctx) => {
   if (!isAdmin(ctx)) return;
