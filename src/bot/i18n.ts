@@ -124,6 +124,16 @@ const RU: Dict = {
   p_invited: "Приглашено",
   p_ref_available: "Доступно для подарков",
   p_ref_spent: "Потрачено на подарки",
+  review_title: "Готово! Приятного пользования",
+  review_body:
+    "Один маленький шаг — и вы очень нам поможете.\n\n📸 Оставьте отзыв в комментариях под нашим видео.\n\nИменно живые отзывы позволяют нам держать цены низкими и раздавать подписки бесплатно.",
+  review_reward_line: "🎁 За отзыв дарим <b>+{n}</b> реферал — нажмите «Я оставил отзыв» после публикации.",
+  review_time: "Это займёт 10 секунд 🙏",
+  review_btn_open: "📸 Оставить отзыв",
+  review_btn_done: "✅ Я оставил отзыв",
+  review_thanks: "Спасибо! ❤️ Мы проверим и начислим награду.",
+  review_thanks_plain: "Спасибо за отзыв! ❤️",
+  review_already: "Вы уже отправляли отзыв — спасибо! ❤️",
   ref_pending_notify:
     "👤 <b>По вашей ссылке зашёл человек!</b>\n\n{name} открыл бота.\n\n⏳ Осталось дождаться, пока он подпишется на канал — тогда вам начислится <b>+1</b>.",
   ref_counted_notify:
@@ -285,6 +295,16 @@ const EN: Dict = {
   p_invited: "Invited",
   p_ref_available: "Available for gifts",
   p_ref_spent: "Spent on gifts",
+  review_title: "Done! Enjoy",
+  review_body:
+    "One small step would help us a lot.\n\n📸 Leave a comment under our video.\n\nReal reviews are what let us keep prices low and give subscriptions away for free.",
+  review_reward_line: "🎁 We'll give you <b>+{n}</b> referral for a review — tap “I left a review” once it's posted.",
+  review_time: "Takes 10 seconds 🙏",
+  review_btn_open: "📸 Leave a review",
+  review_btn_done: "✅ I left a review",
+  review_thanks: "Thank you! ❤️ We'll check it and credit your reward.",
+  review_thanks_plain: "Thanks for the review! ❤️",
+  review_already: "You've already sent a review — thank you! ❤️",
   ref_pending_notify:
     "👤 <b>Someone opened the bot through your link!</b>\n\n{name} just started.\n\n⏳ Once they subscribe to the channel you get <b>+1</b>.",
   ref_counted_notify:
@@ -446,6 +466,16 @@ const UZ: Dict = {
   p_invited: "Taklif qilingan",
   p_ref_available: "Sovg'alar uchun mavjud",
   p_ref_spent: "Sovg'alarga sarflangan",
+  review_title: "Tayyor! Yoqimli foydalanish",
+  review_body:
+    "Kichik bir qadam — va bizga juda yordam berasiz.\n\n📸 Videomiz ostiga izoh qoldiring.\n\nAynan haqiqiy fikrlar tufayli biz narxlarni past ushlab, obunalarni bepul tarqata olamiz.",
+  review_reward_line: "🎁 Izoh uchun <b>+{n}</b> taklif sovg'a — joylagach «Izoh qoldirdim» tugmasini bosing.",
+  review_time: "Bu 10 soniya vaqt oladi 🙏",
+  review_btn_open: "📸 Izoh qoldirish",
+  review_btn_done: "✅ Izoh qoldirdim",
+  review_thanks: "Rahmat! ❤️ Tekshirib, sovg'ani qo'shamiz.",
+  review_thanks_plain: "Izoh uchun rahmat! ❤️",
+  review_already: "Siz allaqachon izoh yuborgansiz — rahmat! ❤️",
   ref_pending_notify:
     "👤 <b>Havolangiz orqali odam kirdi!</b>\n\n{name} botni ochdi.\n\n⏳ U kanalga obuna bo'lishi kerak — shundan keyin sizga <b>+1</b> qo'shiladi.",
   ref_counted_notify:

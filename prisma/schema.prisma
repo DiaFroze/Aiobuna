@@ -678,6 +678,8 @@ model BotUser {
   spentReferrals    Int       @default(0)
   channelVerifiedAt DateTime?
   termsAcceptedAt DateTime? // set when the user taps "Accept terms" on /start
+  reviewAskedAt   DateTime? // throttles the Instagram review prompt
+  reviewClaimedAt DateTime? // user tapped "I left a review"
   createdAt  DateTime @default(now())
   orders     BotOrder[]
   topups     TopUp[]

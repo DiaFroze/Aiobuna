@@ -873,6 +873,66 @@ async function notifySalesGroup(
   });
 }
 
+// ---------- Instagram review prompt ----------
+// Asked right after a successful delivery — the one moment the customer is
+// demonstrably happy, having just received what they paid for.
+//
+// Three deliberate constraints, because a review ask that annoys people costs
+// more than the reviews are worth:
+//   • off by default, so nothing reaches customers until the admin previews it
+//   • at most once per REVIEW_COOLDOWN_DAYS per person, never after every order
+//   • only on a completed delivery, never on an order still awaiting the admin
+const REVIEW_COOLDOWN_DAYS = 45;
+
+async function reviewConfig() {
+  const [enabled, url, rewardRaw] = await Promise.all([
+    setting("review_enabled", "0"),
+    setting("review_url", ""),
+    setting("review_reward", "0"),
+  ]);
+  const reward = Math.max(0, Math.trunc(Number(rewardRaw) || 0));
+  return { on: enabled === "1" && url.trim().length > 0, url: url.trim(), reward };
+}
+
+function reviewMessage(lang: string, reward: number) {
+  const kb = new InlineKeyboard();
+  const body =
+    `🎉 <b>${t(lang, "review_title")}</b>\n\n` +
+    `${t(lang, "review_body")}\n\n` +
+    (reward > 0 ? `${t(lang, "review_reward_line", { n: reward })}\n\n` : "") +
+    `<i>${t(lang, "review_time")}</i>`;
+  return { body, kb };
+}
+
+/** Send the review ask, unless it would be spam. Never throws. */
+async function askForReview(user: { id: number; tgId: string; lang: string; reviewAskedAt?: Date | null }) {
+  try {
+    const cfg = await reviewConfig();
+    if (!cfg.on) return;
+
+    const last = user.reviewAskedAt;
+    if (last && Date.now() - last.getTime() < REVIEW_COOLDOWN_DAYS * 86_400_000) return;
+
+    // Stamp BEFORE sending: if the send fails we would rather skip this round
+    // than risk re-asking on every retry.
+    await db.botUser.update({ where: { id: user.id }, data: { reviewAskedAt: new Date() } }).catch(() => {});
+
+    const lang = normalizeLang(user.lang);
+    const { body } = reviewMessage(lang, cfg.reward);
+    const kb = new InlineKeyboard()
+      .url(t(lang, "review_btn_open"), cfg.url).row()
+      .text(t(lang, "review_btn_done"), "rev:done").row();
+
+    await bot.api.sendMessage(user.tgId, body, {
+      parse_mode: "HTML",
+      reply_markup: kb,
+      link_preview_options: { is_disabled: true },
+    }).catch(() => {});
+  } catch (e) {
+    console.error("[bot] askForReview failed:", (e as Error).message);
+  }
+}
+
 // buyForReferrals() increments spentReferrals BEFORE calling executePurchase,
 // so every path that aborts the purchase has to hand those points back — or the
 // user pays referrals and receives nothing. Clamped at 0 so a double refund can
@@ -1179,6 +1239,9 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
         .catch(() => {});
     }
     await notifySalesGroup(user, label, { price: total, refPoints: refPointsCost });
+    // Fully delivered — the one moment the customer is demonstrably happy.
+    // Only here: an order still awaiting the admin is the wrong time to ask.
+    await askForReview(user);
   } catch (e) {
     // Critical error: rollback whatever was charged.
     if (!isRefGift) {
@@ -2991,6 +3054,63 @@ bot.command("promopost", async (ctx) => {
   );
 });
 
+// Admin: /review — configure and preview the post-purchase review prompt.
+// Off by default: nothing reaches a customer until it has been previewed here.
+bot.command("review", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const arg = (ctx.match ?? "").trim();
+  const save = (key: string, valueRu: string) =>
+    db.setting.upsert({ where: { key }, create: { key, valueRu }, update: { valueRu } });
+
+  if (arg === "on" || arg === "off") {
+    const cfg = await reviewConfig();
+    if (arg === "on" && !cfg.url) {
+      return ctx.reply("❌ Сначала укажите ссылку:\n<code>/review url https://instagram.com/reel/...</code>", { parse_mode: "HTML" });
+    }
+    await save("review_enabled", arg === "on" ? "1" : "0");
+    return ctx.reply(arg === "on"
+      ? "✅ Просьба об отзыве включена — придёт клиенту после успешной выдачи."
+      : "⏸ Просьба об отзыве выключена.");
+  }
+
+  if (arg.startsWith("url ")) {
+    const url = arg.slice(4).trim();
+    if (!/^https?:\/\//i.test(url)) return ctx.reply("❌ Ссылка должна начинаться с https://");
+    await save("review_url", url);
+    return ctx.reply(`✅ Ссылка сохранена:\n<code>${esc(url)}</code>\n\nПосмотреть: <code>/review</code>`, { parse_mode: "HTML" });
+  }
+
+  if (arg.startsWith("reward ")) {
+    const n = Math.max(0, Math.trunc(Number(arg.slice(7).trim()) || 0));
+    await save("review_reward", String(n));
+    return ctx.reply(n > 0
+      ? `✅ За отзыв обещаем +${n} реферал.\n\nНачисляете вы вручную после проверки — бот только присылает заявку.`
+      : "✅ Награда отключена — просьба будет без обещания подарка.");
+  }
+
+  // Default: status + preview exactly as the customer receives it.
+  const cfg = await reviewConfig();
+  const enabledRaw = await setting("review_enabled", "0");
+  await ctx.reply(
+    `📸 <b>Просьба об отзыве</b>\n\n` +
+    `Статус: ${enabledRaw === "1" ? "✅ включена" : "⏸ выключена"}\n` +
+    `Ссылка: ${cfg.url ? `<code>${esc(cfg.url)}</code>` : "<i>не задана</i>"}\n` +
+    `Награда: ${cfg.reward > 0 ? `+${cfg.reward} реф.` : "нет"}\n` +
+    `Частота: не чаще раза в ${REVIEW_COOLDOWN_DAYS} дней на человека\n\n` +
+    `<code>/review url &lt;ссылка&gt;</code>\n` +
+    `<code>/review reward 1</code> — обещать +1 реферал (0 = без награды)\n` +
+    `<code>/review on</code> / <code>/review off</code>`,
+    { parse_mode: "HTML" },
+  );
+
+  await ctx.reply("👇 <b>Так это увидит клиент после покупки:</b>", { parse_mode: "HTML" });
+  const { body } = reviewMessage("ru", cfg.reward);
+  const kb = new InlineKeyboard()
+    .url(t("ru", "review_btn_open"), cfg.url || "https://example.com").row()
+    .text(t("ru", "review_btn_done"), "noop").row();
+  await ctx.reply(body, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } }).catch(() => {});
+});
+
 // Admin: /reftest — everything needed to verify the referral flow by hand:
 // the live preconditions, both notification messages as they really render,
 // and the exact steps to walk through with a second account.
@@ -3588,6 +3708,35 @@ bot.on("callback_query:data", async (ctx) => {
         return;
       }
     }
+    if (data === "rev:done") {
+      const user = await getUser(ctx);
+      const lang = user.lang;
+      if (user.reviewClaimedAt) {
+        return ctx.answerCallbackQuery({ text: t(lang, "review_already"), show_alert: true }).catch(() => {});
+      }
+      await db.botUser.update({ where: { id: user.id }, data: { reviewClaimedAt: new Date() } }).catch(() => {});
+      const cfg = await reviewConfig();
+      await ctx.answerCallbackQuery({
+        text: cfg.reward > 0 ? t(lang, "review_thanks") : t(lang, "review_thanks_plain"),
+        show_alert: true,
+      }).catch(() => {});
+      await ctx.editMessageReplyMarkup().catch(() => {});
+      // A claim is a claim, not proof — route it to the admin to verify against
+      // the actual comments and reward by hand. Auto-crediting here would be a
+      // free-points button.
+      if (ADMIN_ID) {
+        await bot.api.sendMessage(
+          ADMIN_ID,
+          `📸 <b>Заявка на отзыв</b>\n\n` +
+          `👤 ${esc(user.firstName ?? "—")} @${user.username ?? "—"}\n` +
+          `ID: <code>${user.tgId}</code>\n\n` +
+          `Проверьте комментарии под видео.\n` +
+          (cfg.reward > 0 ? `Начислить: <code>/refgive ${user.tgId} ${cfg.reward}</code>` : `Награда не настроена.`),
+          { parse_mode: "HTML" },
+        ).catch(() => {});
+      }
+      return;
+    }
     if (data.startsWith("lang:")) {
       const lang = normalizeLang(data.split(":")[1]);
       await db.botUser.update({ where: { tgId: String(ctx.from?.id) }, data: { lang } }).catch(() => {});
@@ -4015,6 +4164,8 @@ async function ensureSchema() {
     `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "spentReferrals" INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "channelVerifiedAt" TIMESTAMP(3)`,
     `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "refBanned" BOOLEAN NOT NULL DEFAULT false`,
+    `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "reviewAskedAt" TIMESTAMP(3)`,
+    `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "reviewClaimedAt" TIMESTAMP(3)`,
     `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "pointsCost" INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "bulkPrices" TEXT NOT NULL DEFAULT ''`,
     `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "bulkBonus" TEXT NOT NULL DEFAULT ''`,
