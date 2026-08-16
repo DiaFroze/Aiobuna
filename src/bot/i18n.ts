@@ -124,6 +124,10 @@ const RU: Dict = {
   p_invited: "Приглашено",
   p_ref_available: "Доступно для подарков",
   p_ref_spent: "Потрачено на подарки",
+  ref_pending_notify:
+    "👤 <b>По вашей ссылке зашёл человек!</b>\n\n{name} открыл бота.\n\n⏳ Осталось дождаться, пока он подпишется на канал — тогда вам начислится <b>+1</b>.",
+  ref_counted_notify:
+    "✅ <b>+1 реферал засчитан!</b>\n\n{name} подписался на канал.\n\n🎁 Доступно для подарков: <b>{n}</b>",
   refer_title: "🤝 Пригласи друга",
   refer_text: "Поделитесь ссылкой — приглашённые появятся в вашем профиле:",
   share: "📤 Поделиться",
@@ -281,6 +285,10 @@ const EN: Dict = {
   p_invited: "Invited",
   p_ref_available: "Available for gifts",
   p_ref_spent: "Spent on gifts",
+  ref_pending_notify:
+    "👤 <b>Someone opened the bot through your link!</b>\n\n{name} just started.\n\n⏳ Once they subscribe to the channel you get <b>+1</b>.",
+  ref_counted_notify:
+    "✅ <b>+1 referral counted!</b>\n\n{name} subscribed to the channel.\n\n🎁 Available for gifts: <b>{n}</b>",
   refer_title: "🤝 Invite a friend",
   refer_text: "Share your link — invited users appear in your profile:",
   share: "📤 Share",
@@ -438,6 +446,10 @@ const UZ: Dict = {
   p_invited: "Taklif qilingan",
   p_ref_available: "Sovg'alar uchun mavjud",
   p_ref_spent: "Sovg'alarga sarflangan",
+  ref_pending_notify:
+    "👤 <b>Havolangiz orqali odam kirdi!</b>\n\n{name} botni ochdi.\n\n⏳ U kanalga obuna bo'lishi kerak — shundan keyin sizga <b>+1</b> qo'shiladi.",
+  ref_counted_notify:
+    "✅ <b>+1 taklif hisoblandi!</b>\n\n{name} kanalga obuna bo'ldi.\n\n🎁 Sovg'alar uchun mavjud: <b>{n}</b>",
   refer_title: "🤝 Do‘stni taklif qiling",
   refer_text: "Havolani ulashing — taklif qilinganlar profilingizda ko‘rinadi:",
   share: "📤 Ulashish",

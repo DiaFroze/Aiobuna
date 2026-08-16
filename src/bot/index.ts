@@ -2081,10 +2081,52 @@ const subsOkCache = new Map<string, number>();
 // the single gate a referral has to pass: countVerifiedRefs() only counts
 // invitees with this set, so a /start?start=refXXX that never subscribes earns
 // the referrer nothing. Idempotent — the null guard keeps the first timestamp.
-async function markChannelVerified(tgId: string): Promise<void> {
-  await db.botUser
+//
+// The updateMany count is also the "first time" signal: exactly one call can
+// flip a given user, so the referrer's "+1" message can be sent from here
+// without any risk of firing twice, no matter which path detected the join.
+// Pass notify: false for bulk repairs (/reffix), which would otherwise fire
+// hundreds of messages at once and hit Telegram's rate limit.
+async function markChannelVerified(tgId: string, opts: { notify?: boolean } = {}): Promise<boolean> {
+  const res = await db.botUser
     .updateMany({ where: { tgId, channelVerifiedAt: null }, data: { channelVerifiedAt: new Date() } })
-    .catch(() => {});
+    .catch(() => ({ count: 0 }));
+  const firstTime = res.count > 0;
+  if (firstTime && opts.notify !== false) notifyReferrerCounted(tgId).catch(() => {});
+  return firstTime;
+}
+
+// Tell the inviter that someone opened the bot through their link but has not
+// subscribed yet — so a referral that is still pending looks like progress
+// rather than silence.
+async function notifyReferrerPending(invitee: { tgId: string; firstName: string | null; referredBy: string | null }) {
+  if (!invitee.referredBy) return;
+  if (!(await isReferralsEnabled())) return;
+  const referrer = await db.botUser.findUnique({ where: { tgId: invitee.referredBy } }).catch(() => null);
+  if (!referrer || referrer.refBanned) return;
+  const lang = referrer.lang;
+  await bot.api.sendMessage(
+    referrer.tgId,
+    t(lang, "ref_pending_notify", { name: esc(maskName(invitee.firstName || invitee.tgId)) }),
+    { parse_mode: "HTML" },
+  ).catch(() => {});
+}
+
+// Tell the inviter the referral just became real, and what they can spend now.
+async function notifyReferrerCounted(inviteeTgId: string) {
+  const invitee = await db.botUser.findUnique({ where: { tgId: inviteeTgId } }).catch(() => null);
+  if (!invitee?.referredBy) return;
+  if (!(await isReferralsEnabled())) return;
+  const referrer = await db.botUser.findUnique({ where: { tgId: invitee.referredBy } }).catch(() => null);
+  if (!referrer || referrer.refBanned) return;
+  const points = await availableReferralPoints(referrer);
+  const lang = referrer.lang;
+  const kb = new InlineKeyboard().text(t(lang, "btn_freebies"), "gifts_show");
+  await bot.api.sendMessage(
+    referrer.tgId,
+    t(lang, "ref_counted_notify", { name: esc(maskName(invitee.firstName || invitee.tgId)), n: points }),
+    { parse_mode: "HTML", reply_markup: kb },
+  ).catch(() => {});
 }
 
 // ---------- maintenance mode cache (30 s TTL) ----------
@@ -2303,6 +2345,12 @@ bot.command("start", async (ctx) => {
   // actually pass the subscription gate below.
   const user = await getUser(ctx, payload || undefined);
   const tgId = user.tgId;
+
+  // Freshly created AND attributed to someone → tell the inviter it landed, so
+  // a referral that is still waiting on the channel gate looks like progress
+  // instead of nothing happening. Fire-and-forget: the invitee's own flow must
+  // not stall on it.
+  if (!existing && user.referredBy) notifyReferrerPending(user).catch(() => {});
 
   // Check required channels BEFORE showing anything else (except for admin).
   if (!isAdmin(ctx)) {
@@ -2734,7 +2782,10 @@ bot.command("reffix", async (ctx) => {
     await Promise.all(batch.map(async (u) => {
       const results = await Promise.all(active.map((ch) => isSubscribedTo(ctx, u.tgId, ch.chatId)));
       if (results.every(Boolean)) {
-        await markChannelVerified(u.tgId);
+        // Silent: this is a catch-up pass over historic joins, and firing a
+        // "+1" message per row would blast hundreds at once and hit the rate
+        // limit. Points are still credited exactly the same.
+        await markChannelVerified(u.tgId, { notify: false });
         fixed++;
       } else {
         stillNot++;
@@ -2936,6 +2987,70 @@ bot.command("promopost", async (ctx) => {
     `<b>Опубликовать:</b> <code>/promopost send</code>\n` +
     `<b>Сменить канал:</b> <code>/promopost channel @nomi</code>\n` +
     `<b>Изменить текст:</b> админ-панель → Тексты и меню бота`,
+    { parse_mode: "HTML" },
+  );
+});
+
+// Admin: /reftest — everything needed to verify the referral flow by hand:
+// the live preconditions, both notification messages as they really render,
+// and the exact steps to walk through with a second account.
+bot.command("reftest", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const me = await bot.api.getMe();
+  const adminId = String(ctx.from!.id);
+  const refsOn = await isReferralsEnabled();
+  const channels = await db.requiredChannel.findMany({ where: { isActive: true } });
+
+  // Preconditions first — a failing one explains "рефералы не работают" on its
+  // own, before any manual testing.
+  const checks: string[] = [];
+  checks.push(refsOn ? "✅ Реферальная программа включена" : "❌ Реферальная программа ВЫКЛЮЧЕНА — включите в админ-панели");
+  if (channels.length === 0) {
+    checks.push("⚠️ Обязательных каналов нет — реферал засчитывается сразу после /start");
+  } else {
+    for (const ch of channels) {
+      try {
+        const m = await ctx.api.getChatMember(ch.chatId, me.id);
+        const ok = m.status === "administrator" || m.status === "creator";
+        checks.push(ok
+          ? `✅ Бот админ в «${esc(ch.name)}» — подписка засчитается автоматически`
+          : `❌ Бот НЕ админ в «${esc(ch.name)}» — засчитается только по кнопке «Проверить подписку»`);
+      } catch {
+        checks.push(`❌ Нет доступа к «${esc(ch.name)}» — проверьте, что бот добавлен в канал`);
+      }
+    }
+  }
+
+  await ctx.reply(
+    `🧪 <b>ТЕСТ РЕФЕРАЛЬНОЙ СИСТЕМЫ</b>\n\n` +
+    `<b>Проверка настроек:</b>\n${checks.join("\n")}\n\n` +
+    `<b>Ваша ссылка для теста:</b>\n<code>https://t.me/${me.username}?start=ref${adminId}</code>`,
+    { parse_mode: "HTML" },
+  );
+
+  // Show the two messages exactly as a real referrer receives them.
+  await ctx.reply("👇 <b>Так выглядят уведомления, которые придут пригласившему:</b>", { parse_mode: "HTML" });
+  await ctx.reply(t("ru", "ref_pending_notify", { name: "Ja•••••r" }), { parse_mode: "HTML" }).catch(() => {});
+  await ctx.reply(
+    t("ru", "ref_counted_notify", { name: "Ja•••••r", n: 3 }),
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(t("ru", "btn_freebies"), "gifts_show") },
+  ).catch(() => {});
+
+  await ctx.reply(
+    `📋 <b>Как протестировать по-настоящему</b>\n\n` +
+    `Нужен <b>второй Telegram-аккаунт</b> — по своей же ссылке реферал не засчитается, ` +
+    `и вы как админ проходите мимо проверки подписки.\n\n` +
+    `<b>1.</b> Со второго аккаунта откройте ссылку выше и нажмите «Старт»\n` +
+    `   → сюда придёт «По вашей ссылке зашёл человек»\n\n` +
+    `<b>2.</b> НЕ подписывайтесь на канал, проверьте: <code>/refinfo ${adminId}</code>\n` +
+    `   → в списке он будет помечен ⏳ «НЕ подписан», очко не начислено\n\n` +
+    `<b>3.</b> Теперь подпишитесь на канал со второго аккаунта\n` +
+    `   → сюда придёт «+1 реферал засчитан»\n\n` +
+    `<b>4.</b> Проверьте снова: <code>/refinfo ${adminId}</code>\n` +
+    `   → пометка сменится на ✅, очко появится\n\n` +
+    `<b>Убрать следы теста:</b>\n` +
+    `<code>/unref &lt;id второго аккаунта&gt;</code> — отвязать\n` +
+    `<code>/refgive ${adminId} -1</code> — отнять тестовое очко`,
     { parse_mode: "HTML" },
   );
 });
