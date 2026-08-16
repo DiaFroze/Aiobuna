@@ -2147,6 +2147,11 @@ async function isSubscribedTo(ctx: Context, tgId: string, chatId: string): Promi
 // never auto-approved.
 const isUserAction = (ctx: Context) => Boolean(ctx.message || ctx.callbackQuery);
 
+// Why a brand-new user opened the bot, carried across the language/terms
+// onboarding so the final screen matches the link they clicked. In memory only:
+// losing it on a restart just means they land in the shop instead of gifts.
+const pendingIntent = new Map<string, "gifts">();
+
 // ---------- private chat only ----------
 // The bot is a member of the public sales-feed group, and every handler below
 // answers with ctx.reply() — which replies into whatever chat the update came
@@ -2291,11 +2296,12 @@ bot.use(async (ctx, next) => {
 // ---------- commands & reply-keyboard ----------
 bot.command("start", async (ctx) => {
   const existing = await findUser(ctx);
+  const payload = (ctx.match ?? "").trim();
   // The referral link is recorded on the BotUser row right away so it survives
   // a bot restart. It does NOT earn a point yet: availableReferralPoints only
   // counts invitees whose channelVerifiedAt is set, which happens once they
   // actually pass the subscription gate below.
-  const user = await getUser(ctx, ctx.match?.trim() || undefined);
+  const user = await getUser(ctx, payload || undefined);
   const tgId = user.tgId;
 
   // Check required channels BEFORE showing anything else (except for admin).
@@ -2320,7 +2326,16 @@ bot.command("start", async (ctx) => {
     await markChannelVerified(tgId);
   }
 
-  if (!existing) return showLangPicker(ctx, false); // first visit → pick language
+  // Deep link from the channel promo post: t.me/<bot>?start=gifts opens the
+  // gifts tab directly instead of the general catalogue.
+  if (!existing) {
+    // A first-time visitor still has to pick a language and accept the terms.
+    // Remember why they came so the last onboarding step lands on gifts rather
+    // than dropping them in the shop, which is what the post promised.
+    if (payload === "gifts") pendingIntent.set(tgId, "gifts");
+    return showLangPicker(ctx, false);
+  }
+  if (payload === "gifts") return showGifts(ctx, false);
   await enterShop(ctx, user);
 });
 bot.command("menu", (ctx) => showMenu(ctx, 0, "all", false));
@@ -2823,6 +2838,106 @@ bot.command("salesgroup", async (ctx) => {
       { parse_mode: "HTML" },
     );
   }
+});
+
+// Default channel promo. Editable in the admin panel (Тексты и меню бота →
+// promo_post_text) so the wording can change without a deploy.
+//
+// The urgency line says the promo "may stop at any time" rather than naming a
+// deadline: that is literally true (referrals are a switch the admin controls),
+// whereas a date that passes without the offer ending teaches readers to
+// discount every future post.
+const PROMO_POST_DEFAULT = `🎁 <b>BEPUL OBUNA — HALI OCHIQ</b>
+
+Do'stlaringizni taklif qiling va pullik obunalarni <b>bepul</b> oling:
+
+💜 <b>Canva Pro — 1 yil</b> → 5 ta do'st
+✦ <b>Gemini AI Pro — 18 oy</b> → 10 ta do'st
+
+Do'stingiz botga kiradi va kanalga obuna bo'ladi — ochko <b>avtomatik</b> hisoblanadi.
+
+⚠️ <i>Aksiya istalgan vaqtda to'xtatilishi mumkin. Ulgurib qoling.</i>`;
+
+const PROMO_BUTTON_DEFAULT = "🎁 Sovg'ani olish";
+
+/** Build the promo post exactly as it will appear, for preview and for send. */
+async function buildPromoPost() {
+  const [text, label] = await Promise.all([
+    setting("promo_post_text", PROMO_POST_DEFAULT),
+    setting("promo_post_button", PROMO_BUTTON_DEFAULT),
+  ]);
+  const me = await bot.api.getMe();
+  const kb = new InlineKeyboard().url(label, `https://t.me/${me.username}?start=gifts`);
+  return { text, kb };
+}
+
+// Admin: /promopost — preview privately; /promopost send — publish to the
+// channel. Publishing is never automatic: the admin pulls the trigger.
+bot.command("promopost", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const arg = (ctx.match ?? "").trim();
+  const { text, kb } = await buildPromoPost();
+
+  if (arg === "send") {
+    const target = (await setting("promo_post_channel", "")).trim()
+      || (await db.requiredChannel.findFirst({ where: { isActive: true } }))?.chatId
+      || "";
+    if (!target) {
+      return ctx.reply(
+        "❌ Не задан канал для публикации.\n\n" +
+        "Укажите его: <code>/promopost channel @nomi</code>\n" +
+        "Либо добавьте обязательный канал — тогда пост уйдёт туда.",
+        { parse_mode: "HTML" },
+      );
+    }
+    try {
+      const sent = await bot.api.sendMessage(target, text, {
+        parse_mode: "HTML",
+        reply_markup: kb,
+        link_preview_options: { is_disabled: true },
+      });
+      await ctx.reply(
+        `✅ <b>Опубликовано в ${esc(target)}</b>\n\nID сообщения: <code>${sent.message_id}</code>`,
+        { parse_mode: "HTML" },
+      );
+    } catch (e) {
+      await ctx.reply(
+        `❌ <b>Не удалось опубликовать</b>\n\n<code>${esc((e as Error).message.slice(0, 200))}</code>\n\n` +
+        `Бот должен быть администратором канала с правом публикации.`,
+        { parse_mode: "HTML" },
+      );
+    }
+    return;
+  }
+
+  if (arg.startsWith("channel ")) {
+    let v = arg.slice(8).trim().replace(/^https?:\/\/t\.me\//i, "").replace(/^@/, "");
+    if (!/^-?\d+$/.test(v)) v = `@${v}`;
+    try {
+      await ctx.api.getChat(v);
+    } catch (e) {
+      return ctx.reply(`❌ Нет доступа к <code>${esc(v)}</code>\n\n<code>${esc((e as Error).message.slice(0, 150))}</code>`, { parse_mode: "HTML" });
+    }
+    await db.setting.upsert({ where: { key: "promo_post_channel" }, create: { key: "promo_post_channel", valueRu: v }, update: { valueRu: v } });
+    return ctx.reply(`✅ Канал для промо-поста: <code>${esc(v)}</code>`, { parse_mode: "HTML" });
+  }
+
+  // Default: preview. Same text, same button, sent only to the admin.
+  const channel = (await setting("promo_post_channel", "")).trim()
+    || (await db.requiredChannel.findFirst({ where: { isActive: true } }))?.chatId
+    || "— не задан —";
+  await ctx.reply("👀 <b>Так пост будет выглядеть в канале:</b>", { parse_mode: "HTML" });
+  await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } })
+    .catch(async (e) => {
+      await ctx.reply(`⚠️ Текст не отправился — вероятно, сломана HTML-разметка:\n<code>${esc((e as Error).message.slice(0, 200))}</code>`, { parse_mode: "HTML" });
+    });
+  await ctx.reply(
+    `Канал: <code>${esc(channel)}</code>\n\n` +
+    `<b>Опубликовать:</b> <code>/promopost send</code>\n` +
+    `<b>Сменить канал:</b> <code>/promopost channel @nomi</code>\n` +
+    `<b>Изменить текст:</b> админ-панель → Тексты и меню бота`,
+    { parse_mode: "HTML" },
+  );
 });
 
 // Admin: /channels — is automatic crediting actually possible right now?
@@ -3378,7 +3493,13 @@ bot.on("callback_query:data", async (ctx) => {
       }).catch(() => {});
       await ctx.answerCallbackQuery({ text: t(user.lang, "terms_accepted_toast") }).catch(() => {});
       await ctx.editMessageReplyMarkup().catch(() => {});
-      return sendHome(ctx, user);
+      await sendHome(ctx, user);
+      // Onboarding is done — deliver what the channel post actually promised.
+      if (pendingIntent.get(user.tgId) === "gifts") {
+        pendingIntent.delete(user.tgId);
+        await showGifts(ctx, false).catch(() => {});
+      }
+      return;
     }
     const user = await getUser(ctx);
     const lang = user.lang;
