@@ -219,6 +219,15 @@ function maskName(s: string): string {
   return v.slice(0, keep) + "•".repeat(Math.max(3, v.length - keep - 1)) + v.slice(-1);
 }
 
+// Same idea for the numeric id: enough for the buyer to recognise their own
+// purchase in the feed, not enough for anyone else to look them up.
+// "7141343261" → "714•••••61".
+function maskId(s: string): string {
+  const v = (s ?? "").trim();
+  if (v.length <= 4) return "•".repeat(Math.max(3, v.length));
+  return v.slice(0, 3) + "•".repeat(Math.max(3, v.length - 5)) + v.slice(-2);
+}
+
 // Per-user custom prices. Returns Map<variantId, { priceUzs, label }> for the
 // given user (optionally scoped to variantIds). Only that user sees these prices.
 async function priceOverridesFor(userId: number, variantIds?: number[]) {
@@ -794,17 +803,32 @@ async function notifySale(ctx: Context, user: { firstName: string | null; userna
 }
 
 // Public "sales feed": posts every purchase to the group set in the
-// `sales_group_id` setting, with the buyer's name masked. Add the bot to the
-// group (as admin) and put the group's chat id (e.g. -1001234567890) in settings.
-async function notifySalesGroup(user: { firstName: string | null; username: string | null; tgId: string }, title: string, price: number) {
+// `sales_group_id` setting. Add the bot to the group and set the group via
+// /salesgroup. The post carries ONLY what the item was and how it was paid
+// for — never a username, a link, or a full id.
+async function notifySalesGroup(
+  user: { firstName: string | null; username: string | null; tgId: string },
+  title: string,
+  paid: { price: number; refPoints?: number },
+) {
   const groupId = (await setting("sales_group_id", "")).trim();
   if (!groupId) return;
+
+  // Identity is deliberately partial: enough for the buyer to recognise their
+  // own purchase, not enough for anyone else to identify them.
   const shown = maskName(user.firstName || user.username || user.tgId);
-  const text =
-    `🛒 <b>Новая покупка!</b>\n\n` +
-    `👤 ${esc(shown)}\n` +
-    `📦 ${esc(title)}\n` +
-    `💰 <b>${money(price, "ru")}</b>`;
+  const isGift = (paid.refPoints ?? 0) > 0;
+
+  const text = isGift
+    ? `🎁 <b>Забрал подарок за рефералов!</b>\n\n` +
+      `👤 ${esc(shown)} · <code>${maskId(user.tgId)}</code>\n` +
+      `📦 ${esc(title)}\n` +
+      `🤝 <b>${paid.refPoints} реф.</b> — бесплатно`
+    : `🛒 <b>Новая покупка!</b>\n\n` +
+      `👤 ${esc(shown)} · <code>${maskId(user.tgId)}</code>\n` +
+      `📦 ${esc(title)}\n` +
+      `💰 <b>${paid.price > 0 ? money(paid.price, "ru") : "бесплатно"}</b>`;
+
   await bot.api.sendMessage(groupId, text, { parse_mode: "HTML" }).catch((e) => {
     console.error("[bot] sales group notify failed:", (e as Error).message);
   });
@@ -903,7 +927,7 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
         { parse_mode: "HTML" }
       ).catch(() => {});
     }
-    await notifySalesGroup(user, label, 0);
+    await notifySalesGroup(user, label, { price: total, refPoints: refPointsCost });
     return;
   }
 
@@ -1035,7 +1059,7 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
           { parse_mode: "HTML" }
         ).catch(() => {});
       }
-      if (deliveredQty > 0) await notifySalesGroup(user, label, 0);
+      if (deliveredQty > 0) await notifySalesGroup(user, label, { price: total, refPoints: refPointsCost });
       return;
     }
 
@@ -1102,7 +1126,7 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
         })
         .catch(() => {});
     }
-    await notifySalesGroup(user, label, 0);
+    await notifySalesGroup(user, label, { price: total, refPoints: refPointsCost });
   } catch (e) {
     // Critical error: rollback whatever was charged.
     if (!isRefGift) {
@@ -2626,6 +2650,74 @@ bot.command("reffix", async (ctx) => {
     `Действительно не подписаны: <b>${stillNot}</b>`;
   if (status) await ctx.api.editMessageText(ctx.chat!.id, status.message_id, done, { parse_mode: "HTML" }).catch(() => {});
   else await ctx.reply(done, { parse_mode: "HTML" }).catch(() => {});
+});
+
+// Admin: /salesgroup [@group | id | off | test] — configure the public sales
+// feed and prove it actually posts, rather than failing silently in a log.
+bot.command("salesgroup", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const arg = (ctx.match ?? "").trim();
+  const current = (await setting("sales_group_id", "")).trim();
+
+  const usage =
+    `📣 <b>Группа для ленты продаж</b>\n\n` +
+    `Сейчас: ${current ? `<code>${esc(current)}</code>` : "<i>не задана</i>"}\n\n` +
+    `<b>Команды:</b>\n` +
+    `<code>/salesgroup @subhub_group</code> — задать группу\n` +
+    `<code>/salesgroup test</code> — отправить пробное сообщение\n` +
+    `<code>/salesgroup off</code> — отключить ленту\n\n` +
+    `⚠️ Бот должен состоять в группе и иметь право писать.\n` +
+    `Для закрытых групп используйте числовой id (например <code>-1001234567890</code>).`;
+
+  if (!arg) return ctx.reply(usage, { parse_mode: "HTML" });
+
+  if (arg === "off") {
+    await db.setting.upsert({ where: { key: "sales_group_id" }, create: { key: "sales_group_id", valueRu: "" }, update: { valueRu: "" } });
+    return ctx.reply("✅ Лента продаж отключена — сообщения о покупках больше не публикуются.");
+  }
+
+  if (arg === "test") {
+    if (!current) return ctx.reply("❌ Группа не задана. Сначала: <code>/salesgroup @subhub_group</code>", { parse_mode: "HTML" });
+    // Send the exact same shapes real purchases produce, so what the admin
+    // sees here is what members will see.
+    const fake = { firstName: "Jahongir", username: "jahongir", tgId: "7141343261" };
+    await notifySalesGroup(fake, "Gemini AI Pro — 18 месяцев", { price: 0, refPoints: 10 });
+    await notifySalesGroup(fake, "Canva Pro — 1 год", { price: 50000 });
+    return ctx.reply(
+      `📤 Отправил 2 пробных сообщения в <code>${esc(current)}</code>.\n\n` +
+      `Если в группе ничего не появилось — бот не состоит в ней или не может писать.`,
+      { parse_mode: "HTML" },
+    );
+  }
+
+  // Accept @name, t.me/name, or a raw numeric id.
+  let value = arg.replace(/^https?:\/\/t\.me\//i, "").replace(/^@/, "").trim();
+  if (!/^-?\d+$/.test(value)) value = `@${value}`;
+
+  // Verify before saving — a wrong value would otherwise fail silently forever.
+  try {
+    const chat = await ctx.api.getChat(value);
+    await db.setting.upsert({
+      where: { key: "sales_group_id" },
+      create: { key: "sales_group_id", valueRu: value },
+      update: { valueRu: value },
+    });
+    const title = "title" in chat && chat.title ? chat.title : value;
+    await ctx.reply(
+      `✅ <b>Группа сохранена</b>\n\n` +
+      `Название: ${esc(String(title))}\n` +
+      `Адрес: <code>${esc(value)}</code>\n\n` +
+      `Проверьте отправку: <code>/salesgroup test</code>`,
+      { parse_mode: "HTML" },
+    );
+  } catch (e) {
+    await ctx.reply(
+      `❌ <b>Не удалось открыть</b> <code>${esc(value)}</code>\n\n` +
+      `<code>${esc((e as Error).message.slice(0, 150))}</code>\n\n` +
+      `Проверьте, что бот добавлен в группу и может писать в неё.`,
+      { parse_mode: "HTML" },
+    );
+  }
 });
 
 // Admin: /channels — is automatic crediting actually possible right now?
