@@ -2048,8 +2048,24 @@ async function isSubscribedTo(ctx: Context, tgId: string, chatId: string): Promi
   return pending !== null;
 }
 
+// The gates below decide what a user may do in their private chat with the
+// bot. They must only run on updates that ARE such an action — a message or a
+// button tap.
+//
+// Every other update type (chat_member when someone joins a channel,
+// chat_join_request, pre_checkout_query) has no message to gate, and its
+// ctx.chat is the channel rather than the private chat. Running the gates on
+// those was actively harmful: a brand-new invitee has termsAcceptedAt = null,
+// so the terms gate swallowed their chat_member update and bot.on("chat_member")
+// never ran — meaning subscribing to the channel never credited the referral,
+// which is the whole point of the flow. It also tried to post the terms text
+// into the channel itself, and blocked chat_join_request so join requests were
+// never auto-approved.
+const isUserAction = (ctx: Context) => Boolean(ctx.message || ctx.callbackQuery);
+
 // ---------- maintenance mode gate ----------
 bot.use(async (ctx, next) => {
+  if (!isUserAction(ctx)) return next();
   if (String(ctx.from?.id) === ADMIN_ID) return next();
   if (!(await isMaintenanceOn())) return next();
   await ctx.reply(
@@ -2064,6 +2080,7 @@ bot.use(async (ctx, next) => {
 // sitting in the chat history either: any action from a user who hasn't
 // accepted bounces back to the terms message instead of running.
 bot.use(async (ctx, next) => {
+  if (!isUserAction(ctx)) return next();
   if (String(ctx.from?.id) === ADMIN_ID) return next();
 
   const data = ctx.callbackQuery?.data;
@@ -2089,6 +2106,7 @@ bot.use(async (ctx, next) => {
 
 // ---------- mandatory subscription check middleware ----------
 bot.use(async (ctx, next) => {
+  if (!isUserAction(ctx)) return next();
   if (String(ctx.from?.id) === ADMIN_ID) {
     return next();
   }
@@ -2608,6 +2626,71 @@ bot.command("reffix", async (ctx) => {
     `Действительно не подписаны: <b>${stillNot}</b>`;
   if (status) await ctx.api.editMessageText(ctx.chat!.id, status.message_id, done, { parse_mode: "HTML" }).catch(() => {});
   else await ctx.reply(done, { parse_mode: "HTML" }).catch(() => {});
+});
+
+// Admin: /channels — is automatic crediting actually possible right now?
+// Telegram only delivers chat_member updates to a bot that is an ADMIN of the
+// channel with permission to see members. Without that the bot cannot notice a
+// subscription on its own and the user has to tap "Проверить подписку" — which
+// looks exactly like "рефералы не начисляются". This reports the truth.
+bot.command("channels", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const channels = await db.requiredChannel.findMany({ orderBy: { id: "asc" } });
+  if (channels.length === 0) {
+    return ctx.reply("📢 Обязательных каналов нет.\n\nПодписка ни у кого не требуется — рефералы засчитываются сразу после /start.");
+  }
+
+  const me = await ctx.api.getMe();
+  const L: string[] = ["📢 <b>ОБЯЗАТЕЛЬНЫЕ КАНАЛЫ</b>", ""];
+  let autoOk = true;
+
+  for (const ch of channels) {
+    L.push(`<b>${esc(ch.name)}</b>`);
+    L.push(`chatId: <code>${ch.chatId}</code>`);
+    L.push(`Статус: ${ch.isActive ? "✅ активен" : "⏸ выключен"}`);
+    if (!ch.isActive) { L.push(``); continue; }
+
+    try {
+      const member = await ctx.api.getChatMember(ch.chatId, me.id);
+      const isAdminThere = member.status === "administrator" || member.status === "creator";
+      if (isAdminThere) {
+        L.push(`Бот в канале: ✅ администратор`);
+        L.push(`Автозачёт при подписке: ✅ работает`);
+      } else {
+        autoOk = false;
+        L.push(`Бот в канале: ⚠️ <b>НЕ администратор</b> (${esc(member.status)})`);
+        L.push(`Автозачёт при подписке: ❌ <b>НЕ работает</b>`);
+      }
+    } catch (e) {
+      autoOk = false;
+      L.push(`Бот в канале: ❌ <b>нет доступа</b>`);
+      L.push(`Ошибка: <code>${esc((e as Error).message.slice(0, 120))}</code>`);
+      L.push(`Автозачёт при подписке: ❌ <b>НЕ работает</b>`);
+    }
+    L.push(``);
+  }
+
+  if (autoOk) {
+    L.push(`✅ <b>Всё настроено верно.</b>`);
+    L.push(`Человек подписывается — реферал засчитывается автоматически,`);
+    L.push(`ничего нажимать не нужно.`);
+  } else {
+    L.push(`🔴 <b>ГЛАВНАЯ ПРИЧИНА «РЕФЕРАЛЫ НЕ НАЧИСЛЯЮТСЯ»</b>`);
+    L.push(``);
+    L.push(`Telegram сообщает боту о новых подписчиках только если бот —`);
+    L.push(`<b>администратор канала</b>. Сейчас это не так, поэтому подписку`);
+    L.push(`бот сам не видит и ждёт нажатия «Проверить подписку».`);
+    L.push(``);
+    L.push(`<b>Как починить:</b>`);
+    L.push(`1. Откройте канал → Управление → Администраторы`);
+    L.push(`2. Добавьте @${me.username} администратором`);
+    L.push(`3. Достаточно самых базовых прав (без публикации)`);
+    L.push(`4. Проверьте снова: <code>/channels</code>`);
+    L.push(``);
+    L.push(`Потом догоните пропущенных: <code>/reffix</code>`);
+  }
+
+  await replyChunked(ctx, L);
 });
 
 // Admin: /refban <tgId|@username> — ban a user from inviting others

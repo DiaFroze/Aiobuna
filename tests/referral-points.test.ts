@@ -65,6 +65,29 @@ describe("referral point accounting", () => {
   });
 });
 
+// Mirrors isUserAction() in src/bot/index.ts. The terms/subscription/maintenance
+// gates run as bot.use() middleware, which grammy invokes for EVERY update type.
+// Without this guard the terms gate swallowed the chat_member update fired when
+// an invitee joins the channel, so bot.on("chat_member") never ran and the
+// referral was never credited automatically.
+type Update = { message?: unknown; callbackQuery?: unknown };
+function isUserAction(ctx: Update): boolean {
+  return Boolean(ctx.message || ctx.callbackQuery);
+}
+
+describe("middleware gating by update type", () => {
+  it("gates messages and button taps", () => {
+    expect(isUserAction({ message: { text: "/shop" } })).toBe(true);
+    expect(isUserAction({ callbackQuery: { data: "m:0:all" } })).toBe(true);
+  });
+
+  it("lets a channel join through ungated so the referral can be credited", () => {
+    // chat_member / chat_join_request carry no user message and their ctx.chat
+    // is the channel — gating them blocked auto-crediting entirely.
+    expect(isUserAction({})).toBe(false);
+  });
+});
+
 // Mirrors the stOf() helper in buildMenu() and availableStock(). These two used
 // to disagree; the test pins them to one definition.
 const STOCK_UNLIMITED = 999999;
