@@ -18,6 +18,42 @@ function maskId(s: string): string {
   return v.slice(0, 3) + "•".repeat(Math.max(3, v.length - 5)) + v.slice(-2);
 }
 
+// Mirrors the private-chat guard in src/bot/index.ts. The bot sits in the
+// public sales-feed group, and every handler answers with ctx.reply() — into
+// whatever chat the update came from. Without this guard a message in the group
+// tripped the subscription gate publicly, and any text matching a menu label
+// ran that screen there, including "Пригласить", which published a member's
+// personal referral link to the whole group.
+type Ctx = { message?: unknown; callbackQuery?: unknown; chat?: { type: string } };
+
+function handledHere(ctx: Ctx): boolean {
+  const isUserAction = Boolean(ctx.message || ctx.callbackQuery);
+  if (!isUserAction) return true; // channel-side updates must pass through
+  const type = ctx.chat?.type;
+  return !(type && type !== "private");
+}
+
+describe("bot only talks in private chats", () => {
+  it("handles messages and taps in a private chat", () => {
+    expect(handledHere({ message: {}, chat: { type: "private" } })).toBe(true);
+    expect(handledHere({ callbackQuery: {}, chat: { type: "private" } })).toBe(true);
+  });
+
+  it("stays silent in groups, supergroups and channels", () => {
+    for (const type of ["group", "supergroup", "channel"]) {
+      expect(handledHere({ message: {}, chat: { type } })).toBe(false);
+      expect(handledHere({ callbackQuery: {}, chat: { type } })).toBe(false);
+    }
+  });
+
+  it("still lets channel joins through, so referrals keep getting credited", () => {
+    // chat_member / chat_join_request carry no message and always arrive from
+    // the channel — filtering them would break automatic crediting.
+    expect(handledHere({ chat: { type: "channel" } })).toBe(true);
+    expect(handledHere({})).toBe(true);
+  });
+});
+
 describe("sales feed privacy", () => {
   it("never posts a name in full", () => {
     for (const name of ["Jahongir", "Sarvar", "Ali", "Абдулло", "Bo"]) {

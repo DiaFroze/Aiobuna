@@ -2147,6 +2147,31 @@ async function isSubscribedTo(ctx: Context, tgId: string, chatId: string): Promi
 // never auto-approved.
 const isUserAction = (ctx: Context) => Boolean(ctx.message || ctx.callbackQuery);
 
+// ---------- private chat only ----------
+// The bot is a member of the public sales-feed group, and every handler below
+// answers with ctx.reply() — which replies into whatever chat the update came
+// from. Without this guard the bot talked INSIDE the group: a plain message
+// there tripped the subscription gate and posted "Подпишитесь на наши каналы!",
+// and any text matching a menu label ran that screen — including "Пригласить",
+// which published a member's personal referral link to all 125 participants.
+//
+// The shop is a one-to-one experience, so messages and taps are only ever
+// handled in a private chat. Channel-side updates (chat_member,
+// chat_join_request) are deliberately NOT filtered here: they always arrive
+// from the channel and are what credits referrals. The sales feed is unaffected
+// too — it posts outbound via bot.api.sendMessage(groupId), not through a
+// handler.
+bot.use(async (ctx, next) => {
+  if (!isUserAction(ctx)) return next();
+  const type = ctx.chat?.type;
+  if (type && type !== "private") {
+    // Acknowledge taps so the client doesn't spin, but render nothing.
+    if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => {});
+    return; // never reply into a group or channel
+  }
+  return next();
+});
+
 // ---------- maintenance mode gate ----------
 bot.use(async (ctx, next) => {
   if (!isUserAction(ctx)) return next();
