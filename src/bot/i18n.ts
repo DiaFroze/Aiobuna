@@ -124,7 +124,9 @@ const RU: Dict = {
   p_invited: "Приглашено",
   p_ref_available: "Доступно для подарков",
   p_ref_spent: "Потрачено на подарки",
-  review_title: "Готово! Приятного пользования",
+  btn_got_it: "✅ Я получил",
+  got_it_toast: "Отлично! Спасибо ❤️",
+  review_title: "Спасибо за покупку!",
   review_body:
     "Один маленький шаг — и вы очень нам поможете.\n\n📸 Оставьте отзыв в комментариях под нашим видео.\n\nИменно живые отзывы позволяют нам держать цены низкими и раздавать подписки бесплатно.",
   review_reward_line: "🎁 За отзыв дарим <b>+{n}</b> реферал — нажмите «Я оставил отзыв» после публикации.",
@@ -295,7 +297,9 @@ const EN: Dict = {
   p_invited: "Invited",
   p_ref_available: "Available for gifts",
   p_ref_spent: "Spent on gifts",
-  review_title: "Done! Enjoy",
+  btn_got_it: "✅ I got it",
+  got_it_toast: "Great! Thank you ❤️",
+  review_title: "Thanks for your purchase!",
   review_body:
     "One small step would help us a lot.\n\n📸 Leave a comment under our video.\n\nReal reviews are what let us keep prices low and give subscriptions away for free.",
   review_reward_line: "🎁 We'll give you <b>+{n}</b> referral for a review — tap “I left a review” once it's posted.",
@@ -466,7 +470,9 @@ const UZ: Dict = {
   p_invited: "Taklif qilingan",
   p_ref_available: "Sovg'alar uchun mavjud",
   p_ref_spent: "Sovg'alarga sarflangan",
-  review_title: "Tayyor! Yoqimli foydalanish",
+  btn_got_it: "✅ Oldim",
+  got_it_toast: "Zo'r! Rahmat ❤️",
+  review_title: "Xaridingiz uchun rahmat!",
   review_body:
     "Kichik bir qadam — va bizga juda yordam berasiz.\n\n📸 Videomiz ostiga izoh qoldiring.\n\nAynan haqiqiy fikrlar tufayli biz narxlarni past ushlab, obunalarni bepul tarqata olamiz.",
   review_reward_line: "🎁 Izoh uchun <b>+{n}</b> taklif sovg'a — joylagach «Izoh qoldirdim» tugmasini bosing.",

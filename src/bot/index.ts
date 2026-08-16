@@ -1187,7 +1187,13 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
     const u = await db.botUser.findUnique({ where: { id: user.id } });
     const isLargeOrder = deliveredQty > 5;
     const activateVideo = howToActivateFile();
-    const deliveredKb = new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all");
+    // "Я получил" comes first: the customer confirms the goods actually work
+    // before anything is asked of them. Tapping it is what triggers the review
+    // prompt — a review from someone who has not yet checked their purchase is
+    // worth little, and asking before they know is how you earn a bad one.
+    const deliveredKb = new InlineKeyboard()
+      .text(t(lang, "btn_got_it"), "got").row()
+      .text(t(lang, "to_shop"), "m:0:all");
 
     const chargeLine = isRefGift
       ? `🎁 <b>Подарок за ${refPointsCost} реф.</b>`
@@ -1239,9 +1245,8 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
         .catch(() => {});
     }
     await notifySalesGroup(user, label, { price: total, refPoints: refPointsCost });
-    // Fully delivered — the one moment the customer is demonstrably happy.
-    // Only here: an order still awaiting the admin is the wrong time to ask.
-    await askForReview(user);
+    // The review prompt is NOT sent here — it waits for the customer to tap
+    // "Я получил" on the delivery message above, confirming the goods work.
   } catch (e) {
     // Critical error: rollback whatever was charged.
     if (!isRefGift) {
@@ -3103,7 +3108,22 @@ bot.command("review", async (ctx) => {
     { parse_mode: "HTML" },
   );
 
-  await ctx.reply("👇 <b>Так это увидит клиент после покупки:</b>", { parse_mode: "HTML" });
+  await ctx.reply(
+    `👇 <b>Шаг 1</b> — так выглядит выдача товара.\nПросьба об отзыве придёт только после нажатия «Я получил»:`,
+    { parse_mode: "HTML" },
+  );
+  await ctx.reply(
+    `${t("ru", "order_paid", { id: 1234 })}\n\nCanva Pro — 1 год\n${t("ru", "charged", { v: money(50000, "ru") })}\n\n` +
+    `${t("ru", "your_goods")}\n<code>login:password</code>`,
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text(t("ru", "btn_got_it"), "noop").row()
+        .text(t("ru", "to_shop"), "noop"),
+    },
+  ).catch(() => {});
+
+  await ctx.reply("👇 <b>Шаг 2</b> — что придёт после нажатия:", { parse_mode: "HTML" });
   const { body } = reviewMessage("ru", cfg.reward);
   const kb = new InlineKeyboard()
     .url(t("ru", "review_btn_open"), cfg.url || "https://example.com").row()
@@ -3409,7 +3429,14 @@ bot.command("give", async (ctx) => {
   await bot.api.sendMessage(
     order.user.tgId,
     `🎁 ${t(ulang, "your_goods")}\n<code>${esc(text)}</code>\n\n${esc(order.titleRu)}`,
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(t(ulang, "to_shop"), "m:0:all") },
+    {
+      parse_mode: "HTML",
+      // A hand-delivered order is a real delivery — same confirmation button,
+      // so these customers reach the review prompt too.
+      reply_markup: new InlineKeyboard()
+        .text(t(ulang, "btn_got_it"), "got").row()
+        .text(t(ulang, "to_shop"), "m:0:all"),
+    },
   ).catch(() => {});
   await ctx.reply(`✅ Выдано заказу #${orderId} → @${order.user.username ?? order.user.tgId}`);
 });
@@ -3707,6 +3734,19 @@ bot.on("callback_query:data", async (ctx) => {
         await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
         return;
       }
+    }
+    if (data === "got") {
+      const user = await getUser(ctx);
+      await ctx.answerCallbackQuery({ text: t(user.lang, "got_it_toast") }).catch(() => {});
+      // Drop the button so the confirmation reads as done and can't be tapped
+      // again; the shop link is re-offered inside the review prompt anyway.
+      await ctx.editMessageReplyMarkup({
+        reply_markup: new InlineKeyboard().text(t(user.lang, "to_shop"), "m:0:all"),
+      }).catch(() => {});
+      // Confirmed working → now it's fair to ask. askForReview() still applies
+      // its own throttle and the on/off switch, so a second tap changes nothing.
+      await askForReview(user);
+      return;
     }
     if (data === "rev:done") {
       const user = await getUser(ctx);
