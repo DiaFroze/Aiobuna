@@ -2278,74 +2278,161 @@ async function reconciledSpend(userId: number): Promise<{ expected: number; orde
   return { expected, orders: orders.length };
 }
 
-// Admin: /refwhy <tgId|@username> — explain, per invitee, exactly why a
-// referral is or isn't counting. Answers "я пригласил, а очко не пришло".
-bot.command("refwhy", async (ctx) => {
+// Send a long report as several messages — Telegram rejects anything over
+// 4096 chars, and a rejected report is worse than a split one.
+async function replyChunked(ctx: Context, lines: string[]) {
+  let buf = "";
+  for (const line of lines) {
+    if (buf.length + line.length + 1 > 3800) {
+      await ctx.reply(buf, { parse_mode: "HTML" }).catch(() => {});
+      buf = "";
+    }
+    buf += (buf ? "\n" : "") + line;
+  }
+  if (buf) await ctx.reply(buf, { parse_mode: "HTML" }).catch(() => {});
+}
+
+const D = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 16).replace("T", " ") : "—");
+
+// Admin: /refinfo <tgId|@username> — the complete referral picture for one
+// person: who they invited, who counted and who didn't, every point earned and
+// spent, and the exact gift orders the points went to.
+bot.command(["refinfo", "refwhy"], async (ctx) => {
   if (!isAdmin(ctx)) return;
   const arg = (ctx.match ?? "").trim().replace(/^@/, "");
-  if (!arg) return ctx.reply("Формат: /refwhy <tgId или @username>\n\nПокажет по каждому приглашённому, засчитан он или нет и почему.");
+  if (!arg) {
+    return ctx.reply(
+      "Формат: <code>/refinfo &lt;tgId или @username&gt;</code>\n\n" +
+      "Показывает всё о рефералах человека: кого пригласил, кто подписался,\n" +
+      "сколько очков заработал, сколько потратил и на какие именно подарки.",
+      { parse_mode: "HTML" },
+    );
+  }
 
   const u = await db.botUser.findFirst({ where: isNaN(Number(arg)) ? { username: arg } : { tgId: arg } });
   if (!u) return ctx.reply(`❌ Не найден: ${arg}`);
 
-  const invited = await db.botUser.findMany({
-    where: { referredBy: u.tgId },
-    orderBy: { createdAt: "desc" },
-    take: 100,
-  });
-  const verified = invited.filter((x) => x.channelVerifiedAt !== null).length;
-  const points = await availableReferralPoints(u);
-  const refsOn = await isReferralsEnabled();
+  const [invited, giftOrders, refsOn, tiers] = await Promise.all([
+    db.botUser.findMany({ where: { referredBy: u.tgId }, orderBy: { createdAt: "desc" } }),
+    db.botOrder.findMany({ where: { userId: u.id, source: "referral" }, orderBy: { id: "desc" } }),
+    isReferralsEnabled(),
+    getGiftTiersMap(),
+  ]);
+
+  const verified = invited.filter((x) => x.channelVerifiedAt !== null);
+  const unverified = invited.filter((x) => x.channelVerifiedAt === null);
+  const bonus = u.bonusReferrals ?? 0;
+  const earned = verified.length + bonus;
   const spent = u.spentReferrals ?? 0;
-  const { expected, orders } = await reconciledSpend(u.id);
-  const lost = spent - expected;
+  const available = Math.max(0, earned - spent);
 
-  const lines = [
-    `👤 <b>${esc(u.firstName ?? "—")}</b> @${u.username ?? u.tgId}`,
-    `ID: <code>${u.tgId}</code>`,
-    ``,
-    `Рефералка сейчас: ${refsOn ? "✅ включена" : "⏸ ВЫКЛЮЧЕНА"}`,
-    `Забанен в рефералке: ${u.refBanned ? "🚫 да" : "нет"}`,
-    ``,
-    `Перешли по ссылке: <b>${invited.length}</b>`,
-    `✅ Засчитано (подписаны): <b>${verified}</b>`,
-    `⏳ Не подписаны: <b>${invited.length - verified}</b>`,
-    `Бонус от админа: <b>${u.bonusReferrals ?? 0}</b>`,
-    ``,
-    `Списано по счётчику: <b>${spent}</b>`,
-    `Подарков реально получено: <b>${orders}</b> на <b>${expected}</b> очк.`,
-    `<b>Доступно сейчас: ${points}</b>`,
-    ``,
-  ];
-
-  if (lost > 0) {
-    lines.push(`🔴 <b>РАСХОЖДЕНИЕ: ${lost} очк. списано впустую.</b>`);
-    lines.push(`Столько очков ушло без выданного подарка (сорвавшаяся выдача`);
-    lines.push(`или ручное обнуление через /refzero).`);
-    lines.push(`Вернуть этому человеку: <code>/refrepair ${u.tgId}</code>`);
-    lines.push(``);
+  // Cost per gift order, resolved the way buyForReferrals resolves it.
+  const costOf = async (variantId: number | null) => {
+    if (variantId == null) return 0;
+    const v = await db.variant.findUnique({ where: { id: variantId }, select: { pointsCost: true } }).catch(() => null);
+    return tiers.map.get(variantId) ?? v?.pointsCost ?? 0;
+  };
+  const orderRows: Array<{ id: number; title: string; cost: number; status: string; at: Date }> = [];
+  for (const o of giftOrders) {
+    orderRows.push({ id: o.id, title: o.titleRu, cost: await costOf(o.variantId), status: o.status, at: o.createdAt });
   }
+  const okOrders = orderRows.filter((o) => o.status !== "failed");
+  const justified = okOrders.reduce((s, o) => s + o.cost, 0);
+  const lost = spent - justified;
 
-  if (invited.length === 0) {
-    lines.push(`⚠️ По ссылке этого человека никто не зарегистрирован.`);
-    lines.push(`Если он уверяет, что приглашал — скорее всего те люди зашли,`);
-    lines.push(`когда рефералка была выключена: тогда ссылка не сохранялась.`);
-    lines.push(`Восстановить их автоматически нельзя — начислите вручную:`);
-    lines.push(`<code>/refgive ${u.tgId} 1</code>`);
+  const L: string[] = [];
+  L.push(`📊 <b>ПОЛНЫЕ ДАННЫЕ ПО РЕФЕРАЛАМ</b>`);
+  L.push(``);
+  L.push(`👤 <b>${esc(u.firstName ?? "—")}</b>${u.username ? ` @${u.username}` : ""}`);
+  L.push(`ID: <code>${u.tgId}</code>`);
+  L.push(`Регистрация: ${D(u.createdAt)}`);
+  L.push(`Подписка подтверждена: ${u.channelVerifiedAt ? "✅ " + D(u.channelVerifiedAt) : "❌ нет"}`);
+  L.push(`Рефералка в боте: ${refsOn ? "✅ включена" : "⏸ ВЫКЛЮЧЕНА"}`);
+  L.push(`Бан в рефералке: ${u.refBanned ? "🚫 ДА (не может ни приглашать, ни тратить)" : "нет"}`);
+  L.push(``);
+
+  L.push(`━━━━━━━━━━━━━━━━━━`);
+  L.push(`🤝 <b>ПРИГЛАШЕНИЯ</b>`);
+  L.push(`━━━━━━━━━━━━━━━━━━`);
+  L.push(`Перешли по ссылке: <b>${invited.length}</b> чел.`);
+  L.push(`✅ Подписались — засчитано: <b>${verified.length}</b>`);
+  L.push(`⏳ Не подписались — не в счёт: <b>${unverified.length}</b>`);
+  L.push(``);
+
+  L.push(`━━━━━━━━━━━━━━━━━━`);
+  L.push(`💰 <b>ОЧКИ</b>`);
+  L.push(`━━━━━━━━━━━━━━━━━━`);
+  L.push(`За приглашения: <b>${verified.length}</b>`);
+  L.push(`Бонус от админа: <b>${bonus > 0 ? "+" : ""}${bonus}</b>`);
+  L.push(`Всего заработано: <b>${earned}</b>`);
+  L.push(`Потрачено: <b>−${spent}</b>`);
+  L.push(`🎁 <b>ДОСТУПНО СЕЙЧАС: ${available}</b>`);
+  L.push(``);
+
+  L.push(`━━━━━━━━━━━━━━━━━━`);
+  L.push(`🎁 <b>НА ЧТО ПОТРАЧЕНО</b>`);
+  L.push(`━━━━━━━━━━━━━━━━━━`);
+  if (orderRows.length === 0) {
+    L.push(`Подарков не заказывал.`);
   } else {
-    lines.push(`<b>Последние приглашённые:</b>`);
-    for (const x of invited.slice(0, 25)) {
-      const mark = x.channelVerifiedAt ? "✅" : "⏳ не подписан";
-      lines.push(`${mark} <code>${x.tgId}</code> ${esc(x.firstName ?? "—")}${x.username ? " @" + x.username : ""}`);
+    for (const o of orderRows) {
+      const mark = o.status === "delivered" ? "✅ выдан"
+        : o.status === "awaiting_delivery" ? "⏳ ждёт выдачи"
+        : o.status === "failed" ? "❌ сорвался (очки возвращены)"
+        : `• ${esc(o.status)}`;
+      L.push(`#${o.id} · ${D(o.at)}`);
+      L.push(`   ${esc(o.title)}`);
+      L.push(`   <b>${o.cost} очк.</b> · ${mark}`);
     }
-    if (invited.length - verified > 0) {
-      lines.push(``);
-      lines.push(`💡 Если «не подписан» на самом деле подписан — запустите <code>/reffix</code>:`);
-      lines.push(`он перепроверит всех через Telegram и засчитает подтверждённых.`);
+    L.push(``);
+    L.push(`Итого по действующим заказам: <b>${justified}</b> очк.`);
+  }
+  L.push(``);
+
+  // Sanity check: the counter and the orders must tell the same story.
+  L.push(`━━━━━━━━━━━━━━━━━━`);
+  L.push(`🔍 <b>СВЕРКА</b>`);
+  L.push(`━━━━━━━━━━━━━━━━━━`);
+  L.push(`Списано по счётчику: <b>${spent}</b>`);
+  L.push(`Оправдано заказами: <b>${justified}</b>`);
+  if (lost > 0) {
+    L.push(`🔴 <b>Потеряно впустую: ${lost} очк.</b>`);
+    L.push(`Очки списаны, а подарка нет — сорвавшаяся выдача или ручное /refzero.`);
+    L.push(`Вернуть: <code>/refrepair ${u.tgId}</code>`);
+  } else if (lost < 0) {
+    L.push(`🟡 Заказов больше, чем списано (на ${-lost} очк.).`);
+    L.push(`Обычно это подарки, выданные вручную админом.`);
+  } else {
+    L.push(`✅ Всё сходится.`);
+  }
+  L.push(``);
+
+  L.push(`━━━━━━━━━━━━━━━━━━`);
+  L.push(`👥 <b>КОГО ПРИГЛАСИЛ</b> (${invited.length})`);
+  L.push(`━━━━━━━━━━━━━━━━━━`);
+  if (invited.length === 0) {
+    L.push(`Никого — по его ссылке никто не зарегистрирован.`);
+    L.push(``);
+    L.push(`⚠️ Если он уверяет, что приглашал: скорее всего те люди зашли,`);
+    L.push(`когда рефералка была выключена — тогда ссылка не сохранялась.`);
+    L.push(`Автоматически не восстановить, начислите вручную:`);
+    L.push(`<code>/refgive ${u.tgId} 1</code>`);
+  } else {
+    let i = 0;
+    for (const x of invited) {
+      i++;
+      const mark = x.channelVerifiedAt ? "✅" : "⏳";
+      const note = x.channelVerifiedAt ? "" : " — НЕ подписан";
+      L.push(`${i}. ${mark} <code>${x.tgId}</code> ${esc(x.firstName ?? "—")}${x.username ? ` @${x.username}` : ""} · ${D(x.createdAt)}${note}`);
+    }
+    if (unverified.length > 0) {
+      L.push(``);
+      L.push(`💡 Если кто-то из «⏳» на самом деле подписан — <code>/reffix</code>`);
+      L.push(`перепроверит всех через Telegram и засчитает подтверждённых.`);
     }
   }
 
-  await ctx.reply(lines.join("\n"), { parse_mode: "HTML" }).catch(() => {});
+  await replyChunked(ctx, L);
 });
 
 // Admin: /refrepair [tgId|@username | all] — return points that were debited
