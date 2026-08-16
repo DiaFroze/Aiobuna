@@ -14,6 +14,7 @@ import { sourceOrder, envVexSource, type Source } from "../lib/supplier";
 import { geminiTranslate } from "../lib/gemini";
 import { t, LANGS, LANG_NAMES, normalizeLang, btnVariants, type Lang } from "./i18n";
 import { generateVerificationCode } from "../lib/orderCode";
+import { parseBulkPrices, parseBulkBonus, bulkTotal, bonusQty, bulkSaving, describeBulk } from "../lib/domain/bulk-pricing";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -716,8 +717,27 @@ async function showProduct(ctx: Context, id: number, back: string) {
 }
 
 // ---------- quantity chooser ----------
+// Price and free-item count for an order, honouring the variant's quantity
+// rules. A per-user VIP override replaces the base price but leaves the bundle
+// tiers alone — those are the shop's promo, not a personal discount.
+function quantityDeal(
+  v: { bulkPrices?: string | null; bulkBonus?: string | null },
+  unitPrice: number,
+  qty: number,
+) {
+  const tiers = parseBulkPrices(v.bulkPrices);
+  const bonuses = parseBulkBonus(v.bulkBonus);
+  return {
+    tiers,
+    bonuses,
+    total: bulkTotal(unitPrice, qty, tiers),
+    free: bonusQty(qty, bonuses),
+    saved: bulkSaving(unitPrice, qty, tiers),
+  };
+}
+
 async function buildQtyChooser(
-  v: { id: number; priceUzs: number; autoSupplier: boolean; supplierStock: number; titleRu: string; titleUz: string; durationDays: number; plan: { product: { id: number; titleRu: string; titleEn: string; titleUz: string } } },
+  v: { id: number; priceUzs: number; autoSupplier: boolean; supplierStock: number; titleRu: string; titleUz: string; durationDays: number; bulkPrices?: string | null; bulkBonus?: string | null; plan: { product: { id: number; titleRu: string; titleEn: string; titleUz: string } } },
   lang: string,
   balance: number,
   qty: number,
@@ -731,7 +751,8 @@ async function buildQtyChooser(
   const max = await availableStock(v);
   if (max <= 0) return null;
   qty = clamp(Math.floor(qty) || 1, 1, max);
-  const total = unitPrice * qty;
+  const deal = quantityDeal(v, unitPrice, qty);
+  const total = deal.total;
   const disclaimer = await disclaimerFor(lang);
 
   const kb = new InlineKeyboard()
@@ -741,11 +762,23 @@ async function buildQtyChooser(
     .row()
     .text(t(lang, "enter_qty_btn"), `qi:${v.id}:${back}`)
     .row();
+  // Offer the cheapest bundle as a one-tap shortcut — the deal is worthless if
+  // nobody notices it. Only tiers that actually fit in stock are shown.
+  const shortcut = deal.tiers.filter((tier) => tier.qty !== qty && tier.qty <= max).slice(0, 3);
+  if (shortcut.length > 0) {
+    for (const tier of shortcut) {
+      const s = Math.max(0, unitPrice * tier.qty - tier.totalUzs);
+      kb.text(`${tier.qty} шт. — ${money(tier.totalUzs, lang)}${s > 0 ? ` 🔥` : ""}`, `q:${v.id}:${tier.qty}:${back}`).row();
+    }
+  }
   // Skip the "buy max" shortcut for unlimited manual-delivery items — there's
   // no real ceiling to jump to, and 999999 would be a nonsensical quantity.
   if (max > 1 && max < STOCK_UNLIMITED) kb.text(t(lang, "maximum", { n: max }), `q:${v.id}:${max}:${back}`).row();
   kb.text(t(lang, "buy_for", { v: money(total, lang) }), `bc:${v.id}:${qty}`).row();
   kb.text(t(lang, "back"), `p:${v.plan.product.id}:${back}`);
+
+  // Show the whole offer list so the customer can see the next tier up.
+  const offers = describeBulk(unitPrice, deal.tiers, deal.bonuses, (n) => money(n, lang));
 
   const text =
     `🧾 <b>${esc(title)}</b>\n\n` +
@@ -753,8 +786,11 @@ async function buildQtyChooser(
     `${t(lang, "price_each", { v: unitPrice > 0 ? money(unitPrice, lang) : t(lang, "free") })}\n` +
     `${t(lang, "in_stock", { n: stockDisplay(max) })}\n` +
     `${t(lang, "qty", { n: qty })}\n` +
-    `${t(lang, "total", { v: money(total, lang) })}\n` +
-    `${t(lang, "your_balance", { v: money(balance, lang) })}` +
+    (deal.free > 0 ? `🎁 <b>+${deal.free} в подарок</b> → получите ${qty + deal.free} шт.\n` : "") +
+    `${t(lang, "total", { v: money(total, lang) })}` +
+    (deal.saved > 0 ? ` <b>(−${money(deal.saved, lang)})</b>` : "") +
+    `\n${t(lang, "your_balance", { v: money(balance, lang) })}` +
+    (offers.length > 0 ? `\n\n🔥 <b>Выгодные наборы:</b>\n${offers.map((o) => `• ${o}`).join("\n")}` : "") +
     (disclaimer ? `\n\n${disclaimer}` : "");
   return { text, kb, max };
 }
@@ -811,6 +847,9 @@ async function notifySalesGroup(
   title: string,
   paid: { price: number; refPoints?: number },
 ) {
+  // Separate switch from the group id, so the feed can be paused and resumed
+  // without losing the configured group.
+  if ((await setting("sales_feed_enabled", "1")) === "0") return;
   const groupId = (await setting("sales_group_id", "")).trim();
   if (!groupId) return;
 
@@ -864,10 +903,23 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
   const baseTitle = `${pt} — ${vt}`;
   const max = await availableStock(v);
   if (max <= 0) return abort("out_of_stock");
-  const finalQty = clamp(Math.floor(qty) || 1, 1, max);
+  const paidQty = clamp(Math.floor(qty) || 1, 1, max);
   const eff = await effPriceFor(user.id, variantId, v.priceUzs);
-  const total = isRefGift ? 0 : eff.price * finalQty;
-  const label = finalQty > 1 ? `${baseTitle} ×${finalQty}` : baseTitle;
+
+  // Quantity rules: the bundle price is what we charge, and the bonus items are
+  // delivered on top. A referral gift is always a single free item — bundles
+  // and bonuses are money promos and must not compound with points.
+  const deal = isRefGift
+    ? { total: 0, free: 0 }
+    : quantityDeal(v, eff.price, paidQty);
+  // Bonus items still have to physically exist; never promise more than stock.
+  const freeQty = Math.min(deal.free, Math.max(0, max - paidQty));
+  const finalQty = paidQty + freeQty;
+  const total = isRefGift ? 0 : deal.total;
+  const label =
+    freeQty > 0 ? `${baseTitle} ×${paidQty} +${freeQty} 🎁`
+    : paidQty > 1 ? `${baseTitle} ×${paidQty}`
+    : baseTitle;
 
   // --- Manual delivery: charge, then the admin sends the goods by hand ---
   if (v.manualDelivery) {
@@ -1167,8 +1219,16 @@ async function doBuy(ctx: Context, variantId: number, qty: number) {
   if (max <= 0) return ctx.answerCallbackQuery({ text: t(lang, "out_of_stock"), show_alert: true });
   qty = clamp(Math.floor(qty) || 1, 1, max);
   const eff = await effPriceFor(user.id, variantId, v.priceUzs);
-  const total = eff.price * qty;
-  const label = qty > 1 ? `${baseTitle} ×${qty}` : baseTitle;
+  // Must use the SAME bundle price executePurchase() will charge. Multiplying
+  // the unit price here would quote a higher figure than the actual debit and
+  // ask the customer to top up money they don't need.
+  const deal = quantityDeal(v, eff.price, qty);
+  const total = deal.total;
+  const freeQty = Math.min(deal.free, Math.max(0, max - qty));
+  const label =
+    freeQty > 0 ? `${baseTitle} ×${qty} +${freeQty} 🎁`
+    : qty > 1 ? `${baseTitle} ×${qty}`
+    : baseTitle;
 
   // Enough balance -> execute purchase immediately
   if (user.balance >= total) {
@@ -2658,26 +2718,46 @@ bot.command("salesgroup", async (ctx) => {
   if (!isAdmin(ctx)) return;
   const arg = (ctx.match ?? "").trim();
   const current = (await setting("sales_group_id", "")).trim();
+  const on = (await setting("sales_feed_enabled", "1")) !== "0";
+  const setFlag = (v: string) =>
+    db.setting.upsert({ where: { key: "sales_feed_enabled" }, create: { key: "sales_feed_enabled", valueRu: v }, update: { valueRu: v } });
 
   const usage =
-    `📣 <b>Группа для ленты продаж</b>\n\n` +
-    `Сейчас: ${current ? `<code>${esc(current)}</code>` : "<i>не задана</i>"}\n\n` +
+    `📣 <b>Лента продаж</b>\n\n` +
+    `Автоотправка: ${on ? "✅ включена" : "⏸ выключена"}\n` +
+    `Группа: ${current ? `<code>${esc(current)}</code>` : "<i>не задана</i>"}\n\n` +
     `<b>Команды:</b>\n` +
     `<code>/salesgroup @subhub_group</code> — задать группу\n` +
+    `<code>/salesgroup on</code> — включить автоотправку\n` +
+    `<code>/salesgroup off</code> — выключить автоотправку\n` +
     `<code>/salesgroup test</code> — отправить пробное сообщение\n` +
-    `<code>/salesgroup off</code> — отключить ленту\n\n` +
+    `<code>/salesgroup clear</code> — забыть группу\n\n` +
     `⚠️ Бот должен состоять в группе и иметь право писать.\n` +
     `Для закрытых групп используйте числовой id (например <code>-1001234567890</code>).`;
 
   if (!arg) return ctx.reply(usage, { parse_mode: "HTML" });
 
   if (arg === "off") {
+    await setFlag("0");
+    return ctx.reply("⏸ Автоотправка выключена — сообщения о покупках не публикуются.\n\nГруппа сохранена, включить обратно: /salesgroup on");
+  }
+  if (arg === "on") {
+    await setFlag("1");
+    return ctx.reply(
+      current
+        ? `✅ Автоотправка включена — покупки публикуются в <code>${esc(current)}</code>.`
+        : "✅ Автоотправка включена, но группа не задана.\n\nЗадайте: /salesgroup @subhub_group",
+      { parse_mode: "HTML" },
+    );
+  }
+  if (arg === "clear") {
     await db.setting.upsert({ where: { key: "sales_group_id" }, create: { key: "sales_group_id", valueRu: "" }, update: { valueRu: "" } });
-    return ctx.reply("✅ Лента продаж отключена — сообщения о покупках больше не публикуются.");
+    return ctx.reply("✅ Группа удалена из настроек.");
   }
 
   if (arg === "test") {
     if (!current) return ctx.reply("❌ Группа не задана. Сначала: <code>/salesgroup @subhub_group</code>", { parse_mode: "HTML" });
+    if (!on) return ctx.reply("⏸ Автоотправка выключена — включите: <code>/salesgroup on</code>", { parse_mode: "HTML" });
     // Send the exact same shapes real purchases produce, so what the admin
     // sees here is what members will see.
     const fake = { firstName: "Jahongir", username: "jahongir", tgId: "7141343261" };
@@ -3675,6 +3755,8 @@ async function ensureSchema() {
     `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "channelVerifiedAt" TIMESTAMP(3)`,
     `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "refBanned" BOOLEAN NOT NULL DEFAULT false`,
     `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "pointsCost" INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "bulkPrices" TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "bulkBonus" TEXT NOT NULL DEFAULT ''`,
     `CREATE TABLE IF NOT EXISTS "ChannelJoinRequest" (
       "id" SERIAL NOT NULL,
       "chatId" TEXT NOT NULL,

@@ -642,6 +642,11 @@ model Variant {
   autoSupplier       Boolean @default(false)
   manualDelivery     Boolean @default(false)
   manualStockLimit   Int     @default(-1)
+  // Quantity pricing, edited as text in the admin panel and parsed by
+  // src/lib/domain/bulk-pricing.ts. "2=55000,3=80000" = total price for that
+  // exact quantity; "2+1" = buy 2, get 1 extra free.
+  bulkPrices         String  @default("")
+  bulkBonus          String  @default("")
 
   stockItems   StockItem[]
   customPrices UserVariantPrice[]

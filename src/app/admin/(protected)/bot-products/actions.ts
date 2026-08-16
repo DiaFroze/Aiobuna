@@ -7,6 +7,7 @@ import { PERMISSIONS } from "@/lib/security/rbac";
 import { botDb } from "@/lib/botDb";
 import { audit } from "@/lib/security/audit";
 import { geminiLocalize } from "@/lib/gemini";
+import { parseBulkPrices, parseBulkBonus } from "@/lib/domain/bulk-pricing";
 
 function str(v: FormDataEntryValue | null): string {
   return String(v ?? "").trim();
@@ -183,6 +184,16 @@ export async function updateVariantAction(formData: FormData) {
     ? (formData.get("manualStockLimit") ? Math.round(num(formData.get("manualStockLimit"))) : -1)
     : -1;
 
+  // Round-trip the quantity rules through the parser before storing them, so a
+  // typo like "5=" (which Number() would read as "5 items for 0 сум") is
+  // dropped here rather than becoming a free-goods bug in the shop.
+  const bulkPrices = parseBulkPrices(str(formData.get("bulkPrices")))
+    .map((t) => `${t.qty}=${t.totalUzs}`)
+    .join(",");
+  const bulkBonus = parseBulkBonus(str(formData.get("bulkBonus")))
+    .map((b) => `${b.buy}+${b.free}`)
+    .join(",");
+
   await botDb.variant.update({
     where: { id },
     data: {
@@ -191,6 +202,8 @@ export async function updateVariantAction(formData: FormData) {
       priceUzs, // сум — the only price the bot uses
       priceStars: Math.round(num(formData.get("priceStars"))),
       pointsCost: Math.max(0, Math.round(num(formData.get("pointsCost")))),
+      bulkPrices,
+      bulkBonus,
       manualDelivery: manual,
       manualStockLimit,
       isActive: formData.get("isActive") === "on",

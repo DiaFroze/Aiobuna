@@ -179,6 +179,42 @@ export default async function BotProductEditPage({ params }: { params: { id: str
                       <button className="btn-primary text-xs px-3">💾</button>
                       <button formAction={deleteVariantAction} className="btn-danger text-xs px-3">✕</button>
                     </div>
+
+                    {/* Quantity deals — full width under the main row */}
+                    <div className="col-span-2 md:col-span-12 grid md:grid-cols-2 gap-2 pt-2 mt-1 border-t">
+                      <div>
+                        <label className="text-[11px] text-muted">
+                          🔥 Цены за набор
+                          <span className="ml-1 opacity-60">— «2=55000,3=80000»</span>
+                        </label>
+                        <input
+                          name="bulkPrices"
+                          defaultValue={v.bulkPrices}
+                          className="input mt-1 text-sm font-mono"
+                          placeholder="2=55000,3=80000"
+                        />
+                        <p className="text-[10px] text-muted mt-1">
+                          Итоговая цена за это количество. Пример: 1 шт. — {v.priceUzs.toLocaleString("ru-RU")} сум,
+                          2 шт. — 55 000, 3 шт. — 80 000. Свыше самого большого набора цена считается по его же ставке за штуку.
+                        </p>
+                      </div>
+                      <div>
+                        <label className="text-[11px] text-muted">
+                          🎁 Подарок за количество
+                          <span className="ml-1 opacity-60">— «2+1»</span>
+                        </label>
+                        <input
+                          name="bulkBonus"
+                          defaultValue={v.bulkBonus}
+                          className="input mt-1 text-sm font-mono"
+                          placeholder="2+1"
+                        />
+                        <p className="text-[10px] text-muted mt-1">
+                          Купил 2 — получил 3. Повторяется: за 4 купленных дадут 2 в подарок.
+                          Подарочные штуки списываются со склада, сверх остатка не выдаются.
+                        </p>
+                      </div>
+                    </div>
                   </form>
                 );
               })}
