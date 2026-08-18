@@ -74,18 +74,20 @@ export default async function BotTopUpsPage() {
         <div className="card p-5 border-2 border-brand/30 bg-brand/5">
           <div className="font-semibold text-sm mb-1">💳 Ожидающие Payme-пополнения — для тестов в песочнице</div>
           <p className="text-xs text-muted mb-3">
-            В песочнице Payme: <code>topup_id</code> = «ID», а сумму вводите в <b>тийинах</b> (сум × 100).
+            Копируйте два значения в песочницу. <b>«Сумма оплаты» — это НЕ id</b>, а тийины (сум × 100).
           </p>
-          <div className="space-y-1.5">
+          <div className="space-y-2">
             {pendingPayme.map((t) => (
-              <div key={t.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm font-mono">
-                <span>ID: <b className="text-base">{t.id}</b></span>
-                <span className="text-muted">{Math.round(t.amount).toLocaleString("ru-RU")} сум</span>
-                <span>тийины: <b>{Math.round(t.amount * 100)}</b></span>
-                <span className="text-muted text-xs">{t.user.username ? `@${t.user.username}` : t.user.tgId}</span>
+              <div key={t.id} className="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm rounded-lg bg-surface-2/60 px-3 py-2">
+                <span>ID пополнения (topup_id): <b className="font-mono text-base">{t.id}</b></span>
+                <span>Сумма оплаты: <b className="font-mono text-base">{Math.round(t.amount * 100)}</b></span>
+                <span className="text-muted text-xs">({Math.round(t.amount).toLocaleString("ru-RU")} сум · {t.user.username ? `@${t.user.username}` : t.user.tgId})</span>
               </div>
             ))}
           </div>
+          <p className="text-xs text-muted mt-3">
+            Для теста «Несуществующий счёт» введите любой id, которого тут нет (напр. <code>99999999</code>) — вернётся ошибка −31050.
+          </p>
         </div>
       )}
 

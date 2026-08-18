@@ -48,7 +48,13 @@ export default async function BotSettingsPage({
   const referralsRow = allSettings.find((s) => s.key === "referrals_enabled");
   const referralsOn = referralsRow === undefined || referralsRow.valueRu !== "0";
   const settings = allSettings.filter(
-    (s) => !MENU_KEYS.includes(s.key) && s.key !== "maintenance_mode" && s.key !== "referrals_enabled",
+    (s) =>
+      !MENU_KEYS.includes(s.key) &&
+      s.key !== "maintenance_mode" &&
+      s.key !== "referrals_enabled" &&
+      // Secret: the current Payme merchant key after a ChangePassword rotation.
+      // Never render it in the admin UI.
+      s.key !== "payme_password",
   );
   const existingKeys = new Set(allSettings.map((s) => s.key));
   const missingSuggested = SUGGESTED.filter((s) => !existingKeys.has(s.key));
