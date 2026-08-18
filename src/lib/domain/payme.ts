@@ -67,6 +67,10 @@ export type TopUpView = {
   payable: boolean; // pending and not expired/cancelled
 };
 export type TxnView = {
+  // Our own row id. The Payme docs require the response `transaction` field to
+  // be "the transaction id in the merchant's system" — NOT Payme's id (which
+  // arrives as params.id). We key on paymeId internally but answer with this.
+  id: string;
   paymeId: string;
   topUpId: number;
   amountTiyin: number;
@@ -161,7 +165,7 @@ async function createTransaction(id: Id, p: any, repo: PaymeRepo): Promise<JsonR
   const existing = await repo.findTxnByPaymeId(paymeId);
   if (existing) {
     if (existing.state !== PaymeState.CREATED) return err(id, PaymeError.CANT_PERFORM);
-    return ok(id, { create_time: existing.createTime, transaction: existing.paymeId, state: existing.state });
+    return ok(id, { create_time: existing.createTime, transaction: existing.id, state: existing.state });
   }
 
   const topUpId = accountTopUpId(p);
@@ -180,7 +184,7 @@ async function createTransaction(id: Id, p: any, repo: PaymeRepo): Promise<JsonR
   if (repo.now() - createTime > TRANSACTION_TIMEOUT_MS) return err(id, PaymeError.CANT_PERFORM);
 
   const txn = await repo.createTxn({ paymeId, topUpId, amountTiyin: topup.amountTiyin, createTime });
-  return ok(id, { create_time: txn.createTime, transaction: txn.paymeId, state: txn.state });
+  return ok(id, { create_time: txn.createTime, transaction: txn.id, state: txn.state });
 }
 
 async function performTransaction(id: Id, p: any, repo: PaymeRepo): Promise<JsonRpcResponse> {
@@ -190,7 +194,7 @@ async function performTransaction(id: Id, p: any, repo: PaymeRepo): Promise<Json
 
   if (txn.state === PaymeState.PERFORMED) {
     // Idempotent: report the same completion, no second credit.
-    return ok(id, { transaction: txn.paymeId, perform_time: txn.performTime, state: txn.state });
+    return ok(id, { transaction: txn.id, perform_time: txn.performTime, state: txn.state });
   }
   if (txn.state !== PaymeState.CREATED) return err(id, PaymeError.CANT_PERFORM);
 
@@ -201,7 +205,7 @@ async function performTransaction(id: Id, p: any, repo: PaymeRepo): Promise<Json
   }
 
   const done = await repo.performTxn(paymeId, repo.now());
-  return ok(id, { transaction: done.paymeId, perform_time: done.performTime, state: done.state });
+  return ok(id, { transaction: done.id, perform_time: done.performTime, state: done.state });
 }
 
 async function cancelTransaction(id: Id, p: any, repo: PaymeRepo): Promise<JsonRpcResponse> {
@@ -212,18 +216,18 @@ async function cancelTransaction(id: Id, p: any, repo: PaymeRepo): Promise<JsonR
 
   // Already cancelled → idempotent replay.
   if (txn.state === PaymeState.CANCELLED || txn.state === PaymeState.CANCELLED_AFTER_PERFORM) {
-    return ok(id, { transaction: txn.paymeId, cancel_time: txn.cancelTime, state: txn.state });
+    return ok(id, { transaction: txn.id, cancel_time: txn.cancelTime, state: txn.state });
   }
 
   if (txn.state === PaymeState.CREATED) {
     const c = await repo.cancelCreated(paymeId, repo.now(), reason);
-    return ok(id, { transaction: c.paymeId, cancel_time: c.cancelTime, state: c.state });
+    return ok(id, { transaction: c.id, cancel_time: c.cancelTime, state: c.state });
   }
 
   // state === PERFORMED → refund if the credited balance is still intact.
   const c = await repo.cancelPerformed(paymeId, repo.now(), reason);
   if (!c) return err(id, PaymeError.CANT_CANCEL_COMPLETED);
-  return ok(id, { transaction: c.paymeId, cancel_time: c.cancelTime, state: c.state });
+  return ok(id, { transaction: c.id, cancel_time: c.cancelTime, state: c.state });
 }
 
 async function checkTransaction(id: Id, p: any, repo: PaymeRepo): Promise<JsonRpcResponse> {
@@ -233,7 +237,7 @@ async function checkTransaction(id: Id, p: any, repo: PaymeRepo): Promise<JsonRp
     create_time: txn.createTime,
     perform_time: txn.performTime,
     cancel_time: txn.cancelTime,
-    transaction: txn.paymeId,
+    transaction: txn.id,
     state: txn.state,
     reason: txn.reason,
   });
@@ -252,7 +256,7 @@ async function getStatement(id: Id, p: any, repo: PaymeRepo): Promise<JsonRpcRes
       create_time: t.createTime,
       perform_time: t.performTime,
       cancel_time: t.cancelTime,
-      transaction: t.paymeId,
+      transaction: t.id,
       state: t.state,
       reason: t.reason,
     })),

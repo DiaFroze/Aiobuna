@@ -20,12 +20,23 @@ export default async function BotTopUpsPage() {
     );
   }
 
-  const [topups, users, totalBalanceAgg] = await Promise.all([
-    botDb.topUp.findMany({ orderBy: [{ status: "asc" }, { id: "desc" }], take: 100, include: { user: true } }),
+  const [topups, users, totalBalanceAgg, paymeTxns] = await Promise.all([
+    // Pending first (that's what needs attention and what a Payme test needs to
+    // find), then newest — so a fresh pending row never falls past the limit.
+    botDb.topUp.findMany({ orderBy: [{ createdAt: "desc" }], take: 150, include: { user: true } }),
     botDb.botUser.count(),
     botDb.botUser.aggregate({ _sum: { balance: true } }),
+    botDb.paymeTransaction.findMany({ select: { topUpId: true, state: true, paymeId: true } }).catch(() => []),
   ]);
   const pending = topups.filter((t) => t.status === "pending").length;
+  const paymeByTopUp = new Map(paymeTxns.map((p) => [p.topUpId, p]));
+  const sorted = [...topups].sort((a, b) => {
+    if ((a.status === "pending") !== (b.status === "pending")) return a.status === "pending" ? -1 : 1;
+    return b.id - a.id;
+  });
+  // Payme transaction state → human label.
+  const PAYME_STATE: Record<number, string> = { 1: "создана", 2: "оплачена", "-1": "отменена", "-2": "возврат" };
+  const methodLabel = (m: string) => (m === "payme" ? "💳 Payme" : m === "stars" ? "⭐ Stars" : m === "receipt" ? "🧾 Чек" : m === "card" ? "💳 Карта" : m === "manual" ? "✍️ Вручную" : m);
 
   return (
     <div className="space-y-6">
@@ -59,15 +70,21 @@ export default async function BotTopUpsPage() {
       {topups.length === 0 ? (
         <EmptyState>Запросов на пополнение пока нет.</EmptyState>
       ) : (
-        <Table head={["#", "Пользователь", "Telegram ID", "Сумма", "Статус", "Дата", ""]}>
-          {topups.map((t) => (
+        <Table head={["#", "Пользователь", "Telegram ID", "Сумма", "Способ", "Статус", "Дата", ""]}>
+          {sorted.map((t) => {
+            const pt = paymeByTopUp.get(t.id);
+            return (
             <tr key={t.id} className="border-b last:border-0">
-              <td className="px-4 py-3">{t.id}</td>
+              <td className="px-4 py-3 font-mono">{t.id}</td>
               <td className="px-4 py-3">
                 {t.user.firstName ?? "—"} {t.user.username ? `@${t.user.username}` : ""}
               </td>
               <td className="px-4 py-3 font-mono text-xs text-muted">{t.user.tgId}</td>
               <td className="px-4 py-3 font-medium">{Math.round(t.amount).toLocaleString("ru-RU")} сум</td>
+              <td className="px-4 py-3 text-xs">
+                {methodLabel(t.method)}
+                {pt && <span className="block text-muted">Payme: {PAYME_STATE[pt.state] ?? pt.state}</span>}
+              </td>
               <td className="px-4 py-3">
                 <span className={`badge ${STATUS[t.status] ?? ""}`}>{t.status}</span>
               </td>
@@ -87,7 +104,8 @@ export default async function BotTopUpsPage() {
                 )}
               </td>
             </tr>
-          ))}
+            );
+          })}
         </Table>
       )}
     </div>

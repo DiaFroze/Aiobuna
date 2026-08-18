@@ -33,6 +33,10 @@ class FakeRepo implements PaymeRepo {
   }
   async createTxn(input: { paymeId: string; topUpId: number; amountTiyin: number; createTime: number }) {
     const txn: TxnView = {
+      // Our own merchant id — deterministic from the Payme id so idempotent
+      // replays return a stable value, and distinct from paymeId so the test
+      // proves we answer with the merchant id, not Payme's.
+      id: `MID-${input.paymeId}`,
       paymeId: input.paymeId, topUpId: input.topUpId, amountTiyin: input.amountTiyin,
       state: PaymeState.CREATED, createTime: input.createTime, performTime: 0, cancelTime: 0, reason: null,
     };
@@ -132,10 +136,11 @@ describe("CreateTransaction", () => {
   const create = (paymeId: string, extra: any = {}) =>
     call("CreateTransaction", { id: paymeId, time: repo.now(), amount: AMOUNT_TIYIN, account: { topup_id: 1 }, ...extra });
 
-  it("creates a transaction in state CREATED", async () => {
+  it("creates a transaction in state CREATED, answering with the merchant id", async () => {
     const r = await create("A");
     expect(isOk(r) && r.result.state).toBe(PaymeState.CREATED);
-    expect(isOk(r) && r.result.transaction).toBe("A");
+    // The response `transaction` is our merchant id, NOT Payme's id ("A").
+    expect(isOk(r) && r.result.transaction).toBe("MID-A");
   });
   it("is idempotent for a repeated CreateTransaction with the same id", async () => {
     const first = await create("A");

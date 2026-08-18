@@ -13,11 +13,11 @@ import { PaymeState, sumToTiyin } from "@/lib/domain/payme";
 const toNum = (b: bigint | number | null): number => (b === null ? 0 : Number(b));
 
 function toView(row: {
-  paymeId: string; topUpId: number; amountTiyin: number; state: number;
+  id: string; paymeId: string; topUpId: number; amountTiyin: number; state: number;
   createTime: bigint | number; performTime: bigint | number; cancelTime: bigint | number; reason: number | null;
 }): TxnView {
   return {
-    paymeId: row.paymeId, topUpId: row.topUpId, amountTiyin: row.amountTiyin, state: row.state,
+    id: row.id, paymeId: row.paymeId, topUpId: row.topUpId, amountTiyin: row.amountTiyin, state: row.state,
     createTime: toNum(row.createTime), performTime: toNum(row.performTime), cancelTime: toNum(row.cancelTime),
     reason: row.reason,
   };
