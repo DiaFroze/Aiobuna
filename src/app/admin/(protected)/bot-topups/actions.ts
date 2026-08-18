@@ -53,6 +53,36 @@ export async function rejectTopUpAction(formData: FormData) {
   revalidatePath("/admin/bot-topups");
 }
 
+/**
+ * Create a pending Payme invoice for a chosen сум amount, for Payme sandbox
+ * testing. Bypasses the bot's minimum-top-up rule so any amount can be used,
+ * and prints the exact tiyin value to paste into the sandbox. Attached to the
+ * admin's own bot user (or any user, as a fallback) so it has an owner.
+ */
+export async function createPaymeTestInvoiceAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
+  const sum = Math.round(Number(str(formData.get("amountSum")).replace(",", ".")));
+  if (!Number.isFinite(sum) || sum <= 0) return;
+
+  const adminTgId = process.env.TELEGRAM_ADMIN_CHAT_ID ?? "";
+  const user =
+    (adminTgId ? await botDb.botUser.findUnique({ where: { tgId: adminTgId } }) : null) ??
+    (await botDb.botUser.findFirst());
+  if (!user) return;
+
+  await botDb.topUp.create({
+    data: {
+      userId: user.id,
+      amount: sum,
+      method: "payme",
+      status: "pending",
+      note: `payme-test by ${admin.email}`,
+      expiresAt: new Date(Date.now() + 60 * 60_000),
+    },
+  });
+  revalidatePath("/admin/bot-topups");
+}
+
 /** Manually credit (or debit with a negative amount) a user's balance by tgId. */
 export async function manualCreditAction(formData: FormData) {
   const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);

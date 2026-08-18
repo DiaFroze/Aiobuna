@@ -1,6 +1,6 @@
 import { botDb, botConfigured } from "@/lib/botDb";
 import { PageHeader, Table, EmptyState, StatCard } from "@/components/admin/ui";
-import { approveTopUpAction, rejectTopUpAction, manualCreditAction } from "./actions";
+import { approveTopUpAction, rejectTopUpAction, manualCreditAction, createPaymeTestInvoiceAction } from "./actions";
 
 export const dynamic = "force-dynamic";
 
@@ -70,6 +70,19 @@ export default async function BotTopUpsPage() {
 
       {/* Payme test helper — pending Payme top-ups with the exact values to
           paste into the Payme sandbox (id + amount in tiyin). */}
+      {/* Create a Payme test invoice for any amount (bypasses the bot minimum). */}
+      <form action={createPaymeTestInvoiceAction} className="card p-4 flex flex-wrap items-end gap-3">
+        <div>
+          <label className="text-sm font-semibold block">🧪 Создать тестовый счёт Payme</label>
+          <label className="text-xs text-muted">Сумма в сумах (любая, напр. 500)</label>
+          <input name="amountSum" required className="input mt-1 w-40" placeholder="500" />
+        </div>
+        <button className="btn-primary">Создать</button>
+        <p className="text-xs text-muted w-full">
+          Создаст ожидающее Payme-пополнение. Ниже появится строка с готовыми числами для песочницы.
+        </p>
+      </form>
+
       {pendingPayme.length > 0 && (
         <div className="card p-5 border-2 border-brand/30 bg-brand/5">
           <div className="font-semibold text-sm mb-1">💳 Ожидающие Payme-пополнения — для тестов в песочнице</div>
