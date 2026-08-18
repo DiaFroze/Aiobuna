@@ -62,7 +62,15 @@ const MESSAGES: Record<number, Msg> = {
   [PaymeError.ACCOUNT_IN_PROCESS]: msg("Пополнение уже обрабатывается другой транзакцией", "To'ldirish boshqa tranzaksiyada", "Top-up is already being processed"),
   [PaymeError.METHOD_NOT_FOUND]: msg("Метод не найден", "Metod topilmadi", "Method not found"),
   [PaymeError.INVALID_REQUEST]: msg("Неверный запрос", "Noto'g'ri so'rov", "Invalid request"),
+  [PaymeError.PARSE_ERROR]: msg("Ошибка разбора запроса", "So'rovni tahlil qilishda xatolik", "Parse error"),
 };
+
+// Localized message for an error code — never empty. Payme rejects an error
+// whose `message` is an empty string, so the HTTP shell uses this for the
+// codes it emits directly (auth, parse, ChangePassword).
+export function paymeMessage(code: number): { ru: string; uz: string; en: string } {
+  return MESSAGES[code] ?? msg("Ошибка", "Xatolik", "Error");
+}
 
 // ---- repository interface (implemented by Prisma or an in-memory fake) ----
 export type TopUpView = {

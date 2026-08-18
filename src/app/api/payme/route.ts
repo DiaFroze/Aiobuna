@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { timingSafeEqual } from "node:crypto";
 import { env } from "@/lib/env";
 import { botDb } from "@/lib/botDb";
-import { handlePayme, PaymeError } from "@/lib/domain/payme";
+import { handlePayme, PaymeError, paymeMessage } from "@/lib/domain/payme";
 import { prismaPaymeRepo } from "@/lib/services/payme-repo";
 
 // Payme Merchant API endpoint. Payme's servers POST JSON-RPC 2.0 here; the
@@ -69,7 +69,7 @@ export async function POST(req: Request) {
   }
   if (parseFailed) {
     const code = authorized ? PaymeError.PARSE_ERROR : PaymeError.INSUFFICIENT_PRIVILEGE;
-    return jsonRpc(null, { error: { code, message: "" } });
+    return jsonRpc(null, { error: { code, message: paymeMessage(code) } });
   }
 
   const id = (body as { id?: unknown })?.id ?? null;
@@ -81,11 +81,11 @@ export async function POST(req: Request) {
   if (method === "ChangePassword") {
     if (!authorized) {
       console.log(`[payme] ChangePassword → error -32504 | auth=${why}`);
-      return jsonRpc(id, { error: { code: PaymeError.INSUFFICIENT_PRIVILEGE, message: "" } });
+      return jsonRpc(id, { error: { code: PaymeError.INSUFFICIENT_PRIVILEGE, message: paymeMessage(PaymeError.INSUFFICIENT_PRIVILEGE) } });
     }
     const newPw = (body as { params?: { password?: unknown } })?.params?.password;
     if (typeof newPw !== "string" || newPw.trim().length === 0) {
-      return jsonRpc(id, { error: { code: PaymeError.CANT_PERFORM, message: "" } });
+      return jsonRpc(id, { error: { code: PaymeError.CANT_PERFORM, message: paymeMessage(PaymeError.CANT_PERFORM) } });
     }
     await botDb.setting.upsert({
       where: { key: PW_KEY },
