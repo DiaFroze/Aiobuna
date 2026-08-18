@@ -18,6 +18,7 @@ const NAV: { href: string; label: string; icon: string }[] = [
   { href: "/admin/bot-promo-codes", label: "Промокоды", icon: "🎟" },
   { href: "/admin/bot-promo", label: "Подарки", icon: "🎁" },
   { href: "/admin/bot-referrals", label: "Рефералы", icon: "🤝" },
+  { href: "/admin/bot-poll", label: "Опрос", icon: "📊" },
   { href: "/admin/bot-stock", label: "Склад", icon: "📦" },
   { href: "/admin/bot-verify", label: "Проверка кодов", icon: "🔑" },
   { href: "/admin/link-formatter", label: "Форматирование ссылок", icon: "🔗" },

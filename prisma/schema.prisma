@@ -786,6 +786,17 @@ model PaymeTransaction {
   @@index([state])
 }
 
+// One row per user vote in the current bank poll. tgId is the id, so a user has
+// exactly one (changeable) vote. choice is the bank key: payme|click|paynet|uzum.
+model BotPollVote {
+  tgId      String   @id
+  choice    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([choice])
+}
+
 model RequiredChannel {
   id        Int      @id @default(autoincrement())
   name      String

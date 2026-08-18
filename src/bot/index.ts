@@ -2392,7 +2392,7 @@ bot.use(async (ctx, next) => {
   // so without this the terms screen swallowed their "Проверить подписку" tap.
   // channelVerifiedAt then never got stamped and their referrer never earned
   // the point, even though the person really had subscribed.
-  if (data === "terms_accept" || data === "check_subs" || data?.startsWith("lang:")) return next();
+  if (data === "terms_accept" || data === "check_subs" || data?.startsWith("lang:") || data?.startsWith("vote:")) return next();
 
   const text = ctx.message?.text;
   if (text?.startsWith("/start")) return next();
@@ -2416,7 +2416,7 @@ bot.use(async (ctx, next) => {
   }
 
   const data = ctx.callbackQuery?.data;
-  if (data === "check_subs" || data === "terms_accept" || data?.startsWith("lang:")) {
+  if (data === "check_subs" || data === "terms_accept" || data?.startsWith("lang:") || data?.startsWith("vote:")) {
     return next();
   }
 
@@ -3550,6 +3550,86 @@ bot.command("stock", async (ctx) => {
 // emojis via <tg-emoji emoji-id="..."> tags carry over. Reply-mode uses
 // copyMessage so photos/videos/stickers with premium emoji in captions are
 // forwarded exactly (no "Forwarded from" header).
+// ---------- background broadcast ----------
+// Send to every user WITHOUT freezing the bot. The old broadcast blasted ~28
+// msg/s, which nearly maxes Telegram's ~30/s bot limit, starving live traffic —
+// the bot looked frozen for the whole run. This paces at ~18/s (leaving ~12/s
+// for live users) and runs detached, editing a status message as it goes.
+async function broadcastInBackground(
+  ctx: Context,
+  send: (tgId: string) => Promise<void>,
+  label: string,
+) {
+  const users = await db.botUser.findMany({ select: { tgId: true } });
+  const total = users.length;
+  const statusMsg = await ctx.reply(`📢 ${label}: запуск… (0/${total})`).catch(() => null);
+  const chatId = ctx.chat?.id;
+
+  // Detached — the command returns immediately, the bot keeps serving users.
+  (async () => {
+    let ok = 0, fail = 0;
+    const BATCH = 18;
+    for (let i = 0; i < users.length; i += BATCH) {
+      await Promise.all(users.slice(i, i + BATCH).map(async (u) => {
+        try { await send(u.tgId); ok++; } catch { fail++; }
+      }));
+      // ~18 msg/s — under half the global limit, so replies stay fast.
+      await new Promise((r) => setTimeout(r, 1000));
+      // Update progress roughly every ~180 sends.
+      if (statusMsg && chatId && (i / BATCH) % 10 === 0) {
+        await bot.api.editMessageText(chatId, statusMsg.message_id, `📢 ${label}: ${ok + fail}/${total} (✅ ${ok} · ❌ ${fail})`).catch(() => {});
+      }
+    }
+    const done = `📢 ${label} — готово.\n\n✅ Доставлено: <b>${ok}</b>\n❌ Не доставлено: <b>${fail}</b>\nВсего: <b>${total}</b>`;
+    if (statusMsg && chatId) await bot.api.editMessageText(chatId, statusMsg.message_id, done, { parse_mode: "HTML" }).catch(() => {});
+  })().catch((e) => console.error("[bot] broadcast failed:", (e as Error).message));
+}
+
+// ---------- bank poll ----------
+// Premium-emoji ids supplied by the admin, one per bank. The base emoji is the
+// fallback if a premium one ever becomes invalid (the API transformer strips it).
+const BANK_POLL: Array<{ key: string; label: string; emoji: string; premium: string }> = [
+  { key: "payme", label: "Payme", emoji: "💸", premium: "5204128408463744787" },
+  { key: "click", label: "Click", emoji: "⭐️", premium: "5350345287246311562" },
+  { key: "paynet", label: "PAYNET", emoji: "🍇", premium: "5281003701677334497" },
+  { key: "uzum", label: "Uzum Bank", emoji: "💸", premium: "5474339588627509561" },
+];
+const BANK_KEYS = new Set(BANK_POLL.map((b) => b.key));
+
+function pollMessage(): { text: string; kb: InlineKeyboard } {
+  const kb = new InlineKeyboard();
+  for (const b of BANK_POLL) kb.text(b.label, `vote:${b.key}`).icon(b.premium).row();
+  const text =
+    "💳 <b>Каким банком вы чаще всего пользуетесь?</b>\n\n" +
+    "Помогите нам стать удобнее — выберите ваш вариант ниже 👇\n\n" +
+    "<i>Голос можно изменить в любой момент.</i>";
+  return { text, kb };
+}
+
+// Admin: /poll — preview the poll (sent only to the admin, to check the buttons).
+bot.command("poll", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const { text, kb } = pollMessage();
+  await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } }).catch(() => {});
+  await ctx.reply(
+    "👆 Так опрос увидят пользователи. Проверьте кнопки (нажмите — засчитается ваш голос).\n\n" +
+    "Когда всё ок — разошлите всем: <code>/pollsend</code>\n" +
+    "Статистика: админ-панель → «Опрос».",
+    { parse_mode: "HTML" },
+  ).catch(() => {});
+});
+
+// Admin: /pollsend — broadcast the poll to everyone, in the background.
+bot.command("pollsend", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const { text, kb } = pollMessage();
+  await broadcastInBackground(
+    ctx,
+    (tgId) => bot.api.sendMessage(tgId, text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } }).then(() => {}),
+    "Опрос",
+  );
+});
+
 bot.command("post", async (ctx) => {
   if (!isAdmin(ctx)) return;
   const replyTo = ctx.message?.reply_to_message;
@@ -3562,31 +3642,16 @@ bot.command("post", async (ctx) => {
       { parse_mode: "HTML" },
     );
   }
-  const status = await ctx.reply("📢 Рассылка запущена…").catch(() => null);
-  const users = await db.botUser.findMany({ select: { tgId: true } });
-  let ok = 0, fail = 0;
-  const chunk = 25; // small parallel batches — polite to Telegram, still fast
-  for (let i = 0; i < users.length; i += chunk) {
-    await Promise.all(
-      users.slice(i, i + chunk).map(async (u) => {
-        try {
-          if (replyTo) {
-            await ctx.api.copyMessage(u.tgId, ctx.chat!.id, replyTo.message_id);
-          } else {
-            await ctx.api.sendMessage(u.tgId, text, { parse_mode: "HTML", link_preview_options: { is_disabled: true } });
-          }
-          ok++;
-        } catch {
-          fail++;
-        }
-      }),
-    );
-    // ~30 msg/s is well under Telegram's global rate limit; small pause per batch.
-    await new Promise((r) => setTimeout(r, 900));
-  }
-  const done = `📢 Готово: доставлено <b>${ok}</b> · не доставлено <b>${fail}</b> (всего ${users.length})`;
-  if (status) await ctx.api.editMessageText(ctx.chat!.id, status.message_id, done, { parse_mode: "HTML" }).catch(() => {});
-  else await ctx.reply(done, { parse_mode: "HTML" }).catch(() => {});
+  const fromChatId = ctx.chat!.id;
+  const replyToId = replyTo?.message_id;
+  await broadcastInBackground(
+    ctx,
+    (tgId) =>
+      replyToId
+        ? ctx.api.copyMessage(tgId, fromChatId, replyToId).then(() => {})
+        : ctx.api.sendMessage(tgId, text, { parse_mode: "HTML", link_preview_options: { is_disabled: true } }).then(() => {}),
+    "Рассылка",
+  );
 });
 
 // Admin broadcast: /sendgifts or /postgifts
@@ -3791,6 +3856,20 @@ bot.on("callback_query:data", async (ctx) => {
   console.log(`[bot] callback from ${ctx.from?.id}: "${data}"`);
   try {
     if (data === "noop") return ctx.answerCallbackQuery();
+    // Bank poll vote — one changeable vote per user, keyed by tgId. Handled
+    // before getUser()/gates so anyone who received the poll can answer.
+    if (data.startsWith("vote:")) {
+      const choice = data.slice(5);
+      const tgId = String(ctx.from?.id ?? "");
+      if (!BANK_KEYS.has(choice) || !tgId) return ctx.answerCallbackQuery().catch(() => {});
+      await db.botPollVote.upsert({
+        where: { tgId },
+        create: { tgId, choice },
+        update: { choice },
+      }).catch(() => {});
+      const bank = BANK_POLL.find((b) => b.key === choice);
+      return ctx.answerCallbackQuery({ text: `✅ Ваш голос за «${bank?.label ?? choice}» учтён. Спасибо!`, show_alert: false }).catch(() => {});
+    }
     if (data === "check_subs") {
       const user = await getUser(ctx);
       const active = await db.requiredChannel.findMany({ where: { isActive: true } });
@@ -4391,6 +4470,14 @@ async function ensureSchema() {
     `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "fragmentKind" TEXT NOT NULL DEFAULT ''`,
     `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "fragmentAmount" INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE "BotOrder" ADD COLUMN IF NOT EXISTS "targetUsername" TEXT`,
+    `CREATE TABLE IF NOT EXISTS "BotPollVote" (
+      "tgId" TEXT NOT NULL,
+      "choice" TEXT NOT NULL,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "BotPollVote_pkey" PRIMARY KEY ("tgId")
+    )`,
+    `CREATE INDEX IF NOT EXISTS "BotPollVote_choice_idx" ON "BotPollVote"("choice")`,
     `ALTER TABLE "TopUp" ADD COLUMN IF NOT EXISTS "deliveredAt" TIMESTAMP(3)`,
     `CREATE TABLE IF NOT EXISTS "PaymeTransaction" (
       "id" TEXT NOT NULL,
