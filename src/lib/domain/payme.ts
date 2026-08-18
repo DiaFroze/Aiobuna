@@ -18,6 +18,9 @@ export const PaymeError = {
   PARSE_ERROR: -32700,
   INVALID_REQUEST: -32600,
   METHOD_NOT_FOUND: -32601,
+  // Internal / system error (our handler threw). Returned as JSON-RPC + HTTP 200
+  // instead of letting a 500 HTML page reach Payme.
+  SYSTEM_ERROR: -32400,
   // Auth
   INSUFFICIENT_PRIVILEGE: -32504,
   // Business
@@ -63,6 +66,7 @@ const MESSAGES: Record<number, Msg> = {
   [PaymeError.METHOD_NOT_FOUND]: msg("Метод не найден", "Metod topilmadi", "Method not found"),
   [PaymeError.INVALID_REQUEST]: msg("Неверный запрос", "Noto'g'ri so'rov", "Invalid request"),
   [PaymeError.PARSE_ERROR]: msg("Ошибка разбора запроса", "So'rovni tahlil qilishda xatolik", "Parse error"),
+  [PaymeError.SYSTEM_ERROR]: msg("Внутренняя ошибка", "Ichki xatolik", "Internal error"),
 };
 
 // Localized message for an error code — never empty. Payme rejects an error

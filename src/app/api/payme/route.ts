@@ -96,10 +96,18 @@ export async function POST(req: Request) {
     return jsonRpc(id, { result: { success: true } });
   }
 
-  const response = await handlePayme(body, prismaPaymeRepo(), authorized);
-  const outcome = "error" in response ? `error ${response.error.code}` : "result";
-  console.log(`[payme] ${method} → ${outcome} | auth=${authorized ? "ok" : why}`);
-  return NextResponse.json(response, { status: 200 });
+  // Any unexpected throw must still come back as JSON-RPC + HTTP 200, never a
+  // 500 HTML page (which Payme's client shows as "[object Object]"). Also
+  // guards NextResponse.json against a stray BigInt.
+  try {
+    const response = await handlePayme(body, prismaPaymeRepo(), authorized);
+    const outcome = "error" in response ? `error ${response.error.code}` : "result";
+    console.log(`[payme] ${method} → ${outcome} | auth=${authorized ? "ok" : why}`);
+    return NextResponse.json(response, { status: 200 });
+  } catch (e) {
+    console.error(`[payme] ${method} threw:`, (e as Error).stack ?? (e as Error).message);
+    return jsonRpc(id, { error: { code: PaymeError.SYSTEM_ERROR, message: paymeMessage(PaymeError.SYSTEM_ERROR) } });
+  }
 }
 
 // A stray GET (health check, someone opening the URL) should not 405-loop.

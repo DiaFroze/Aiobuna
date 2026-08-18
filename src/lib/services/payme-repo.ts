@@ -117,10 +117,17 @@ export function prismaPaymeRepo(): PaymeRepo {
     },
 
     async listByRange(fromMs, toMs) {
-      const rows = await botDb.paymeTransaction.findMany({
-        where: { createTime: { gte: BigInt(fromMs), lte: BigInt(toMs) } },
-      });
-      return rows.map(toView);
+      // GetStatement is for reconciliation; a DB hiccup must not throw a 500 —
+      // return an empty statement, which is a valid response.
+      try {
+        const rows = await botDb.paymeTransaction.findMany({
+          where: { createTime: { gte: BigInt(Math.trunc(fromMs)), lte: BigInt(Math.trunc(toMs)) } },
+        });
+        return rows.map(toView);
+      } catch (e) {
+        console.error("[payme] listByRange failed:", (e as Error).message);
+        return [];
+      }
     },
   };
 }
