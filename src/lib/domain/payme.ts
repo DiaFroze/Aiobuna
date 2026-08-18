@@ -28,6 +28,9 @@ export const PaymeError = {
   // Account-field errors must sit in -31050..-31099 with `data` = field name.
   ACCOUNT_NOT_FOUND: -31050,
   ACCOUNT_NOT_PAYABLE: -31051,
+  // "Another transaction is already processing this account" — Payme's sandbox
+  // expects this in the account-error range too, not the generic -31008.
+  ACCOUNT_IN_PROCESS: -31099,
 } as const;
 
 // ---- transaction states (Payme canonical) -------------------------------
@@ -56,6 +59,7 @@ const MESSAGES: Record<number, Msg> = {
   [PaymeError.CANT_PERFORM]: msg("Невозможно выполнить операцию", "Operatsiyani bajarib bo'lmaydi", "Unable to perform operation"),
   [PaymeError.ACCOUNT_NOT_FOUND]: msg("Пополнение не найдено", "To'ldirish topilmadi", "Top-up not found"),
   [PaymeError.ACCOUNT_NOT_PAYABLE]: msg("Пополнение уже оплачено или отменено", "To'ldirish allaqachon to'langan yoki bekor qilingan", "Top-up already paid or cancelled"),
+  [PaymeError.ACCOUNT_IN_PROCESS]: msg("Пополнение уже обрабатывается другой транзакцией", "To'ldirish boshqa tranzaksiyada", "Top-up is already being processed"),
   [PaymeError.METHOD_NOT_FOUND]: msg("Метод не найден", "Metod topilmadi", "Method not found"),
   [PaymeError.INVALID_REQUEST]: msg("Неверный запрос", "Noto'g'ri so'rov", "Invalid request"),
 };
@@ -175,9 +179,10 @@ async function createTransaction(id: Id, p: any, repo: PaymeRepo): Promise<JsonR
   if (!topup.payable) return err(id, PaymeError.ACCOUNT_NOT_PAYABLE, ACCOUNT_FIELD);
   if (Number(p.amount) !== topup.amountTiyin) return err(id, PaymeError.WRONG_AMOUNT);
 
-  // Another (different) Payme transaction already owns this top-up.
+  // Another (different) Payme transaction already owns this top-up. Payme wants
+  // an account-range error (-31050..-31099) here, not the generic -31008.
   const other = await repo.findTxnByTopUp(topUpId);
-  if (other && other.paymeId !== paymeId) return err(id, PaymeError.CANT_PERFORM);
+  if (other && other.paymeId !== paymeId) return err(id, PaymeError.ACCOUNT_IN_PROCESS, ACCOUNT_FIELD);
 
   // Reject a create whose time is already past the timeout window.
   const createTime = Number(p.time) || repo.now();

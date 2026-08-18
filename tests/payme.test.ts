@@ -148,10 +148,15 @@ describe("CreateTransaction", () => {
     expect(second).toEqual(first);
     expect(repo.txns.size).toBe(1);
   });
-  it("rejects a second Payme id for the same top-up (conflict)", async () => {
+  it("rejects a second Payme id for the same top-up with an account-range error", async () => {
     await create("A");
     const r = await create("B");
-    expect(isErr(r) && r.error.code).toBe(PaymeError.CANT_PERFORM);
+    // -31099 is in Payme's account-error range (-31050..-31099), as the spec
+    // requires for "another transaction is processing this account".
+    expect(isErr(r) && r.error.code).toBe(PaymeError.ACCOUNT_IN_PROCESS);
+    expect(isErr(r) && r.error.code).toBeGreaterThanOrEqual(-31099);
+    expect(isErr(r) && r.error.code).toBeLessThanOrEqual(-31050);
+    expect(isErr(r) && r.error.data).toBe("topup_id");
   });
   it("rejects a wrong amount", async () => {
     const r = await create("A", { amount: 123 });
