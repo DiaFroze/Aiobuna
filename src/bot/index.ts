@@ -16,6 +16,7 @@ import { t, LANGS, LANG_NAMES, normalizeLang, btnVariants, type Lang } from "./i
 import { generateVerificationCode } from "../lib/orderCode";
 import { parseBulkPrices, parseBulkBonus, bulkTotal, bonusQty, bulkSaving, describeBulk } from "../lib/domain/bulk-pricing";
 import { checkUsername } from "../lib/domain/telegram-username";
+import { buildCheckoutUrl, sumToTiyin } from "../lib/domain/payme";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -109,6 +110,13 @@ const ADMIN_ID = String(process.env.TELEGRAM_ADMIN_CHAT_ID ?? "");
 const CARD_PROVIDER_TOKEN = process.env.TELEGRAM_PROVIDER_TOKEN ?? "";
 const STARS_PER_USDT = Number(process.env.STARS_PER_USDT ?? 77);
 const UZS_PER_USDT = Number(process.env.USDT_UZS_RATE ?? 12600);
+// Payme (пополнение баланса, UZS). The webhook lives in the Next.js app; here
+// the bot only offers the button and builds the checkout URL. paymeReady()
+// gates the button so a half-configured merchant can never be shown.
+const PAYME_ENABLED = process.env.PAYME_ENABLED === "1";
+const PAYME_MERCHANT_ID = process.env.PAYME_MERCHANT_ID ?? "";
+const PAYME_CHECKOUT_URL = (process.env.PAYME_CHECKOUT_URL ?? "https://checkout.paycom.uz").replace(/\/+$/, "");
+const paymeReady = () => PAYME_ENABLED && PAYME_MERCHANT_ID !== "";
 if (!token) {
   console.error("[bot] TELEGRAM_BOT_TOKEN is not set in .env — cannot start.");
   process.exit(1);
@@ -1347,6 +1355,7 @@ async function doBuy(ctx: Context, variantId: number, qty: number, targetUsernam
   const kb = new InlineKeyboard()
     .text(t(lang, "pay_receipt"), `tcheck_buy:${shortfall}:${variantId}:${qty}${suffix}`).row()
     .text(t(lang, "pay_stars", { n: stars }), `tstar_buy:${shortfall}:${variantId}:${qty}${suffix}`).row();
+  if (paymeReady()) kb.text(t(lang, "pay_payme"), `tpayme_buy:${shortfall}:${variantId}:${qty}${suffix}`).row();
   if (adminUsername) {
     kb.url(t(lang, "admin_topup"), `https://t.me/${adminUsername}`).row();
   } else {
@@ -1874,6 +1883,7 @@ async function buildTopupMethods(lang: string, amount: number) {
   const kb = new InlineKeyboard()
     .text(t(lang, "pay_receipt"), `tcheck:${amount}`).row()
     .text(t(lang, "pay_stars", { n: stars }), `tstar:${amount}`).row();
+  if (paymeReady()) kb.text(t(lang, "pay_payme"), `tpayme:${amount}`).row();
   if (adminUsername) {
     kb.url(t(lang, "admin_topup"), `https://t.me/${adminUsername}`).row();
   } else {
@@ -1881,6 +1891,38 @@ async function buildTopupMethods(lang: string, amount: number) {
   }
   kb.text(t(lang, "back"), "bal");
   return { text: `${t(lang, "topup_of", { v: money(amount, lang) })}\n\n${t(lang, "choose_method")}`, kb };
+}
+
+// Create a pending Payme top-up and hand the user a checkout button. The
+// pending TopUp's id is the Payme `account[topup_id]`; the balance is credited
+// later, only by the Merchant API webhook. `note` carries an optional
+// `buy:variantId:qty[:username]` so a paid top-up can auto-fulfil a purchase,
+// exactly like the receipt/Stars paths.
+async function startPaymePayment(ctx: Context, lang: string, amount: number, note: string | null = null) {
+  await ctx.answerCallbackQuery().catch(() => {});
+  if (!paymeReady()) return ctx.reply(t(lang, "card_soon")).catch(() => {});
+  const user = await getUser(ctx);
+  const topup = await db.topUp.create({
+    data: {
+      userId: user.id,
+      amount,
+      method: "payme",
+      status: "pending",
+      note,
+      expiresAt: new Date(Date.now() + 30 * 60_000),
+    },
+  });
+  const url = buildCheckoutUrl({
+    checkoutBase: PAYME_CHECKOUT_URL,
+    merchantId: PAYME_MERCHANT_ID,
+    topUpId: topup.id,
+    amountTiyin: sumToTiyin(amount),
+    lang,
+  });
+  const kb = new InlineKeyboard()
+    .url(t(lang, "pay_payme"), url).row()
+    .text(t(lang, "to_shop"), "m:0:all");
+  await ctx.reply(t(lang, "payme_created", { v: money(amount, lang) }), { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
 }
 
 // Card-by-receipt: show card + deadline, then verify the sent receipt with Gemini.
@@ -3899,6 +3941,8 @@ bot.on("callback_query:data", async (ctx) => {
     if (tag === "meth") return viewMethod(ctx, Number(rest[0]));
     if (tag === "mbuy") return buyMethod(ctx, Number(rest[0]));
     if (tag === "top") { await ctx.answerCallbackQuery().catch(() => {}); const b = await buildTopupMethods(lang, Number(rest[0])); await sendOrEdit(ctx, b.text, { reply_markup: b.kb }); return; }
+    if (tag === "tpayme") return startPaymePayment(ctx, lang, Number(rest[0]));
+    if (tag === "tpayme_buy") return startPaymePayment(ctx, lang, Number(rest[0]), `buy:${rest[1]}:${rest[2]}${rest[3] ? `:${rest[3]}` : ""}`);
     if (tag === "tstar") return starsInvoice(ctx, lang, Number(rest[0]));
     if (tag === "tcheck") return startReceiptPayment(ctx, lang, Number(rest[0]));
     if (tag === "tcard") return cardInvoice(ctx, lang, Number(rest[0]));
@@ -4296,6 +4340,24 @@ async function ensureSchema() {
     `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "fragmentKind" TEXT NOT NULL DEFAULT ''`,
     `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "fragmentAmount" INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE "BotOrder" ADD COLUMN IF NOT EXISTS "targetUsername" TEXT`,
+    `ALTER TABLE "TopUp" ADD COLUMN IF NOT EXISTS "deliveredAt" TIMESTAMP(3)`,
+    `CREATE TABLE IF NOT EXISTS "PaymeTransaction" (
+      "id" TEXT NOT NULL,
+      "paymeId" TEXT NOT NULL,
+      "topUpId" INTEGER NOT NULL,
+      "amountTiyin" INTEGER NOT NULL,
+      "state" INTEGER NOT NULL DEFAULT 1,
+      "createTime" BIGINT NOT NULL DEFAULT 0,
+      "performTime" BIGINT NOT NULL DEFAULT 0,
+      "cancelTime" BIGINT NOT NULL DEFAULT 0,
+      "reason" INTEGER,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "PaymeTransaction_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "PaymeTransaction_paymeId_key" ON "PaymeTransaction"("paymeId")`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "PaymeTransaction_topUpId_key" ON "PaymeTransaction"("topUpId")`,
+    `CREATE INDEX IF NOT EXISTS "PaymeTransaction_state_idx" ON "PaymeTransaction"("state")`,
     `CREATE TABLE IF NOT EXISTS "ChannelJoinRequest" (
       "id" SERIAL NOT NULL,
       "chatId" TEXT NOT NULL,
@@ -4421,10 +4483,61 @@ async function maybeResetAdmins() {
   }
 }
 
+// Delivery side of Payme: the webhook (Next.js process) already credited the
+// balance and marked the TopUp approved; it cannot talk to Telegram or run
+// fulfilment. This poller, in the bot process, notifies the user and runs any
+// `buy:` auto-purchase, exactly once. It claims each row by stamping
+// deliveredAt under a `deliveredAt IS NULL` guard, so overlapping ticks (or a
+// restart mid-batch) never double-deliver. Money is never touched here.
+async function deliverPaidPaymeTopUps() {
+  const pendingDelivery = await db.topUp.findMany({
+    where: { method: "payme", status: "approved", deliveredAt: null },
+    take: 20,
+  }).catch(() => [] as Array<{ id: number; userId: number; amount: number; note: string | null }>);
+
+  for (const topup of pendingDelivery) {
+    // Atomic claim — only the tick that flips deliveredAt proceeds.
+    const claim = await db.topUp.updateMany({
+      where: { id: topup.id, method: "payme", status: "approved", deliveredAt: null },
+      data: { deliveredAt: new Date() },
+    }).catch(() => ({ count: 0 }));
+    if (claim.count !== 1) continue;
+
+    try {
+      const user = await db.botUser.findUnique({ where: { id: topup.userId } });
+      if (!user) continue;
+      const lang = user.lang;
+      await bot.api.sendMessage(
+        user.tgId,
+        t(lang, "paid_received", { v: money(topup.amount, lang), b: money(user.balance, lang) }),
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all") },
+      ).catch(() => {});
+      if (ADMIN_ID) {
+        await bot.api.sendMessage(ADMIN_ID, `💰 (payme) ${money(topup.amount, lang)} — ${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})`).catch(() => {});
+      }
+      // buy:variantId:qty[:username] → fulfil the purchase from the fresh balance.
+      if (topup.note && topup.note.startsWith("buy:")) {
+        const [, varIdStr, qtyStr, uname] = topup.note.split(":");
+        const variantId = Number(varIdStr);
+        const qty = Number(qtyStr);
+        if (variantId && qty) {
+          await executePurchase(user.tgId, variantId, qty, undefined, uname || undefined).catch((e) => {
+            console.error("[bot] payme auto-purchase fail:", (e as Error).message);
+          });
+        }
+      }
+    } catch (e) {
+      console.error("[bot] payme delivery failed:", (e as Error).message);
+    }
+  }
+}
+
 async function bootstrap() {
   await ensureSchema();             // create missing tables before serving anything
   await backfillChannelVerified();  // one-time referral verification backfill (guarded)
   await maybeResetAdmins();         // one-time admin reset (guarded)
+  // Poll for Payme top-ups the webhook credited, to notify + fulfil them.
+  setInterval(() => { deliverPaidPaymeTopUps().catch(() => {}); }, 12_000);
   await bot.start({
     drop_pending_updates: false,
     allowed_updates: [

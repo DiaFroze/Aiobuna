@@ -28,4 +28,20 @@ export const env = {
   // Optional: auto-provision the Vex reseller supplier on seed.
   vexApiUrl: () => process.env.VEX_API_URL ?? "",
   vexApiKey: () => process.env.VEX_API_KEY ?? "",
+
+  // --- Payme Merchant API (bot balance top-ups, UZS) ---
+  // PAYME_ENABLED gates the whole feature: while "0"/unset the bot shows no
+  // Payme button and the webhook rejects everything, so half-configured
+  // credentials can never take a real payment.
+  paymeEnabled: () => process.env.PAYME_ENABLED === "1",
+  // Cashbox (merchant) id from your Payme merchant cabinet.
+  paymeMerchantId: () => process.env.PAYME_MERCHANT_ID ?? "",
+  // Merchant KEY used for webhook Basic-auth (username is literally "Paycom").
+  // Payme issues a separate test key and production key — set the one that
+  // matches PAYME_CHECKOUT_URL. Never logged.
+  paymeKey: () => process.env.PAYME_KEY ?? "",
+  // https://checkout.paycom.uz for production, https://checkout.test.paycom.uz
+  // for the sandbox. Trailing slash optional.
+  paymeCheckoutUrl: () =>
+    (process.env.PAYME_CHECKOUT_URL ?? "https://checkout.paycom.uz").replace(/\/+$/, ""),
 };

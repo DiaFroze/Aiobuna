@@ -748,7 +748,42 @@ model TopUp {
   expiresAt  DateTime?
   receiptFileId String?
   txnRef     String?
+  // Set by the bot's delivery poller once an APPROVED top-up has been acted on
+  // (user notified + any `buy:` auto-purchase run). Crediting the balance is
+  // NOT done here — that happens once, in the Payme webhook. This flag only
+  // guards the delivery side effects so the bot runs them exactly once.
+  deliveredAt DateTime?
+  paymeTxn   PaymeTransaction?
   createdAt  DateTime @default(now())
+}
+
+// One row per Payme Merchant API transaction. The state here — not the browser
+// redirect — is the source of truth for whether money moved. See
+// src/lib/domain/payme.ts for the state machine and docs/PAYME_SETUP.md.
+model PaymeTransaction {
+  id          String   @id @default(cuid())
+  // Payme's own transaction id (params.id in CreateTransaction). Unique so a
+  // retried CreateTransaction/PerformTransaction can never fork into two rows.
+  paymeId     String   @unique
+  // The TopUp being paid for (Payme `account[topup_id]`). One-to-one: a top-up
+  // can have at most one Payme transaction, which blocks double-charging.
+  topUpId     Int      @unique
+  topUp       TopUp    @relation(fields: [topUpId], references: [id], onDelete: Cascade)
+  // Authoritative amount in TIYIN (UZS x 100), integer — never float money.
+  amountTiyin Int
+  // Payme state: 1 created, 2 performed (paid), -1 cancelled, -2 cancelled
+  // after perform.
+  state       Int      @default(1)
+  // Payme timestamps are ms-epoch integers; 0 means "not yet".
+  createTime  BigInt   @default(0)
+  performTime BigInt   @default(0)
+  cancelTime  BigInt   @default(0)
+  // CancelTransaction reason code, when cancelled.
+  reason      Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([state])
 }
 
 model RequiredChannel {
