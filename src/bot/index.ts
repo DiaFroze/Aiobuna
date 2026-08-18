@@ -297,6 +297,8 @@ async function availableReferralPoints(user: { id: number; tgId: string; bonusRe
 function styleFor(data?: string): "primary" | "success" | "danger" | undefined {
   if (data === "noop") return undefined;
   if (!data) return "primary";
+  const bank = BANK_STYLE.get(data); // per-bank poll colour
+  if (bank) return bank;
   if (/^(bc:|tstar|tcard|tman|ap:|top:)/.test(data)) return "success";
   if (/^rj:/.test(data)) return "danger";
   return "primary";
@@ -3588,21 +3590,33 @@ async function broadcastInBackground(
 // ---------- bank poll ----------
 // Premium-emoji ids supplied by the admin, one per bank. The base emoji is the
 // fallback if a premium one ever becomes invalid (the API transformer strips it).
-const BANK_POLL: Array<{ key: string; label: string; emoji: string; premium: string }> = [
-  { key: "payme", label: "Payme", emoji: "💸", premium: "5204128408463744787" },
-  { key: "click", label: "Click", emoji: "⭐️", premium: "5350345287246311562" },
-  { key: "paynet", label: "PAYNET", emoji: "🍇", premium: "5281003701677334497" },
-  { key: "uzum", label: "Uzum Bank", emoji: "💸", premium: "5474339588627509561" },
+const BANK_POLL: Array<{ key: string; label: string; emoji: string; premium: string; style: "primary" | "success" | "danger" }> = [
+  // PAYNET and Uzum premium ids were swapped — 🍇 (grape) belongs to Uzum.
+  // `style` is the button colour; Telegram only offers primary/success/danger
+  // (blue/green/red), so exact brand colours (purple, light blue) aren't
+  // possible — the premium emoji carries each bank's identity instead.
+  { key: "payme", label: "Payme", emoji: "💳", premium: "5204128408463744787", style: "primary" as const },
+  { key: "click", label: "Click", emoji: "⭐️", premium: "5350345287246311562", style: "primary" as const },
+  { key: "paynet", label: "PAYNET", emoji: "🟢", premium: "5474339588627509561", style: "success" as const },
+  { key: "uzum", label: "Uzum Bank", emoji: "🍇", premium: "5281003701677334497", style: "primary" as const },
 ];
 const BANK_KEYS = new Set(BANK_POLL.map((b) => b.key));
+// vote:<key> → button colour, read by styleFor() in the API transformer.
+const BANK_STYLE = new Map(BANK_POLL.map((b) => [`vote:${b.key}`, b.style]));
+
+// Premium (animated) emoji for the poll header and the arrow, supplied by admin.
+const POLL_HEADER_EMOJI = { emoji: "⭐️", id: "5359512328003941083" };
+const POLL_ARROW_EMOJI = { emoji: "⬇️", id: "5771449161123631882" };
 
 function pollMessage(): { text: string; kb: InlineKeyboard } {
   const kb = new InlineKeyboard();
   for (const b of BANK_POLL) kb.text(b.label, `vote:${b.key}`).icon(b.premium).row();
+  const head = emojiIcon(POLL_HEADER_EMOJI.emoji, POLL_HEADER_EMOJI.id);
+  const arrow = emojiIcon(POLL_ARROW_EMOJI.emoji, POLL_ARROW_EMOJI.id);
   const text =
-    "💳 <b>Каким банком вы чаще всего пользуетесь?</b>\n\n" +
-    "Помогите нам стать удобнее — выберите ваш вариант ниже 👇\n\n" +
-    "<i>Голос можно изменить в любой момент.</i>";
+    `${head} <b>Qaysi bankdan ko'proq foydalanasiz?</b>\n\n` +
+    `Xizmatimizni yanada qulay qilishga yordam bering — quyidan o'zingizga mosini tanlang ${arrow}\n\n` +
+    `<i>Ovozingizni istalgan vaqtda o'zgartirishingiz mumkin.</i>`;
   return { text, kb };
 }
 

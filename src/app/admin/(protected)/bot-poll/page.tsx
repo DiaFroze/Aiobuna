@@ -6,10 +6,10 @@ export const dynamic = "force-dynamic";
 
 // Must match BANK_POLL in src/bot/index.ts.
 const BANKS: { key: string; label: string; emoji: string }[] = [
-  { key: "payme", label: "Payme", emoji: "💸" },
+  { key: "payme", label: "Payme", emoji: "💳" },
   { key: "click", label: "Click", emoji: "⭐️" },
-  { key: "paynet", label: "PAYNET", emoji: "🍇" },
-  { key: "uzum", label: "Uzum Bank", emoji: "💸" },
+  { key: "paynet", label: "PAYNET", emoji: "🟢" },
+  { key: "uzum", label: "Uzum Bank", emoji: "🍇" },
 ];
 
 export default async function BotPollPage() {
