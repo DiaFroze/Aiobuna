@@ -113,10 +113,13 @@ const UZS_PER_USDT = Number(process.env.USDT_UZS_RATE ?? 12600);
 // Payme (пополнение баланса, UZS). The webhook lives in the Next.js app; here
 // the bot only offers the button and builds the checkout URL. paymeReady()
 // gates the button so a half-configured merchant can never be shown.
+function isAdmin(ctx: Context) {
+  return ADMIN_ID !== "" && String(ctx.from?.id) === ADMIN_ID;
+}
 const PAYME_ENABLED = process.env.PAYME_ENABLED === "1";
 const PAYME_MERCHANT_ID = process.env.PAYME_MERCHANT_ID ?? "";
 const PAYME_CHECKOUT_URL = (process.env.PAYME_CHECKOUT_URL ?? "https://checkout.paycom.uz").replace(/\/+$/, "");
-const paymeReady = () => PAYME_ENABLED && PAYME_MERCHANT_ID !== "";
+const paymeReady = (ctx?: Context) => PAYME_ENABLED && PAYME_MERCHANT_ID !== "" && (!ctx || isAdmin(ctx));
 if (!token) {
   console.error("[bot] TELEGRAM_BOT_TOKEN is not set in .env — cannot start.");
   process.exit(1);
@@ -215,7 +218,6 @@ function emojiIcon(emoji: string, premiumCode: string | null | undefined): strin
   return premiumCode ? `<tg-emoji emoji-id="${premiumCode}">${e}</tg-emoji>` : e;
 }
 const nextSort = (s: Sort): Sort => SORTS[(SORTS.indexOf(s) + 1) % SORTS.length];
-const isAdmin = (ctx: Context) => ADMIN_ID !== "" && String(ctx.from?.id) === ADMIN_ID;
 const soumToStars = (soum: number) => Math.max(1, Math.round((soum * STARS_PER_USDT) / UZS_PER_USDT));
 const clamp = (n: number, lo: number, hi: number) => Math.min(Math.max(lo, n), hi);
 
@@ -1355,7 +1357,7 @@ async function doBuy(ctx: Context, variantId: number, qty: number, targetUsernam
   const kb = new InlineKeyboard()
     .text(t(lang, "pay_receipt"), `tcheck_buy:${shortfall}:${variantId}:${qty}${suffix}`).row()
     .text(t(lang, "pay_stars", { n: stars }), `tstar_buy:${shortfall}:${variantId}:${qty}${suffix}`).row();
-  if (paymeReady()) kb.text(t(lang, "pay_payme"), `tpayme_buy:${shortfall}:${variantId}:${qty}${suffix}`).row();
+  if (paymeReady(ctx)) kb.text(t(lang, "pay_payme"), `tpayme_buy:${shortfall}:${variantId}:${qty}${suffix}`).row();
   if (adminUsername) {
     kb.url(t(lang, "admin_topup"), `https://t.me/${adminUsername}`).row();
   } else {
@@ -1877,13 +1879,13 @@ async function showGiftItem(ctx: Context, variantId: number) {
 }
 
 // ---------- top-up ----------
-async function buildTopupMethods(lang: string, amount: number) {
+async function buildTopupMethods(lang: string, amount: number, ctx?: Context) {
   const stars = soumToStars(amount);
   const adminUsername = (await setting("support_username", "")).replace(/^@/, "");
   const kb = new InlineKeyboard()
     .text(t(lang, "pay_receipt"), `tcheck:${amount}`).row()
     .text(t(lang, "pay_stars", { n: stars }), `tstar:${amount}`).row();
-  if (paymeReady()) kb.text(t(lang, "pay_payme"), `tpayme:${amount}`).row();
+  if (paymeReady(ctx)) kb.text(t(lang, "pay_payme"), `tpayme:${amount}`).row();
   if (adminUsername) {
     kb.url(t(lang, "admin_topup"), `https://t.me/${adminUsername}`).row();
   } else {
@@ -1900,7 +1902,7 @@ async function buildTopupMethods(lang: string, amount: number) {
 // exactly like the receipt/Stars paths.
 async function startPaymePayment(ctx: Context, lang: string, amount: number, note: string | null = null) {
   await ctx.answerCallbackQuery().catch(() => {});
-  if (!paymeReady()) return ctx.reply(t(lang, "card_soon")).catch(() => {});
+  if (!paymeReady(ctx)) return ctx.reply("Пополнение через Payme доступно только для администратора.").catch(() => {});
   const user = await getUser(ctx);
   const topup = await db.topUp.create({
     data: {
@@ -3940,7 +3942,7 @@ bot.on("callback_query:data", async (ctx) => {
     if (tag === "gi") return showGiftItem(ctx, Number(rest[0]));
     if (tag === "meth") return viewMethod(ctx, Number(rest[0]));
     if (tag === "mbuy") return buyMethod(ctx, Number(rest[0]));
-    if (tag === "top") { await ctx.answerCallbackQuery().catch(() => {}); const b = await buildTopupMethods(lang, Number(rest[0])); await sendOrEdit(ctx, b.text, { reply_markup: b.kb }); return; }
+    if (tag === "top") { await ctx.answerCallbackQuery().catch(() => {}); const b = await buildTopupMethods(lang, Number(rest[0]), ctx); await sendOrEdit(ctx, b.text, { reply_markup: b.kb }); return; }
     if (tag === "tpayme") return startPaymePayment(ctx, lang, Number(rest[0]));
     if (tag === "tpayme_buy") return startPaymePayment(ctx, lang, Number(rest[0]), `buy:${rest[1]}:${rest[2]}${rest[3] ? `:${rest[3]}` : ""}`);
     if (tag === "tstar") return starsInvoice(ctx, lang, Number(rest[0]));
@@ -4096,7 +4098,7 @@ bot.on("message:text", async (ctx) => {
     return showQtyChooser(ctx, state.variantId, n, state.back, false);
   }
   if (!Number.isFinite(n) || n < MIN_TOPUP) return ctx.reply(t(lang, "min_amount", { min: money(MIN_TOPUP, lang) }));
-  const b = await buildTopupMethods(lang, n);
+  const b = await buildTopupMethods(lang, n, ctx);
   return ctx.reply(b.text, { parse_mode: "HTML", reply_markup: b.kb });
 });
 
