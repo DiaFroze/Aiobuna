@@ -1,6 +1,6 @@
 import { botDb, botConfigured } from "@/lib/botDb";
 import { PageHeader, Table, EmptyState, StatCard } from "@/components/admin/ui";
-import { approveTopUpAction, rejectTopUpAction, manualCreditAction, createPaymeTestInvoiceAction } from "./actions";
+import { approveTopUpAction, rejectTopUpAction, manualCreditAction, createPaymeTestInvoiceAction, resetPaymeKeyAction } from "./actions";
 
 export const dynamic = "force-dynamic";
 
@@ -81,6 +81,18 @@ export default async function BotTopUpsPage() {
         <p className="text-xs text-muted w-full">
           Создаст ожидающее Payme-пополнение. Ниже появится строка с готовыми числами для песочницы.
         </p>
+      </form>
+
+      {/* Reset the Payme key after a ChangePassword sandbox test. */}
+      <form action={resetPaymeKeyAction} className="card p-4 flex flex-wrap items-center gap-3 border-warning/30 bg-warning/5">
+        <div className="flex-1 min-w-[16rem]">
+          <div className="text-sm font-semibold">🔑 Сбросить ключ Payme</div>
+          <p className="text-xs text-muted">
+            Нажмите, если после теста <b>ChangePassword</b> обычные тесты начали возвращать
+            <code> -32504</code> «Недостаточно привилегий». Вернёт ключ к <code>PAYME_KEY</code>.
+          </p>
+        </div>
+        <button className="btn-ghost text-sm">Сбросить ключ</button>
       </form>
 
       {pendingPayme.length > 0 && (

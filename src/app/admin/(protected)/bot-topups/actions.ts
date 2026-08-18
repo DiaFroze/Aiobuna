@@ -83,6 +83,20 @@ export async function createPaymeTestInvoiceAction(formData: FormData) {
   revalidatePath("/admin/bot-topups");
 }
 
+/**
+ * Reset the Payme merchant key back to PAYME_KEY (env) by clearing any key set
+ * via a ChangePassword sandbox test. The ChangePassword test rotates the key
+ * and stores the new one; when you then run other test groups the sandbox
+ * authenticates with the original cabinet key again, so auth fails with -32504
+ * until this override is cleared.
+ */
+export async function resetPaymeKeyAction() {
+  const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
+  await botDb.setting.deleteMany({ where: { key: "payme_password" } });
+  await audit({ adminId: admin.id, action: "bot.payme.keyreset", entityType: "BotSetting", entityId: "payme_password" });
+  revalidatePath("/admin/bot-topups");
+}
+
 /** Manually credit (or debit with a negative amount) a user's balance by tgId. */
 export async function manualCreditAction(formData: FormData) {
   const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
