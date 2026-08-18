@@ -204,6 +204,13 @@ export async function updateVariantAction(formData: FormData) {
       pointsCost: Math.max(0, Math.round(num(formData.get("pointsCost")))),
       bulkPrices,
       bulkBonus,
+      needsUsername: formData.get("needsUsername") === "on",
+      // Only "stars" and "premium" reach the DB — an unexpected value would
+      // silently disable the Fragment block in the admin's delivery task.
+      fragmentKind: ["stars", "premium"].includes(str(formData.get("fragmentKind")))
+        ? str(formData.get("fragmentKind"))
+        : "",
+      fragmentAmount: Math.max(0, Math.round(num(formData.get("fragmentAmount")))),
       manualDelivery: manual,
       manualStockLimit,
       isActive: formData.get("isActive") === "on",

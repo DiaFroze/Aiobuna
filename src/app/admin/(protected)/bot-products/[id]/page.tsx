@@ -180,6 +180,38 @@ export default async function BotProductEditPage({ params }: { params: { id: str
                       <button formAction={deleteVariantAction} className="btn-danger text-xs px-3">✕</button>
                     </div>
 
+                    {/* Stars / Premium — delivered to a Telegram account */}
+                    <div className="col-span-2 md:col-span-12 grid md:grid-cols-3 gap-2 pt-2 mt-1 border-t">
+                      <label className="flex items-center gap-2 text-xs" title="Спросить @username получателя ДО оплаты">
+                        <input type="checkbox" name="needsUsername" defaultChecked={v.needsUsername} />
+                        👤 Спрашивать @username
+                      </label>
+                      <div>
+                        <label className="text-[11px] text-muted">Тип Fragment</label>
+                        <select name="fragmentKind" defaultValue={v.fragmentKind} className="input mt-1 text-sm">
+                          <option value="">— обычный товар —</option>
+                          <option value="stars">⭐ Telegram Stars</option>
+                          <option value="premium">💎 Telegram Premium</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-[11px] text-muted">Кол-во (звёзд / месяцев)</label>
+                        <input
+                          name="fragmentAmount"
+                          type="number"
+                          min="0"
+                          defaultValue={v.fragmentAmount}
+                          className="input mt-1 text-sm"
+                          placeholder="100"
+                        />
+                      </div>
+                      <p className="md:col-span-3 text-[10px] text-muted">
+                        Для Stars — количество звёзд (например 100). Для Premium — только 3, 6 или 12 месяцев,
+                        других сроков Fragment не даёт. Включите «Спрашивать @username» и «выдача админом»:
+                        бот соберёт получателя до оплаты и пришлёт вам готовое задание на выдачу.
+                      </p>
+                    </div>
+
                     {/* Quantity deals — full width under the main row */}
                     <div className="col-span-2 md:col-span-12 grid md:grid-cols-2 gap-2 pt-2 mt-1 border-t">
                       <div>

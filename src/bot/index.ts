@@ -15,6 +15,7 @@ import { geminiTranslate } from "../lib/gemini";
 import { t, LANGS, LANG_NAMES, normalizeLang, btnVariants, type Lang } from "./i18n";
 import { generateVerificationCode } from "../lib/orderCode";
 import { parseBulkPrices, parseBulkBonus, bulkTotal, bonusQty, bulkSaving, describeBulk } from "../lib/domain/bulk-pricing";
+import { checkUsername } from "../lib/domain/telegram-username";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -132,6 +133,7 @@ const pending = new Map<
   | { type: "formatter_index" }
   | { type: "formatter_links"; startIndex: number; collectedLinks?: string[]; timeoutId?: any }
   | { type: "reject_custom_reason"; topupId: number }
+  | { type: "target_username"; variantId: number; qty: number }
 >();
 
 const bot = new Bot(token);
@@ -945,7 +947,7 @@ async function refundRefPoints(userId: number, points: number | undefined) {
   ).catch((e) => console.error("[bot] refundRefPoints failed:", (e as Error).message));
 }
 
-async function executePurchase(tgId: string, variantId: number, qty: number, refPointsCost?: number) {
+async function executePurchase(tgId: string, variantId: number, qty: number, refPointsCost?: number, targetUsername?: string) {
   const isRefGift = refPointsCost !== undefined && refPointsCost > 0;
   const user = await db.botUser.findUnique({ where: { tgId } });
   if (!user) return;
@@ -1002,7 +1004,7 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
       if (!isRefGift && total > 0) {
         await tx.botUser.update({ where: { id: user.id }, data: { balance: { decrement: total } } });
       }
-      const order = await tx.botOrder.create({ data: { userId: user.id, variantId, titleRu: label, priceUsdt: 0, payload: "", source: isRefGift ? "referral" : "manual", status: "awaiting_delivery" } });
+      const order = await tx.botOrder.create({ data: { userId: user.id, variantId, titleRu: label, priceUsdt: 0, payload: "", source: isRefGift ? "referral" : "manual", status: "awaiting_delivery", targetUsername: targetUsername ?? null } });
       return { orderId: order.id };
     });
 
@@ -1029,13 +1031,24 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
     ).catch(() => {});
 
     if (ADMIN_ID) {
+      // For a Fragment item the recipient is the whole job — put it on its own
+      // line, copyable, with the exact quantity to buy, so it can be pasted
+      // straight into Fragment without re-reading the order.
+      const fragmentBlock = v.needsUsername
+        ? `\n🎯 <b>ВЫДАТЬ НА FRAGMENT</b>\n` +
+          `Получатель: <code>${esc(targetUsername ?? "—")}</code>\n` +
+          (v.fragmentKind === "stars" ? `Купить: <b>${v.fragmentAmount * finalQty} Stars</b>\n`
+           : v.fragmentKind === "premium" ? `Купить: <b>Premium ${v.fragmentAmount} мес.</b>\n`
+           : "") +
+          `\nПосле выдачи: <code>/give ${reserve.orderId} выдано</code>\n`
+        : `\nВыдать: <code>/give ${reserve.orderId} логин:пароль</code>`;
       await bot.api.sendMessage(
         ADMIN_ID,
         `📦 <b>Ручная выдача (${isRefGift ? "🎁 подарок" : "заказ"}, #${reserve.orderId})</b>\n` +
         `Товар: ${esc(label)} — ${isRefGift ? `${refPointsCost} реф.` : money(total, lang)}\n` +
         `Покупатель: ${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})\n` +
-        `Код проверки: <code>${code}</code>\n\n` +
-        `Выдать: <code>/give ${reserve.orderId} логин:пароль</code>`,
+        `Код проверки: <code>${code}</code>\n` +
+        fragmentBlock,
         { parse_mode: "HTML" }
       ).catch(() => {});
     }
@@ -1066,6 +1079,7 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
         payload: "", // populated below as we gather items
         source: isRefGift ? "referral" : "hybrid", // stock + supplier
         status: "processing",
+        targetUsername: targetUsername ?? null,
       },
     });
     return { orderId: order.id, order };
@@ -1275,11 +1289,25 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
   }
 }
 
-async function doBuy(ctx: Context, variantId: number, qty: number) {
+// Ask who the goods are for. Runs BEFORE any money moves: a Fragment transfer
+// lands on whatever username it is given and cannot be reversed, so the buyer
+// gets to see and confirm the recipient while they can still change it.
+async function askTargetUsername(ctx: Context, v: { id: number; titleRu: string; titleUz: string; plan: { product: { titleRu: string; titleEn: string; titleUz: string } } }, qty: number, lang: string) {
+  const pt = await pick3(v.plan.product.titleRu, v.plan.product.titleEn, v.plan.product.titleUz, lang);
+  const vt = await locName(v.titleRu, v.titleUz, lang);
+  const item = `📦 <b>${esc(formatItemTitle(pt, vt))}</b>${qty > 1 ? ` ×${qty}` : ""}`;
+  pending.set(String(ctx.from?.id), { type: "target_username", variantId: v.id, qty });
+  await ctx.answerCallbackQuery().catch(() => {});
+  await ctx.reply(t(lang, "uname_ask", { item }), { parse_mode: "HTML" }).catch(() => {});
+}
+
+async function doBuy(ctx: Context, variantId: number, qty: number, targetUsername?: string) {
   const user = await getUser(ctx);
   const lang = user.lang;
   const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
   if (!v || !v.isActive) return ctx.answerCallbackQuery({ text: t(lang, "plan_unavailable"), show_alert: true });
+  // Stars / Premium need a recipient before anything else happens.
+  if (v.needsUsername && !targetUsername) return askTargetUsername(ctx, v, qty, lang);
   const pt = await pick3(v.plan.product.titleRu, v.plan.product.titleEn, v.plan.product.titleUz, lang);
   const vt = await locName(v.titleRu, v.titleUz, lang);
   const baseTitle = `${pt} — ${vt}`;
@@ -1301,7 +1329,7 @@ async function doBuy(ctx: Context, variantId: number, qty: number) {
   // Enough balance -> execute purchase immediately
   if (user.balance >= total) {
     await ctx.answerCallbackQuery({ text: t(lang, "paid_toast") }).catch(() => {});
-    await executePurchase(user.tgId, variantId, qty);
+    await executePurchase(user.tgId, variantId, qty, undefined, targetUsername);
     return;
   }
 
@@ -1312,18 +1340,23 @@ async function doBuy(ctx: Context, variantId: number, qty: number) {
   const stars = soumToStars(shortfall);
   const adminUsername = (await setting("support_username", "")).replace(/^@/, "");
 
+  // The recipient rides along in the payment note so it survives the top-up
+  // round-trip and is still attached when the admin approves the receipt.
+  // Usernames can't contain ":", so the colon-separated note stays parseable.
+  const suffix = targetUsername ? `:${targetUsername}` : "";
   const kb = new InlineKeyboard()
-    .text(t(lang, "pay_receipt"), `tcheck_buy:${shortfall}:${variantId}:${qty}`).row()
-    .text(t(lang, "pay_stars", { n: stars }), `tstar_buy:${shortfall}:${variantId}:${qty}`).row();
+    .text(t(lang, "pay_receipt"), `tcheck_buy:${shortfall}:${variantId}:${qty}${suffix}`).row()
+    .text(t(lang, "pay_stars", { n: stars }), `tstar_buy:${shortfall}:${variantId}:${qty}${suffix}`).row();
   if (adminUsername) {
     kb.url(t(lang, "admin_topup"), `https://t.me/${adminUsername}`).row();
   } else {
-    kb.text(t(lang, "via_admin"), `tman_buy:${shortfall}:${variantId}:${qty}`).row();
+    kb.text(t(lang, "via_admin"), `tman_buy:${shortfall}:${variantId}:${qty}${suffix}`).row();
   }
   kb.text(t(lang, "back"), `q:${v.id}:${qty}:0:all`);
 
   const promptText = `👛 <b>Недостаточно средств.</b>\n\n` +
     `Цена <b>${esc(label)}</b>: <b>${money(total, lang)}</b>.\n\n` +
+    (targetUsername ? `${t(lang, "uname_for")}: <b>@${esc(targetUsername)}</b>\n\n` : "") +
     `У вас на балансе: <b>${money(user.balance, lang)}</b>.\n` +
     `Осталось доплатить: <b>${money(shortfall, lang)}</b>.\n\n` +
     `Пожалуйста, выберите способ оплаты — после зачисления покупка оформится автоматически:`;
@@ -1887,8 +1920,9 @@ async function handleReceiptPhoto(ctx: Context, fileId: string) {
     const kb = new InlineKeyboard().text("✅ Зачислить", `ap:${topup.id}`).text("❌ Отклонить", `rj:${topup.id}`);
     let adminText = `🧾 Новый чек на оплату #${topup.id}\nСумма: ${money(topup.amount, lang)}\nПокупатель: ${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})\nПроверьте чек и зачислите или отклоните:`;
     if (topup.note && topup.note.startsWith("buy:")) {
-      const [, varIdStr, qtyStr] = topup.note.split(":");
+      const [, varIdStr, qtyStr, uname] = topup.note.split(":");
       adminText += `\n🛒 Покупка товара (ID варианта: ${varIdStr}, Кол-во: ${qtyStr})`;
+      if (uname) adminText += `\n🎯 Получатель: @${uname}`;
     }
     await ctx.api.sendMessage(ADMIN_ID, adminText, { reply_markup: kb }).catch(() => {});
     await ctx.api.sendPhoto(ADMIN_ID, fileId).catch(() => {});
@@ -1918,8 +1952,9 @@ async function requestTopUp(ctx: Context, lang: string, amount: number, method =
   
   let adminText = `💳 #${topup.id} ${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})\n${money(amount, lang)}`;
   if (note && note.startsWith("buy:")) {
-    const [, varIdStr, qtyStr] = note.split(":");
+    const [, varIdStr, qtyStr, uname] = note.split(":");
     adminText += `\n🛒 Покупка товара (ID варианта: ${varIdStr}, Кол-во: ${qtyStr})`;
+    if (uname) adminText += `\n🎯 Получатель: @${uname}`;
   }
 
   await ctx.reply(t(lang, "topup_created", { v: money(amount, lang), id: topup.id }), { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all") }).catch(() => {});
@@ -1929,11 +1964,11 @@ async function requestTopUp(ctx: Context, lang: string, amount: number, method =
   }
 }
 
-async function creditPaidTopUp(ctx: Context, amount: number, method: string, chargeId: string, variantId?: number, qty?: number) {
+async function creditPaidTopUp(ctx: Context, amount: number, method: string, chargeId: string, variantId?: number, qty?: number, targetUsername?: string) {
   const user = await getUser(ctx);
   const lang = user.lang;
-  
-  const note = (variantId && qty) ? `buy:${variantId}:${qty}` : null;
+
+  const note = (variantId && qty) ? `buy:${variantId}:${qty}${targetUsername ? `:${targetUsername}` : ""}` : null;
 
   await db.$transaction([
     db.botUser.update({ where: { id: user.id }, data: { balance: { increment: amount } } }),
@@ -1944,7 +1979,7 @@ async function creditPaidTopUp(ctx: Context, amount: number, method: string, cha
   if (ADMIN_ID) await ctx.api.sendMessage(ADMIN_ID, `💰 (${method}) ${money(amount, lang)} — ${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})`).catch(() => {});
 
   if (variantId && qty) {
-    await executePurchase(user.tgId, variantId, qty).catch((err) => {
+    await executePurchase(user.tgId, variantId, qty, undefined, targetUsername).catch((err) => {
       console.error("[bot] creditPaidTopUp auto-purchase fail:", err.message);
     });
   }
@@ -2084,13 +2119,14 @@ async function resolveTopUp(ctx: Context, id: number, approve: boolean) {
     await ctx.editMessageText(`✅ #${id} +${money(topup.amount, ulang)}`).catch(() => {});
     await ctx.api.sendMessage(topup.user.tgId, t(ulang, "paid_received", { v: money(topup.amount, ulang), b: "" }).split("\n")[0]).catch(() => {});
 
-    // Auto-purchase on approval if there is an associated note
+    // Auto-purchase on approval if there is an associated note. The 4th part,
+    // when present, is the Stars/Premium recipient captured before payment.
     if (topup.note && topup.note.startsWith("buy:")) {
-      const [, varIdStr, qtyStr] = topup.note.split(":");
+      const [, varIdStr, qtyStr, uname] = topup.note.split(":");
       const variantId = Number(varIdStr);
       const qty = Number(qtyStr);
       if (variantId && qty) {
-        await executePurchase(topup.user.tgId, variantId, qty).catch((err) => {
+        await executePurchase(topup.user.tgId, variantId, qty, undefined, uname || undefined).catch((err) => {
           console.error("[bot] resolveTopUp auto-purchase fail:", err.message);
         });
       }
@@ -3426,9 +3462,15 @@ bot.command("give", async (ctx) => {
   if (!order) return ctx.reply(`Заказ #${orderId} не найден`);
   await db.botOrder.update({ where: { id: orderId }, data: { payload: text, status: "delivered" } });
   const ulang = order.user.lang;
+  // A Stars / Premium order has no credentials to hand over — the goods went
+  // to a Telegram account. Showing "Ваш товар: выдано" would read as nonsense,
+  // so confirm the destination instead.
+  const body = order.targetUsername
+    ? `✅ <b>${esc(order.titleRu)}</b>\n\n${t(ulang, "uname_for")}: <b>@${esc(order.targetUsername)}</b>\n\nПроверьте свой аккаунт 🎉`
+    : `🎁 ${t(ulang, "your_goods")}\n<code>${esc(text)}</code>\n\n${esc(order.titleRu)}`;
   await bot.api.sendMessage(
     order.user.tgId,
-    `🎁 ${t(ulang, "your_goods")}\n<code>${esc(text)}</code>\n\n${esc(order.titleRu)}`,
+    body,
     {
       parse_mode: "HTML",
       // A hand-delivered order is a real delivery — same confirmation button,
@@ -3825,6 +3867,21 @@ bot.on("callback_query:data", async (ctx) => {
     if (tag === "q") return showQtyChooser(ctx, Number(rest[0]), Number(rest[1]) || 1, `${rest[2] ?? "0"}:${rest[3] ?? "all"}`, true);
     if (tag === "qi") { pending.set(String(ctx.from?.id), { type: "qty", variantId: Number(rest[0]), back: `${rest[1] ?? "0"}:${rest[2] ?? "all"}` }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "enter_qty_msg")); }
     if (tag === "bc") return doBuy(ctx, Number(rest[0]), Number(rest[1]) || 1);
+    // Recipient confirmed → proceed to payment with it attached.
+    if (tag === "un") {
+      pending.delete(String(ctx.from?.id));
+      const uname = checkUsername(rest[2] ?? "");
+      if (!uname.ok) return ctx.answerCallbackQuery({ text: t(lang, "uname_bad_chars"), show_alert: true }).catch(() => {});
+      return doBuy(ctx, Number(rest[0]), Number(rest[1]) || 1, uname.username);
+    }
+    if (tag === "unedit") {
+      const v = await db.variant.findUnique({
+        where: { id: Number(rest[0]) },
+        include: { plan: { include: { product: true } } },
+      });
+      if (!v) return ctx.answerCallbackQuery().catch(() => {});
+      return askTargetUsername(ctx, v, Number(rest[1]) || 1, lang);
+    }
     if (tag === "rb") return buyForReferrals(ctx, Number(rest[0]));
     if (tag === "na") {
       // "Notify me when back in stock" — save a StockAlert for this variant.
@@ -3846,9 +3903,10 @@ bot.on("callback_query:data", async (ctx) => {
     if (tag === "tcheck") return startReceiptPayment(ctx, lang, Number(rest[0]));
     if (tag === "tcard") return cardInvoice(ctx, lang, Number(rest[0]));
     if (tag === "tman") { await ctx.answerCallbackQuery().catch(() => {}); return requestTopUp(ctx, lang, Number(rest[0]), "manual"); }
-    if (tag === "tcheck_buy") return startReceiptPayment(ctx, lang, Number(rest[0]), `buy:${rest[1]}:${rest[2]}`);
-    if (tag === "tstar_buy") return starsInvoice(ctx, lang, Number(rest[0]), `buy:${rest[1]}:${rest[2]}`);
-    if (tag === "tman_buy") { await ctx.answerCallbackQuery().catch(() => {}); return requestTopUp(ctx, lang, Number(rest[0]), "manual", `buy:${rest[1]}:${rest[2]}`); }
+    // rest[3], when present, is the Stars/Premium recipient chosen before payment.
+    if (tag === "tcheck_buy") return startReceiptPayment(ctx, lang, Number(rest[0]), `buy:${rest[1]}:${rest[2]}${rest[3] ? `:${rest[3]}` : ""}`);
+    if (tag === "tstar_buy") return starsInvoice(ctx, lang, Number(rest[0]), `buy:${rest[1]}:${rest[2]}${rest[3] ? `:${rest[3]}` : ""}`);
+    if (tag === "tman_buy") { await ctx.answerCallbackQuery().catch(() => {}); return requestTopUp(ctx, lang, Number(rest[0]), "manual", `buy:${rest[1]}:${rest[2]}${rest[3] ? `:${rest[3]}` : ""}`); }
     if (tag === "ap") return resolveTopUp(ctx, Number(rest[0]), true);
     if (tag === "rj") return resolveTopUp(ctx, Number(rest[0]), false);
     if (tag === "rjs") return handleRejectChoice(ctx, Number(rest[0]), rest[1]);
@@ -3959,6 +4017,29 @@ bot.on("message:text", async (ctx) => {
     // Save back to pending map
     pending.set(key, state);
     return;
+  }
+
+  if (state.type === "target_username") {
+    const res = checkUsername(ctx.message.text ?? "");
+    if (!res.ok) {
+      // Keep the state so they can simply retype — losing it here would force
+      // them back through the whole catalogue for a typo.
+      pending.set(key, state);
+      return ctx.reply(t(lang, `uname_bad_${res.reason}`), { parse_mode: "HTML" });
+    }
+    const v = await db.variant.findUnique({
+      where: { id: state.variantId },
+      include: { plan: { include: { product: true } } },
+    });
+    if (!v || !v.isActive) return ctx.reply(t(lang, "plan_unavailable"));
+
+    const pt = await pick3(v.plan.product.titleRu, v.plan.product.titleEn, v.plan.product.titleUz, lang);
+    const vt = await locName(v.titleRu, v.titleUz, lang);
+    const item = `📦 <b>${esc(formatItemTitle(pt, vt))}</b>${state.qty > 1 ? ` ×${state.qty}` : ""}`;
+    const kb = new InlineKeyboard()
+      .text(t(lang, "uname_confirm_yes"), `un:${state.variantId}:${state.qty}:${res.username}`).row()
+      .text(t(lang, "uname_confirm_edit"), `unedit:${state.variantId}:${state.qty}`).row();
+    return ctx.reply(t(lang, "uname_confirm", { item, u: esc(res.username) }), { parse_mode: "HTML", reply_markup: kb });
   }
 
   if (state.type === "promo") {
@@ -4084,10 +4165,12 @@ bot.on("message:successful_payment", async (ctx) => {
   const amount = Number(amtStr);
   if (!Number.isFinite(amount) || amount <= 0) return;
 
+  // Payload: topup:<amount>:<method>[:buy:<variantId>:<qty>[:<username>]]
   const variantId = parts[3] === "buy" ? Number(parts[4]) : undefined;
   const qty = parts[3] === "buy" ? Number(parts[5]) : undefined;
+  const uname = parts[3] === "buy" ? (parts[6] || undefined) : undefined;
 
-  await creditPaidTopUp(ctx, amount, method || "stars", sp.telegram_payment_charge_id, variantId, qty);
+  await creditPaidTopUp(ctx, amount, method || "stars", sp.telegram_payment_charge_id, variantId, qty, uname);
 });
 
 bot.catch((err) => console.error("[bot] error:", err.error));
@@ -4209,6 +4292,10 @@ async function ensureSchema() {
     `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "pointsCost" INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "bulkPrices" TEXT NOT NULL DEFAULT ''`,
     `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "bulkBonus" TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "needsUsername" BOOLEAN NOT NULL DEFAULT false`,
+    `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "fragmentKind" TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "fragmentAmount" INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE "BotOrder" ADD COLUMN IF NOT EXISTS "targetUsername" TEXT`,
     `CREATE TABLE IF NOT EXISTS "ChannelJoinRequest" (
       "id" SERIAL NOT NULL,
       "chatId" TEXT NOT NULL,

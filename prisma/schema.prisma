@@ -647,6 +647,14 @@ model Variant {
   // exact quantity; "2+1" = buy 2, get 1 extra free.
   bulkPrices         String  @default("")
   bulkBonus          String  @default("")
+  // Goods delivered to a Telegram account rather than as a code: the buyer is
+  // asked for a target @username before paying.
+  needsUsername      Boolean @default(false)
+  // What Fragment should buy once automatic fulfilment is wired up.
+  // "" = not a Fragment item | "stars" | "premium"
+  fragmentKind       String  @default("")
+  // Stars count, or Premium months (Fragment supports only 3, 6 and 12).
+  fragmentAmount     Int     @default(0)
 
   stockItems   StockItem[]
   customPrices UserVariantPrice[]
@@ -710,6 +718,10 @@ model BotOrder {
   payload   String
   source    String   @default("stock")
   status    String   @default("delivered")
+  // Telegram @username the goods go to (Stars / Premium). Captured and
+  // confirmed BEFORE payment, and never editable afterwards — a Fragment
+  // transfer cannot be reversed.
+  targetUsername String?
   createdAt DateTime @default(now())
 }
 
