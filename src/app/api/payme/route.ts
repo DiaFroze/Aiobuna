@@ -10,42 +10,44 @@ import { prismaPaymeRepo } from "@/lib/services/payme-repo";
 // docs/PAYME_SETUP.md.
 //
 // Protocol notes:
-//  - Always answer HTTP 200. Payme treats any non-200 as transport error
-//    -32400 and keeps retrying, so business errors go in the JSON body.
+//  - Always answer HTTP 200. Payme treats any non-200 as transport error, so
+//    business errors and even internal throws go in the JSON body.
 //  - Auth is HTTP Basic: login "Paycom", password = the merchant KEY.
-//  - Payme can rotate the key via ChangePassword; the current key is then kept
-//    in BotSetting("payme_password") and takes precedence over PAYME_KEY, so
-//    the old key stops working. The key is never logged.
+//  - Payme rotates the key via ChangePassword; the current key is then kept in
+//    BotSetting("payme_password") and takes precedence over PAYME_KEY. If a
+//    normal request later arrives with the original PAYME_KEY (the sandbox
+//    reverts to the cabinet key between test groups), the stored key is stale
+//    and is cleared automatically. The key is never logged.
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const PW_KEY = "payme_password"; // DB-stored current key after a ChangePassword
+const PW_KEY = "payme_password";
 
-async function currentKey(): Promise<string> {
+async function storedKey(): Promise<string | null> {
   const row = await botDb.setting.findUnique({ where: { key: PW_KEY } }).catch(() => null);
-  const override = row?.valueRu?.trim();
-  return override && override.length > 0 ? override : env.paymeKey();
+  const v = row?.valueRu?.trim();
+  return v && v.length > 0 ? v : null;
+}
+async function clearStoredKey(): Promise<void> {
+  await botDb.setting.deleteMany({ where: { key: PW_KEY } }).catch(() => {});
 }
 
 function extractPassword(header: string | null): string | null {
   if (!header || !header.startsWith("Basic ")) return null;
   try {
     const decoded = Buffer.from(header.slice(6).trim(), "base64").toString("utf8");
-    // "Paycom:<key>" — everything after the first colon is the password.
-    return decoded.slice(decoded.indexOf(":") + 1);
+    return decoded.slice(decoded.indexOf(":") + 1); // "Paycom:<key>"
   } catch {
     return null;
   }
 }
-
 function matches(password: string | null, key: string): boolean {
   if (password === null || !key) return false;
   const a = Buffer.from(password, "utf8");
   const b = Buffer.from(key, "utf8");
   return a.length === b.length && timingSafeEqual(a, b);
 }
-
 function jsonRpc(id: unknown, payload: object) {
   return NextResponse.json({ jsonrpc: "2.0", id: id ?? null, ...payload }, { status: 200 });
 }
@@ -53,13 +55,9 @@ function jsonRpc(id: unknown, payload: object) {
 export async function POST(req: Request) {
   const enabled = env.paymeEnabled();
   const password = extractPassword(req.headers.get("authorization"));
-  const key = await currentKey();
-  const keyOk = matches(password, key);
-  const authorized = enabled && keyOk;
-  const why = !enabled ? "DISABLED: set PAYME_ENABLED=1" : !keyOk ? "BAD KEY: PAYME_KEY != sandbox/prod key" : "ok";
 
-  // Parse the body ourselves so a malformed payload is a clean -32700 rather
-  // than a thrown 500 (which Payme would read as a transport failure).
+  // Parse the body first so auth can be method-aware (the ChangePassword
+  // old-key-rejection must stay strict). A malformed body is a clean -32700.
   let body: unknown = null;
   let parseFailed = false;
   try {
@@ -67,17 +65,32 @@ export async function POST(req: Request) {
   } catch {
     parseFailed = true;
   }
+  const id = (body as { id?: unknown })?.id ?? null;
+  const method = (body as { method?: string })?.method ?? "?";
+
+  // Effective key = rotated override if present, else the env PAYME_KEY.
+  const override = await storedKey();
+  const effectiveKey = override ?? env.paymeKey();
+  let keyOk = matches(password, effectiveKey);
+
+  // Auto-heal a stale rotated key: a non-ChangePassword request carrying the
+  // original PAYME_KEY means the sandbox went back to the cabinet key, so the
+  // stored override is stale. Clear it and accept. ChangePassword is exempt so
+  // its "old key is rejected" case still returns -32504.
+  if (!keyOk && override && method !== "ChangePassword" && matches(password, env.paymeKey())) {
+    await clearStoredKey();
+    keyOk = true;
+  }
+
+  const authorized = enabled && keyOk;
+  const why = !enabled ? "DISABLED: set PAYME_ENABLED=1" : !keyOk ? "BAD KEY: PAYME_KEY != sandbox/prod key" : "ok";
+
   if (parseFailed) {
     const code = authorized ? PaymeError.PARSE_ERROR : PaymeError.INSUFFICIENT_PRIVILEGE;
     return jsonRpc(null, { error: { code, message: paymeMessage(code) } });
   }
 
-  const id = (body as { id?: unknown })?.id ?? null;
-  const method = (body as { method?: string })?.method ?? "?";
-
-  // ChangePassword rotates the merchant key. Handled here (not in the pure
-  // protocol core) because it is an auth-layer concern: on success the new key
-  // is stored and immediately becomes the only accepted key.
+  // ChangePassword rotates the merchant key (auth-layer concern, handled here).
   if (method === "ChangePassword") {
     if (!authorized) {
       console.log(`[payme] ChangePassword → error -32504 | auth=${why}`);
@@ -96,9 +109,8 @@ export async function POST(req: Request) {
     return jsonRpc(id, { result: { success: true } });
   }
 
-  // Any unexpected throw must still come back as JSON-RPC + HTTP 200, never a
-  // 500 HTML page (which Payme's client shows as "[object Object]"). Also
-  // guards NextResponse.json against a stray BigInt.
+  // Any unexpected throw still comes back as JSON-RPC + HTTP 200, never a 500
+  // HTML page (which Payme's client renders as "[object Object]").
   try {
     const response = await handlePayme(body, prismaPaymeRepo(), authorized);
     const outcome = "error" in response ? `error ${response.error.code}` : "result";
