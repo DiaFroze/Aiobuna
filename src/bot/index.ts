@@ -2313,13 +2313,13 @@ async function isSubscribedTo(ctx: Context, tgId: string, chatId: string): Promi
       db.channelJoinRequest.deleteMany({ where: { chatId, tgId } }).catch(() => {});
       return true;
     }
-  } catch {
-    // Not a member (or bot can't see them) — fall through to the join-request
-    // check, which covers channels where the bot cannot read membership and
-    // requests Telegram is still holding for approval.
+    return false;
+  } catch (err) {
+    const pending = await db.channelJoinRequest.findUnique({ where: { chatId_tgId: { chatId, tgId } } }).catch(() => null);
+    if (pending !== null) return true;
+    console.warn(`[bot] isSubscribedTo API check failed for channel ${chatId}:`, (err as Error).message);
+    return true;
   }
-  const pending = await db.channelJoinRequest.findUnique({ where: { chatId_tgId: { chatId, tgId } } }).catch(() => null);
-  return pending !== null;
 }
 
 // The gates below decide what a user may do in their private chat with the
