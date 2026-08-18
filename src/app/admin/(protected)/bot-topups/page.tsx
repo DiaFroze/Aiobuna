@@ -29,6 +29,7 @@ export default async function BotTopUpsPage() {
     botDb.paymeTransaction.findMany({ select: { topUpId: true, state: true, paymeId: true } }).catch(() => []),
   ]);
   const pending = topups.filter((t) => t.status === "pending").length;
+  const pendingPayme = topups.filter((t) => t.method === "payme" && t.status === "pending");
   const paymeByTopUp = new Map(paymeTxns.map((p) => [p.topUpId, p]));
   const sorted = [...topups].sort((a, b) => {
     if ((a.status === "pending") !== (b.status === "pending")) return a.status === "pending" ? -1 : 1;
@@ -66,6 +67,27 @@ export default async function BotTopUpsPage() {
           Пользователь появляется здесь после первого <code>/start</code> в боте.
         </p>
       </details>
+
+      {/* Payme test helper — pending Payme top-ups with the exact values to
+          paste into the Payme sandbox (id + amount in tiyin). */}
+      {pendingPayme.length > 0 && (
+        <div className="card p-5 border-2 border-brand/30 bg-brand/5">
+          <div className="font-semibold text-sm mb-1">💳 Ожидающие Payme-пополнения — для тестов в песочнице</div>
+          <p className="text-xs text-muted mb-3">
+            В песочнице Payme: <code>topup_id</code> = «ID», а сумму вводите в <b>тийинах</b> (сум × 100).
+          </p>
+          <div className="space-y-1.5">
+            {pendingPayme.map((t) => (
+              <div key={t.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm font-mono">
+                <span>ID: <b className="text-base">{t.id}</b></span>
+                <span className="text-muted">{Math.round(t.amount).toLocaleString("ru-RU")} сум</span>
+                <span>тийины: <b>{Math.round(t.amount * 100)}</b></span>
+                <span className="text-muted text-xs">{t.user.username ? `@${t.user.username}` : t.user.tgId}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {topups.length === 0 ? (
         <EmptyState>Запросов на пополнение пока нет.</EmptyState>
