@@ -97,6 +97,33 @@ export async function resetPaymeKeyAction() {
   revalidatePath("/admin/bot-topups");
 }
 
+/**
+ * Reset a Payme test top-up back to "pending" so the SAME topup_id can be
+ * reused across sandbox runs without reconfiguring the sandbox. Deletes its
+ * PaymeTransaction, clears deliveredAt, and reverses a balance credit if the
+ * top-up had been approved (only when the balance still covers it, to avoid
+ * going negative).
+ */
+export async function resetTestTopupAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
+  const id = Number(formData.get("id"));
+  const t = await botDb.topUp.findUnique({ where: { id } });
+  if (!t || t.method !== "payme") return;
+
+  await botDb.$transaction(async (tx) => {
+    if (t.status === "approved") {
+      const u = await tx.botUser.findUnique({ where: { id: t.userId } });
+      if (u && u.balance >= t.amount) {
+        await tx.botUser.update({ where: { id: t.userId }, data: { balance: { decrement: t.amount } } });
+      }
+    }
+    await tx.paymeTransaction.deleteMany({ where: { topUpId: id } });
+    await tx.topUp.update({ where: { id }, data: { status: "pending", deliveredAt: null } });
+  });
+  await audit({ adminId: admin.id, action: "bot.payme.resettopup", entityType: "BotTopUp", entityId: String(id) });
+  revalidatePath("/admin/bot-topups");
+}
+
 /** Manually credit (or debit with a negative amount) a user's balance by tgId. */
 export async function manualCreditAction(formData: FormData) {
   const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);

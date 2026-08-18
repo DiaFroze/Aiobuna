@@ -1,6 +1,6 @@
 import { botDb, botConfigured } from "@/lib/botDb";
 import { PageHeader, Table, EmptyState, StatCard } from "@/components/admin/ui";
-import { approveTopUpAction, rejectTopUpAction, manualCreditAction, createPaymeTestInvoiceAction, resetPaymeKeyAction } from "./actions";
+import { approveTopUpAction, rejectTopUpAction, manualCreditAction, createPaymeTestInvoiceAction, resetPaymeKeyAction, resetTestTopupAction } from "./actions";
 
 export const dynamic = "force-dynamic";
 
@@ -29,7 +29,8 @@ export default async function BotTopUpsPage() {
     botDb.paymeTransaction.findMany({ select: { topUpId: true, state: true, paymeId: true } }).catch(() => []),
   ]);
   const pending = topups.filter((t) => t.status === "pending").length;
-  const pendingPayme = topups.filter((t) => t.method === "payme" && t.status === "pending");
+  // Recent Payme top-ups (any status) so a consumed one can be reset and reused.
+  const recentPayme = topups.filter((t) => t.method === "payme").slice(0, 10);
   const paymeByTopUp = new Map(paymeTxns.map((p) => [p.topUpId, p]));
   const sorted = [...topups].sort((a, b) => {
     if ((a.status === "pending") !== (b.status === "pending")) return a.status === "pending" ? -1 : 1;
@@ -95,23 +96,32 @@ export default async function BotTopUpsPage() {
         <button className="btn-ghost text-sm">Сбросить ключ</button>
       </form>
 
-      {pendingPayme.length > 0 && (
+      {recentPayme.length > 0 && (
         <div className="card p-5 border-2 border-brand/30 bg-brand/5">
-          <div className="font-semibold text-sm mb-1">💳 Ожидающие Payme-пополнения — для тестов в песочнице</div>
+          <div className="font-semibold text-sm mb-1">💳 Payme-пополнения — для тестов в песочнице</div>
           <p className="text-xs text-muted mb-3">
-            Копируйте два значения в песочницу. <b>«Сумма оплаты» — это НЕ id</b>, а тийины (сум × 100).
+            Настрой один <code>topup_id</code> в песочнице и между прогонами жми <b>♻️ Сбросить</b> — счёт снова станет «ожидает оплаты», можно тестировать заново без перенастройки.
+            <br />«Сумма оплаты» — это второе число (тийины), <b>не id</b>.
           </p>
           <div className="space-y-2">
-            {pendingPayme.map((t) => (
-              <div key={t.id} className="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm rounded-lg bg-surface-2/60 px-3 py-2">
-                <span>ID пополнения (topup_id): <b className="font-mono text-base">{t.id}</b></span>
-                <span>Сумма оплаты: <b className="font-mono text-base">{Math.round(t.amount * 100)}</b></span>
-                <span className="text-muted text-xs">({Math.round(t.amount).toLocaleString("ru-RU")} сум · {t.user.username ? `@${t.user.username}` : t.user.tgId})</span>
-              </div>
-            ))}
+            {recentPayme.map((t) => {
+              const paid = t.status !== "pending";
+              return (
+                <div key={t.id} className="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm rounded-lg bg-surface-2/60 px-3 py-2">
+                  <span>ID (topup_id): <b className="font-mono text-base">{t.id}</b></span>
+                  <span>Сумма оплаты: <b className="font-mono text-base">{Math.round(t.amount * 100)}</b></span>
+                  <span className="text-muted text-xs">({Math.round(t.amount).toLocaleString("ru-RU")} сум)</span>
+                  <span className={`text-xs ${paid ? "text-danger" : "text-success"}`}>{paid ? `⚠ ${t.status} (нельзя тестировать)` : "✓ ожидает оплаты"}</span>
+                  <form action={resetTestTopupAction} className="ml-auto">
+                    <input type="hidden" name="id" value={t.id} />
+                    <button className="btn-ghost text-xs">♻️ Сбросить</button>
+                  </form>
+                </div>
+              );
+            })}
           </div>
           <p className="text-xs text-muted mt-3">
-            Для теста «Несуществующий счёт» введите любой id, которого тут нет (напр. <code>99999999</code>) — вернётся ошибка −31050.
+            Для теста «Несуществующий счёт» введи любой id, которого тут нет (напр. <code>99999999</code>) — вернётся −31050.
           </p>
         </div>
       )}
