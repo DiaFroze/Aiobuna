@@ -4221,8 +4221,49 @@ bot.on("message:successful_payment", async (ctx) => {
 
 bot.catch((err) => console.error("[bot] error:", err.error));
 
-// Auto-color every button (Bot API 9.4 `style`).
-bot.api.config.use((prev, method, payload, signal) => {
+// Strip every purely-decorative premium-emoji bit from an outgoing payload:
+// button styles + icons, custom_emoji message entities, and <tg-emoji> tags in
+// text/caption. Returns true if anything was removed. Used as a retry fallback:
+// a single custom emoji that has become invalid (its creator deleted it, or the
+// bot lost access) otherwise makes Telegram reject the WHOLE message with a 400,
+// which silently blanks a screen. The content still sends — just without the
+// cosmetic emoji.
+function stripPremiumDecorations(payload: any): boolean {
+  let changed = false;
+  const rm = payload?.reply_markup;
+  const scrub = (rows?: any[][]) => {
+    if (!rows) return;
+    for (const row of rows) for (const btn of row) {
+      if (btn && typeof btn === "object") {
+        if (btn.style) { delete btn.style; changed = true; }
+        if (btn.icon_custom_emoji_id) { delete btn.icon_custom_emoji_id; changed = true; }
+      }
+    }
+  };
+  scrub(rm?.inline_keyboard);
+  scrub(rm?.keyboard);
+
+  const dropCustom = (ents?: any[]) => ents?.filter((e) => e?.type !== "custom_emoji");
+  if (Array.isArray(payload?.entities) && payload.entities.some((e: any) => e?.type === "custom_emoji")) {
+    payload.entities = dropCustom(payload.entities); changed = true;
+  }
+  if (Array.isArray(payload?.caption_entities) && payload.caption_entities.some((e: any) => e?.type === "custom_emoji")) {
+    payload.caption_entities = dropCustom(payload.caption_entities); changed = true;
+  }
+  const tgEmoji = /<tg-emoji[^>]*>(.*?)<\/tg-emoji>/g;
+  if (typeof payload?.text === "string" && tgEmoji.test(payload.text)) {
+    payload.text = payload.text.replace(tgEmoji, "$1"); changed = true;
+  }
+  if (typeof payload?.caption === "string" && tgEmoji.test(payload.caption)) {
+    payload.caption = payload.caption.replace(tgEmoji, "$1"); changed = true;
+  }
+  return changed;
+}
+
+// Auto-color every button (Bot API 9.4 `style`) + premium nav icons, with a
+// safety net: if the send is rejected and the payload carried premium emoji,
+// retry once without them so one bad emoji can't blank a whole screen.
+bot.api.config.use(async (prev, method, payload, signal) => {
   const rm = (payload as { reply_markup?: { inline_keyboard?: unknown[][]; keyboard?: unknown[][] } }).reply_markup;
   if (rm?.inline_keyboard)
     for (const row of rm.inline_keyboard)
@@ -4253,7 +4294,15 @@ bot.api.config.use((prev, method, payload, signal) => {
           }
         }
       }
-  return prev(method, payload, signal);
+  try {
+    return await prev(method, payload, signal);
+  } catch (e) {
+    if (stripPremiumDecorations(payload)) {
+      console.error(`[bot] ${method} rejected with premium emoji, retrying plain:`, (e as { description?: string })?.description ?? (e as Error).message);
+      return await prev(method, payload, signal);
+    }
+    throw e;
+  }
 });
 
 // Create tables added in this release if they're missing (idempotent), via the
