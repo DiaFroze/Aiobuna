@@ -90,12 +90,52 @@ export default async function BotUsersPage({
       : [];
   const topReferrerByTgId = new Map(topReferrerUsers.map((u) => [u.tgId, u]));
 
+  // Top 10 users by balance, with their unspent referral points. Unspent =
+  // verified invitees + admin bonus − already spent (same formula as the bot's
+  // availableReferralPoints, clamped at 0).
+  const topBalanceUsers = await botDb.botUser.findMany({
+    where: { balance: { gt: 0 } },
+    orderBy: { balance: "desc" },
+    take: 10,
+  });
+  const topBalance = topBalanceUsers.map((u) => {
+    const verified = realRefMap.get(u.tgId) ?? 0;
+    const unspent = Math.max(0, verified + (u.bonusReferrals ?? 0) - (u.spentReferrals ?? 0));
+    return { user: u, unspent };
+  });
+
   return (
     <div className="space-y-6">
       <PageHeader
         title="👤 Пользователи бота"
         subtitle="Просмотр профилей пользователей, управление балансами и правами доступа."
       />
+
+      {/* Top balances + unspent referrals */}
+      <div className="card p-5">
+        <h3 className="text-lg font-semibold mb-1">💰 Топ по балансу</h3>
+        <p className="text-sm text-muted mb-4">У кого сколько денег на балансе и сколько нетраченных рефералов.</p>
+        {topBalance.length === 0 ? (
+          <p className="text-sm text-muted">Пока ни у кого нет баланса.</p>
+        ) : (
+          <ol className="space-y-2">
+            {topBalance.map(({ user: u, unspent }, i) => (
+              <li key={u.id} className="flex items-center justify-between text-sm border-b last:border-0 pb-2">
+                <span className="flex items-center gap-2 min-w-0">
+                  <span className="text-muted w-5 shrink-0">{i + 1}.</span>
+                  <span className="font-semibold truncate">{u.firstName || "—"}</span>
+                  {u.username && <span className="text-xs text-muted shrink-0">@{u.username}</span>}
+                  <span className="text-xs text-muted font-mono shrink-0">{u.tgId}</span>
+                </span>
+                <span className="flex items-center gap-3 shrink-0">
+                  {unspent > 0 && <span className="text-xs text-muted">🤝 {unspent} реф.</span>}
+                  <span className="font-bold text-success">{Math.round(u.balance).toLocaleString("ru-RU")} сум</span>
+                </span>
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
 
       {/* Top referrers leaderboard */}
       <div className="card p-5">

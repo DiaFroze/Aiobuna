@@ -120,6 +120,16 @@ const PAYME_ENABLED = process.env.PAYME_ENABLED === "1";
 const PAYME_MERCHANT_ID = process.env.PAYME_MERCHANT_ID ?? "";
 const PAYME_CHECKOUT_URL = (process.env.PAYME_CHECKOUT_URL ?? "https://checkout.paycom.uz").replace(/\/+$/, "");
 const paymeReady = (ctx?: Context) => PAYME_ENABLED && PAYME_MERCHANT_ID !== "" && (!ctx || isAdmin(ctx));
+// Click — not integrated yet (pending approval). The button is shown so the new
+// flow can be tested; tapping it explains it's coming until CLICK_ENABLED=1.
+const CLICK_ENABLED = process.env.CLICK_ENABLED === "1";
+const clickReady = (ctx?: Context) => CLICK_ENABLED && (!ctx || isAdmin(ctx));
+// Premium-emoji ids for the bank buttons (same ones used in the poll).
+const PAYME_BTN_EMOJI = "5204128408463744787";
+const CLICK_BTN_EMOJI = "5350345287246311562";
+// Direct pay = pay the full price straight to a bank, no balance. Admin-only
+// for now; becomes a setting/everyone once Payme+Click are approved.
+const directPayEnabled = (ctx?: Context) => Boolean(ctx && isAdmin(ctx));
 if (!token) {
   console.error("[bot] TELEGRAM_BOT_TOKEN is not set in .env — cannot start.");
   process.exit(1);
@@ -356,12 +366,14 @@ function premiumIconFor(text: string): string | undefined {
   return undefined;
 }
 
-function mainKeyboard(lang: string) {
-  return new Keyboard()
-    .text(t(lang, "btn_shop")).row()
-    .text(t(lang, "btn_wallet")).text(t(lang, "btn_freebies")).row()
-    .text(t(lang, "btn_profile")).text(t(lang, "btn_instructions")).row()
-    .resized().persistent();
+// hideWallet: in the direct-pay flow there is no balance, so the "Баланс"
+// button is dropped (admin only for now).
+function mainKeyboard(lang: string, hideWallet = false) {
+  const kb = new Keyboard().text(t(lang, "btn_shop")).row();
+  if (hideWallet) kb.text(t(lang, "btn_freebies")).row();
+  else kb.text(t(lang, "btn_wallet")).text(t(lang, "btn_freebies")).row();
+  kb.text(t(lang, "btn_profile")).text(t(lang, "btn_instructions")).row();
+  return kb.resized().persistent();
 }
 
 function langKeyboard() {
@@ -1313,6 +1325,34 @@ async function askTargetUsername(ctx: Context, v: { id: number; titleRu: string;
   await ctx.reply(t(lang, "uname_ask", { item }), { parse_mode: "HTML" }).catch(() => {});
 }
 
+// Direct-pay bank picker (Payme / Click) — the whole payment price, no balance.
+// Each bank button carries its premium emoji; tapping Payme builds a checkout
+// link for the full price and hands back the pay button.
+async function showBankPicker(
+  ctx: Context,
+  lang: string,
+  v: { id: number },
+  qty: number,
+  label: string,
+  total: number,
+  targetUsername?: string,
+) {
+  const suffix = targetUsername ? `:${targetUsername}` : "";
+  const kb = new InlineKeyboard();
+  kb.text("Payme", `tpayme_buy:${total}:${v.id}:${qty}${suffix}`).icon(PAYME_BTN_EMOJI).row();
+  kb.text("Click", `tclick_buy:${total}:${v.id}:${qty}${suffix}`).icon(CLICK_BTN_EMOJI).row();
+  kb.text(t(lang, "back"), `q:${v.id}:${qty}:0:all`);
+  const text =
+    `🧾 <b>${esc(label)}</b>\n\n` +
+    (targetUsername ? `${t(lang, "uname_for")}: <b>@${esc(targetUsername)}</b>\n\n` : "") +
+    `💳 К оплате: <b>${money(total, lang)}</b>\n\n` +
+    `Выберите способ оплаты 👇`;
+  await ctx.answerCallbackQuery().catch(() => {});
+  await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(async () => {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+  });
+}
+
 async function doBuy(ctx: Context, variantId: number, qty: number, targetUsername?: string) {
   const user = await getUser(ctx);
   const lang = user.lang;
@@ -1337,6 +1377,14 @@ async function doBuy(ctx: Context, variantId: number, qty: number, targetUsernam
     freeQty > 0 ? `${baseTitle} ×${qty} +${freeQty} 🎁`
     : qty > 1 ? `${baseTitle} ×${qty}`
     : baseTitle;
+
+  // NEW direct-pay flow — admin only for now (regular users keep the balance
+  // flow untouched). No balance, no "insufficient funds", no how-to-pay video:
+  // straight to a bank picker (Payme / Click). When Payme+Click are approved
+  // this gate flips to everyone.
+  if (directPayEnabled(ctx)) {
+    return showBankPicker(ctx, lang, v, qty, label, total, targetUsername);
+  }
 
   // Enough balance -> execute purchase immediately
   if (user.balance >= total) {
@@ -2190,7 +2238,7 @@ async function showLangPicker(ctx: Context, edit: boolean) {
 }
 async function sendHome(ctx: Context, user: Awaited<ReturnType<typeof getUser>>) {
   const { text, entities } = await buildHeader();
-  await ctx.reply(text, { entities, reply_markup: mainKeyboard(user.lang) });
+  await ctx.reply(text, { entities, reply_markup: mainKeyboard(user.lang, directPayEnabled(ctx)) });
   // Shop banner + catalog text + product buttons all as ONE photo message.
   // Product/qty callbacks now use sendOrEdit(), which correctly handles
   // media-source messages via delete+resend when a plain text edit isn't
@@ -4038,6 +4086,14 @@ bot.on("callback_query:data", async (ctx) => {
     if (tag === "top") { await ctx.answerCallbackQuery().catch(() => {}); const b = await buildTopupMethods(lang, Number(rest[0]), ctx); await sendOrEdit(ctx, b.text, { reply_markup: b.kb }); return; }
     if (tag === "tpayme") return startPaymePayment(ctx, lang, Number(rest[0]));
     if (tag === "tpayme_buy") return startPaymePayment(ctx, lang, Number(rest[0]), `buy:${rest[1]}:${rest[2]}${rest[3] ? `:${rest[3]}` : ""}`);
+    if (tag === "tclick_buy") {
+      // Click isn't integrated yet — show the button, but explain until approved.
+      if (!clickReady(ctx)) {
+        return ctx.answerCallbackQuery({ text: "⏳ Click подключим после одобрения. Пока оплатите через Payme.", show_alert: true }).catch(() => {});
+      }
+      // TODO(click): build the Click payment URL once merchant creds are set.
+      return ctx.answerCallbackQuery({ text: "Click скоро.", show_alert: true }).catch(() => {});
+    }
     if (tag === "tstar") return starsInvoice(ctx, lang, Number(rest[0]));
     if (tag === "tcheck") return startReceiptPayment(ctx, lang, Number(rest[0]));
     if (tag === "tcard") return cardInvoice(ctx, lang, Number(rest[0]));
