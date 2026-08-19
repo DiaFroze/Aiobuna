@@ -516,7 +516,7 @@ async function buildHeader(): Promise<{ text: string; entities: MessageEntity[] 
 }
 
 // ---------- storefront ----------
-async function buildMenu(lang: string, balance: number, page: number, sort: Sort, userId: number, freebies = false) {
+async function buildMenu(lang: string, balance: number, page: number, sort: Sort, userId: number, freebies = false, hideWallet = false) {
   const [products, stock, overrides] = await Promise.all([
     db.product.findMany({
       where: { isActive: true },
@@ -566,8 +566,12 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
     }
   }
   if (!freebies && items.length > 0) {
-    kb.text(stripLeadEmoji(t(lang, "btn_wallet")), "bal").icon(walletButtonEmoji)
-      .text(stripLeadEmoji(t(lang, "btn_orders")), "ord").icon(ordersButtonEmoji).row();
+    if (hideWallet) {
+      kb.text(stripLeadEmoji(t(lang, "btn_orders")), "ord").icon(ordersButtonEmoji).row();
+    } else {
+      kb.text(stripLeadEmoji(t(lang, "btn_wallet")), "bal").icon(walletButtonEmoji)
+        .text(stripLeadEmoji(t(lang, "btn_orders")), "ord").icon(ordersButtonEmoji).row();
+    }
     kb.text(stripLeadEmoji(t(lang, "btn_profile")), "profile_show").icon(profileButtonEmoji).row();
     // Marketing teaser: advertise the priciest referral-shop item right in the
     // catalog, so people see there's a way to get it for free. Tapping it
@@ -599,7 +603,7 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
 async function showMenu(ctx: Context, page: number, sort: Sort, edit: boolean, freebies = false) {
   try {
     const user = await getUser(ctx);
-    const { text, kb } = await buildMenu(user.lang, user.balance, page, sort, user.id, freebies);
+    const { text, kb } = await buildMenu(user.lang, user.balance, page, sort, user.id, freebies, directPayEnabled(ctx));
     // The main catalog page (not the freebies view) leads with the shop
     // banner as one combined photo+caption+buttons message. sendOrEdit
     // handles the media-vs-text edit correctness for callback navigation.
@@ -1337,11 +1341,25 @@ async function showBankPicker(
   total: number,
   targetUsername?: string,
 ) {
+  const user = await getUser(ctx);
   const suffix = targetUsername ? `:${targetUsername}` : "";
+  const note = `buy:${v.id}:${qty}${suffix}`;
   const kb = new InlineKeyboard();
-  kb.text("Payme", `tpayme_buy:${total}:${v.id}:${qty}${suffix}`).icon(PAYME_BTN_EMOJI).row();
+
+  // Payme is a direct URL button: pre-create the pending top-up for the full
+  // price, build its checkout link, and put it straight on the button — one tap
+  // opens Payme, no intermediate "оплатить" screen.
+  if (paymeReady(ctx)) {
+    const topup = await db.topUp.create({
+      data: { userId: user.id, amount: total, method: "payme", status: "pending", note, expiresAt: new Date(Date.now() + 30 * 60_000) },
+    });
+    const url = buildCheckoutUrl({ checkoutBase: PAYME_CHECKOUT_URL, merchantId: PAYME_MERCHANT_ID, topUpId: topup.id, amountTiyin: sumToTiyin(total), lang });
+    kb.url("Payme", url).icon(PAYME_BTN_EMOJI).row();
+  }
+  // Click not integrated yet → stays a callback that explains it's coming.
   kb.text("Click", `tclick_buy:${total}:${v.id}:${qty}${suffix}`).icon(CLICK_BTN_EMOJI).row();
   kb.text(t(lang, "back"), `q:${v.id}:${qty}:0:all`);
+
   const text =
     `🧾 <b>${esc(label)}</b>\n\n` +
     (targetUsername ? `${t(lang, "uname_for")}: <b>@${esc(targetUsername)}</b>\n\n` : "") +
@@ -1625,7 +1643,9 @@ async function ordersView(lang: string, userId: number) {
     : t(lang, "no_orders");
   return { text: `${t(lang, "orders_title")}\n\n${body}`, kb };
 }
-async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
+// hideBalance: in the direct-pay flow there is no balance, so the profile hides
+// both the balance line and the "Баланс" button (admin only for now).
+async function profileView(user: Awaited<ReturnType<typeof getUser>>, hideBalance = false) {
   const lang = user.lang;
   const [ordersCount, realRefs] = await Promise.all([
     db.botOrder.count({ where: { userId: user.id } }),
@@ -1640,9 +1660,9 @@ async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
   const availableRefs = Math.max(0, refCount - spentRefs);
 
   // Professional profile layout with all actions
-  const kb = new InlineKeyboard()
-    .text(stripLeadEmoji(t(lang, "btn_wallet")), "bal").icon(walletButtonEmoji)
-    .text(t(lang, "btn_refer"), "ref").row()
+  const kb = new InlineKeyboard();
+  if (!hideBalance) kb.text(stripLeadEmoji(t(lang, "btn_wallet")), "bal").icon(walletButtonEmoji);
+  kb.text(t(lang, "btn_refer"), "ref").row()
     .text(stripLeadEmoji(t(lang, "p_orders")), "ord").icon(ordersButtonEmoji)
     .text(t(lang, "btn_support"), "support_show").row()
     .text(t(lang, "btn_language"), "lang_pick").row()
@@ -1652,7 +1672,7 @@ async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
     `${t(lang, "profile_title")}\n\n` +
     `${t(lang, "p_name")}: ${esc(user.firstName ?? "—")}\n` +
     `ID: <code>${user.tgId}</code>\n` +
-    `${emojiIcon("💰", walletButtonEmoji)} ${t(lang, "your_balance", { v: money(user.balance, lang) })}\n` +
+    (hideBalance ? "" : `${emojiIcon("💰", walletButtonEmoji)} ${t(lang, "your_balance", { v: money(user.balance, lang) })}\n`) +
     `${emojiIcon("🧾", ordersButtonEmoji)} ${t(lang, "p_orders")}: ${ordersCount}\n` +
     `${emojiIcon("🤝", referButtonEmoji)} ${t(lang, "p_invited")}: ${refCount}` +
     (spentRefs > 0 ? `\n➖ ${t(lang, "p_ref_spent")}: ${spentRefs}` : "") +
@@ -2243,7 +2263,7 @@ async function sendHome(ctx: Context, user: Awaited<ReturnType<typeof getUser>>)
   // Product/qty callbacks now use sendOrEdit(), which correctly handles
   // media-source messages via delete+resend when a plain text edit isn't
   // possible — so the buttons work even though they live on a photo.
-  const menu = await buildMenu(user.lang, user.balance, 0, "all", user.id);
+  const menu = await buildMenu(user.lang, user.balance, 0, "all", user.id, false, directPayEnabled(ctx));
   const banner = shopBannerFile();
   if (banner) {
     await ctx.replyWithPhoto(banner, { caption: menu.text, parse_mode: "HTML", reply_markup: menu.kb }).catch(async () => {
@@ -3758,7 +3778,7 @@ bot.command("shop", (ctx) => showMenu(ctx, 0, "all", false));
 bot.command(["freebies", "deals", "aksiya", "gifts"], (ctx) => showGifts(ctx));
 bot.command(["balance", "wallet", "balans"], async (ctx) => { const u = await getUser(ctx); const { text, kb } = balanceView(u.lang, u.balance); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
 bot.command(["orders", "buyurtmalar"], async (ctx) => { const u = await getUser(ctx); const { text, kb } = await ordersView(u.lang, u.id); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => ctx.reply(stripTags(text), { reply_markup: kb }).catch(() => {})); });
-bot.command(["profile", "profil"], async (ctx) => { const u = await getUser(ctx); const { text, kb } = await profileView(u); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
+bot.command(["profile", "profil"], async (ctx) => { const u = await getUser(ctx); const { text, kb } = await profileView(u, directPayEnabled(ctx)); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
 bot.command(["referral", "invite", "taklif"], async (ctx) => { const u = await getUser(ctx); const { text, kb } = referView(ctx, u); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
 bot.command(["support", "yordam"], async (ctx) => { const u = await getUser(ctx); const { text, kb } = await supportView(u.lang); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } }); });
 bot.command(["language", "lang", "til"], (ctx) => showLangPicker(ctx, false));
@@ -3906,7 +3926,7 @@ bot.hears(btnVariants("btn_shop"), (ctx) => showMenu(ctx, 0, "all", false));
 bot.hears(btnVariants("btn_freebies"), (ctx) => showGifts(ctx));
 bot.hears(btnVariants("btn_wallet"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = balanceView(u.lang, u.balance); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
 bot.hears(btnVariants("btn_orders"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = await ordersView(u.lang, u.id); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => ctx.reply(stripTags(text), { reply_markup: kb }).catch(() => {})); });
-bot.hears(btnVariants("btn_profile"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = await profileView(u); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
+bot.hears(btnVariants("btn_profile"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = await profileView(u, directPayEnabled(ctx)); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
 bot.hears(btnVariants("btn_instructions"), showInstructions);
 bot.hears(btnVariants("btn_refer"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = referView(ctx, u); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
 bot.hears(btnVariants("btn_support"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = await supportView(u.lang); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } }); });
@@ -4043,7 +4063,7 @@ bot.on("callback_query:data", async (ctx) => {
     if (data === "gifts_show") { await ctx.answerCallbackQuery().catch(() => {}); return showGifts(ctx, true, false); }
     if (data === "support_show") { const { text, kb } = await supportView(lang); await sendOrEdit(ctx, text, { reply_markup: kb }); return ctx.answerCallbackQuery().catch(() => {}); }
     if (data === "lang_pick") { await ctx.answerCallbackQuery().catch(() => {}); return showLangPicker(ctx, true); }
-    if (data === "profile_show") { const { text, kb } = await profileView(user); await sendOrEdit(ctx, text, { reply_markup: kb }); return ctx.answerCallbackQuery().catch(() => {}); }
+    if (data === "profile_show") { const { text, kb } = await profileView(user, directPayEnabled(ctx)); await sendOrEdit(ctx, text, { reply_markup: kb }); return ctx.answerCallbackQuery().catch(() => {}); }
 
     const [tag, ...rest] = data.split(":");
     if (tag === "m") { const page = Number(rest[0]) || 0; const sort = (SORTS.includes(rest[1] as Sort) ? rest[1] : "all") as Sort; await ctx.answerCallbackQuery().catch(() => {}); return showMenu(ctx, page, sort, true); }
@@ -4325,7 +4345,7 @@ bot.on("chat_member", async (ctx) => {
   }
 
   // Returning user: open shop directly.
-  const menu = await buildMenu(lang, user.balance, 0, "all", user.id);
+  const menu = await buildMenu(lang, user.balance, 0, "all", user.id, false, directPayEnabled(ctx));
   const banner = shopBannerFile();
   if (banner) {
     await bot.api.sendPhoto(tgId, banner, { caption: menu.text, parse_mode: "HTML", reply_markup: menu.kb }).catch(async () => {
