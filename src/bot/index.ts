@@ -120,20 +120,23 @@ function isAdmin(ctx: Context) {
 const PAYME_ENABLED = process.env.PAYME_ENABLED === "1";
 const PAYME_MERCHANT_ID = process.env.PAYME_MERCHANT_ID ?? "";
 const PAYME_CHECKOUT_URL = (process.env.PAYME_CHECKOUT_URL ?? "https://checkout.paycom.uz").replace(/\/+$/, "");
-const paymeReady = (ctx?: Context) => PAYME_ENABLED && PAYME_MERCHANT_ID !== "" && (!ctx || isAdmin(ctx));
+const paymeReady = (_ctx?: Context) => PAYME_ENABLED && PAYME_MERCHANT_ID !== "";
 // Click SHOP-API (merchant.click.uz). The bot only builds the pay link; the
 // Prepare/Complete callbacks live in the Next.js app (/api/click).
 const CLICK_ENABLED = process.env.CLICK_ENABLED === "1";
 const CLICK_SERVICE_ID = process.env.CLICK_SERVICE_ID ?? "";
 const CLICK_MERCHANT_ID = process.env.CLICK_MERCHANT_ID ?? "";
-const clickReady = (ctx?: Context) =>
-  CLICK_ENABLED && CLICK_SERVICE_ID !== "" && CLICK_MERCHANT_ID !== "" && (!ctx || isAdmin(ctx));
+const clickReady = (_ctx?: Context) =>
+  CLICK_ENABLED && CLICK_SERVICE_ID !== "" && CLICK_MERCHANT_ID !== "";
 // Premium-emoji ids for the bank buttons (same ones used in the poll).
 const PAYME_BTN_EMOJI = "5204128408463744787";
 const CLICK_BTN_EMOJI = "5350345287246311562";
-// Direct pay = pay the full price straight to a bank, no balance. Admin-only
-// for now; becomes a setting/everyone once Payme+Click are approved.
-const directPayEnabled = (ctx?: Context) => Boolean(ctx && isAdmin(ctx));
+// Premium emoji for the pay screen: ⭐️ header + Stars button, ⬇️ "choose method".
+const PAY_STAR_EMOJI = "5359512328003941083";
+const PAY_ARROW_EMOJI = "5771449161123631882";
+// Direct pay = pay the full price straight to a bank (Payme / Click / Stars),
+// no balance. Now on for everyone — the balance model is retired.
+const directPayEnabled = (_ctx?: Context) => true;
 if (!token) {
   console.error("[bot] TELEGRAM_BOT_TOKEN is not set in .env — cannot start.");
   process.exit(1);
@@ -981,9 +984,9 @@ async function refundRefPoints(userId: number, points: number | undefined) {
 
 async function executePurchase(tgId: string, variantId: number, qty: number, refPointsCost?: number, targetUsername?: string) {
   const isRefGift = refPointsCost !== undefined && refPointsCost > 0;
-  // In direct-pay (admin for now) the balance is internal plumbing, so the
-  // delivery message must not show a "Осталось: … сум" balance line.
-  const hideBalance = ADMIN_ID !== "" && tgId === ADMIN_ID;
+  // Direct-pay for everyone: the balance is internal plumbing, so the delivery
+  // message must never show a "Осталось: … сум" balance line.
+  const hideBalance = true;
   const user = await db.botUser.findUnique({ where: { tgId } });
   if (!user) return;
   const lang = user.lang;
@@ -1375,13 +1378,19 @@ async function showBankPicker(
   } else {
     kb.text("Click", `tclick_buy:${total}:${v.id}:${qty}${suffix}`).icon(CLICK_BTN_EMOJI).row();
   }
+  // Telegram Stars — always available (native, no merchant needed). A callback
+  // (not a URL) because an invoice can only be opened from inside the bot.
+  kb.text(t(lang, "pay_stars", { n: soumToStars(total) }), `tstar_buy:${total}:${v.id}:${qty}${suffix}`).icon(PAY_STAR_EMOJI).row();
+  // Buy through the admin: files a manual request (with product + recipient) and
+  // pings the admin with ✅/❌; on approve the goods are delivered automatically.
+  kb.text(t(lang, "admin_topup"), `tman_buy:${total}:${v.id}:${qty}${suffix}`).row();
   kb.text(t(lang, "back"), `q:${v.id}:${qty}:0:all`);
 
   const text =
     `🧾 <b>${esc(label)}</b>\n\n` +
     (targetUsername ? `${t(lang, "uname_for")}: <b>@${esc(targetUsername)}</b>\n\n` : "") +
-    `💳 К оплате: <b>${money(total, lang)}</b>\n\n` +
-    `Выберите способ оплаты 👇`;
+    `<tg-emoji emoji-id="${PAY_STAR_EMOJI}">⭐️</tg-emoji> К оплате: <b>${money(total, lang)}</b>\n\n` +
+    `Выберите способ оплаты <tg-emoji emoji-id="${PAY_ARROW_EMOJI}">⬇️</tg-emoji>`;
   await ctx.answerCallbackQuery().catch(() => {});
   await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(async () => {
     await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
@@ -2060,11 +2069,28 @@ async function handleReceiptPhoto(ctx: Context, fileId: string) {
   }
 }
 
+// Product title for a "buy:<variantId>:…" note, e.g. "Gemini Pro — 1 месяц",
+// so a product bought with Stars shows its own name on the invoice rather than a
+// generic top-up. Title ≤32 chars, description ≤255 (Telegram invoice limits).
+async function buyInvoiceCaption(note: string | null, lang: string): Promise<{ title: string; desc: string } | null> {
+  if (!note?.startsWith("buy:")) return null;
+  const vid = Number(note.split(":")[1]);
+  if (!Number.isFinite(vid)) return null;
+  const v = await db.variant.findUnique({ where: { id: vid }, include: { plan: { include: { product: true } } } });
+  if (!v) return null;
+  const pt = await pick3(v.plan.product.titleRu, v.plan.product.titleEn, v.plan.product.titleUz, lang);
+  const vt = await locName(v.titleRu, v.titleUz, lang);
+  return { title: pt.slice(0, 32), desc: `${pt} — ${vt}`.slice(0, 255) };
+}
+
 async function starsInvoice(ctx: Context, lang: string, amount: number, note: string | null = null) {
   const stars = soumToStars(amount);
   await ctx.answerCallbackQuery().catch(() => {});
   const payload = note ? `topup:${amount}:stars:${note}` : `topup:${amount}:stars`;
-  await ctx.replyWithInvoice(t(lang, "topup_of", { v: money(amount, lang) }), t(lang, "topup_of", { v: money(amount, lang) }), payload, "XTR", [{ label: money(amount, lang), amount: stars }]).catch((e) => { console.error("[bot] stars:", (e as Error).message); ctx.reply("⚠️").catch(() => {}); });
+  const cap = await buyInvoiceCaption(note, lang);
+  const title = cap?.title ?? t(lang, "topup_of", { v: money(amount, lang) });
+  const desc = cap?.desc ?? t(lang, "topup_of", { v: money(amount, lang) });
+  await ctx.replyWithInvoice(title, desc, payload, "XTR", [{ label: money(amount, lang), amount: stars }]).catch((e) => { console.error("[bot] stars:", (e as Error).message); ctx.reply("⚠️").catch(() => {}); });
 }
 
 async function cardInvoice(ctx: Context, lang: string, amount: number, note: string | null = null) {
@@ -2106,7 +2132,12 @@ async function creditPaidTopUp(ctx: Context, amount: number, method: string, cha
     db.topUp.create({ data: { userId: user.id, amount, method, status: "approved", externalId: chargeId, note } }),
   ]);
   const u = await db.botUser.findUnique({ where: { id: user.id } });
-  await ctx.reply(t(lang, "paid_received", { v: money(amount, lang), b: money(u?.balance ?? 0, lang) }), { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all") }).catch(() => {});
+  // A product purchase (buy note) gets its own delivery message from
+  // executePurchase below — don't also show a "balance credited" screen, since
+  // the balance is hidden everywhere now.
+  if (!(variantId && qty)) {
+    await ctx.reply(t(lang, "paid_received", { v: money(amount, lang), b: money(u?.balance ?? 0, lang) }), { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all") }).catch(() => {});
+  }
   if (ADMIN_ID) await ctx.api.sendMessage(ADMIN_ID, `💰 (${method}) ${money(amount, lang)} — ${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})`).catch(() => {});
 
   if (variantId && qty) {
