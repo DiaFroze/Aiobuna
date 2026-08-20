@@ -977,6 +977,9 @@ async function refundRefPoints(userId: number, points: number | undefined) {
 
 async function executePurchase(tgId: string, variantId: number, qty: number, refPointsCost?: number, targetUsername?: string) {
   const isRefGift = refPointsCost !== undefined && refPointsCost > 0;
+  // In direct-pay (admin for now) the balance is internal plumbing, so the
+  // delivery message must not show a "Осталось: … сум" balance line.
+  const hideBalance = ADMIN_ID !== "" && tgId === ADMIN_ID;
   const user = await db.botUser.findUnique({ where: { tgId } });
   if (!user) return;
   const lang = user.lang;
@@ -1246,8 +1249,8 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
       const confirmText =
         `${t(lang, "order_paid", { id: reserve.orderId })}\n\n` +
         `${esc(label)}\n${chargeLine}\n` +
-        `${t(lang, "remaining", { v: money(u?.balance ?? 0, lang) })}\n\n` +
-        `✅ <b>Файл со ссылками отправляется...</b>`;
+        (hideBalance ? "" : `${t(lang, "remaining", { v: money(u?.balance ?? 0, lang) })}\n`) +
+        `\n✅ <b>Файл со ссылками отправляется...</b>`;
       if (activateVideo) {
         if (procMsg) await bot.api.deleteMessage(tgId, procMsg.message_id).catch(() => {});
         await bot.api.sendVideo(tgId, activateVideo, { caption: confirmText, parse_mode: "HTML", reply_markup: deliveredKb }).catch(async () => {
@@ -1266,8 +1269,8 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
       const confirmText =
         `${t(lang, "order_paid", { id: reserve.orderId })}\n\n` +
         `${esc(label)}\n${chargeLine}\n` +
-        `${t(lang, "remaining", { v: money(u?.balance ?? 0, lang) })}\n\n` +
-        `${t(lang, "your_goods")}\n<code>${esc(finalPayload)}</code>`;
+        (hideBalance ? "" : `${t(lang, "remaining", { v: money(u?.balance ?? 0, lang) })}\n`) +
+        `\n${t(lang, "your_goods")}\n<code>${esc(finalPayload)}</code>`;
       if (activateVideo) {
         if (procMsg) await bot.api.deleteMessage(tgId, procMsg.message_id).catch(() => {});
         await bot.api.sendVideo(tgId, activateVideo, { caption: confirmText, parse_mode: "HTML", reply_markup: deliveredKb }).catch(async () => {
@@ -4735,17 +4738,25 @@ async function deliverPaidPaymeTopUps() {
       const user = await db.botUser.findUnique({ where: { id: topup.userId } });
       if (!user) continue;
       const lang = user.lang;
-      await bot.api.sendMessage(
-        user.tgId,
-        t(lang, "paid_received", { v: money(topup.amount, lang), b: money(user.balance, lang) }),
-        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all") },
-      ).catch(() => {});
+      const isDirectBuy = !!topup.note && topup.note.startsWith("buy:");
+
+      // A direct purchase (bank picker) must NOT show a "баланс пополнен"
+      // message — the balance is just internal plumbing here. Only a plain
+      // top-up announces the balance. executePurchase() sends the delivery
+      // message either way.
+      if (!isDirectBuy) {
+        await bot.api.sendMessage(
+          user.tgId,
+          t(lang, "paid_received", { v: money(topup.amount, lang), b: money(user.balance, lang) }),
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all") },
+        ).catch(() => {});
+      }
       if (ADMIN_ID) {
         await bot.api.sendMessage(ADMIN_ID, `💰 (payme) ${money(topup.amount, lang)} — ${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})`).catch(() => {});
       }
       // buy:variantId:qty[:username] → fulfil the purchase from the fresh balance.
-      if (topup.note && topup.note.startsWith("buy:")) {
-        const [, varIdStr, qtyStr, uname] = topup.note.split(":");
+      if (isDirectBuy) {
+        const [, varIdStr, qtyStr, uname] = topup.note!.split(":");
         const variantId = Number(varIdStr);
         const qty = Number(qtyStr);
         if (variantId && qty) {
