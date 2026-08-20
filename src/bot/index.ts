@@ -131,9 +131,12 @@ const clickReady = (_ctx?: Context) =>
 // Premium-emoji ids for the bank buttons (same ones used in the poll).
 const PAYME_BTN_EMOJI = "5204128408463744787";
 const CLICK_BTN_EMOJI = "5350345287246311562";
-// Premium emoji for the pay screen: ⭐️ header + Stars button, ⬇️ "choose method".
+// Premium emoji for the pay screen: ⭐️ header, ⬇️ "choose method", 🌟 Stars
+// button, 👑 contact-admin button.
 const PAY_STAR_EMOJI = "5359512328003941083";
 const PAY_ARROW_EMOJI = "5771449161123631882";
+const STARS_BTN_EMOJI = "5895708410447401643";
+const ADMIN_BTN_EMOJI = "6129805886383723340";
 // Direct pay = pay the full price straight to a bank (Payme / Click / Stars),
 // no balance. Now on for everyone — the balance model is retired.
 const directPayEnabled = (_ctx?: Context) => true;
@@ -1378,12 +1381,30 @@ async function showBankPicker(
   } else {
     kb.text("Click", `tclick_buy:${total}:${v.id}:${qty}${suffix}`).icon(CLICK_BTN_EMOJI).row();
   }
-  // Telegram Stars — always available (native, no merchant needed). A callback
-  // (not a URL) because an invoice can only be opened from inside the bot.
-  kb.text(t(lang, "pay_stars", { n: soumToStars(total) }), `tstar_buy:${total}:${v.id}:${qty}${suffix}`).icon(PAY_STAR_EMOJI).row();
-  // Buy through the admin: files a manual request (with product + recipient) and
-  // pings the admin with ✅/❌; on approve the goods are delivered automatically.
-  kb.text(t(lang, "admin_topup"), `tman_buy:${total}:${v.id}:${qty}${suffix}`).row();
+  // Telegram Stars — one-tap like Click: build an invoice link and put it on a
+  // URL button, so tapping opens the Stars payment sheet directly (no second
+  // message). The product name is the invoice title. Falls back to a callback
+  // invoice if the link can't be created.
+  const starLabel = stripLeadEmoji(t(lang, "pay_stars", { n: soumToStars(total) }));
+  try {
+    const cap = await buyInvoiceCaption(note, lang);
+    const starLink = await ctx.api.createInvoiceLink(
+      cap?.title ?? label.slice(0, 32),
+      cap?.desc ?? label.slice(0, 255),
+      `topup:${total}:stars:${note}`,
+      "", "XTR",
+      [{ label: money(total, lang), amount: soumToStars(total) }],
+    );
+    kb.url(starLabel, starLink).icon(STARS_BTN_EMOJI).row();
+  } catch (e) {
+    console.error("[bot] stars link:", (e as Error).message);
+    kb.text(starLabel, `tstar_buy:${total}:${v.id}:${qty}${suffix}`).icon(STARS_BTN_EMOJI).row();
+  }
+  // Contact admin: a URL button that opens the admin's personal chat with the
+  // product name pre-filled, so the customer only has to hit send.
+  const adminUser = (await setting("support_username", "Aiobuna_support")).replace(/^@/, "");
+  const adminText = `${label} — ${money(total, lang)}${targetUsername ? ` (@${targetUsername})` : ""}`;
+  kb.url(stripLeadEmoji(t(lang, "admin_topup")), `https://t.me/${adminUser}?text=${encodeURIComponent(adminText)}`).icon(ADMIN_BTN_EMOJI).row();
   kb.text(t(lang, "back"), `q:${v.id}:${qty}:0:all`);
 
   const text =
