@@ -319,6 +319,9 @@ function styleFor(data?: string): "primary" | "success" | "danger" | undefined {
   if (!data) return "primary";
   const bank = BANK_STYLE.get(data); // per-bank poll colour
   if (bank) return bank;
+  // Nav buttons (Заказы / Профиль) green so they stand apart from the blue
+  // product buttons.
+  if (data === "ord" || data === "profile_show") return "success";
   if (/^(bc:|tstar|tcard|tman|ap:|top:)/.test(data)) return "success";
   if (/^rj:/.test(data)) return "danger";
   return "primary";
@@ -577,27 +580,13 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
   }
   if (!freebies && items.length > 0) {
     if (hideWallet) {
-      kb.text(stripLeadEmoji(t(lang, "btn_orders")), "ord").icon(ordersButtonEmoji).row();
+      // Orders + Profile share one row.
+      kb.text(stripLeadEmoji(t(lang, "btn_orders")), "ord").icon(ordersButtonEmoji)
+        .text(stripLeadEmoji(t(lang, "btn_profile")), "profile_show").icon(profileButtonEmoji).row();
     } else {
       kb.text(stripLeadEmoji(t(lang, "btn_wallet")), "bal").icon(walletButtonEmoji)
         .text(stripLeadEmoji(t(lang, "btn_orders")), "ord").icon(ordersButtonEmoji).row();
-    }
-    kb.text(stripLeadEmoji(t(lang, "btn_profile")), "profile_show").icon(profileButtonEmoji).row();
-    // Marketing teaser: advertise the priciest referral-shop item right in the
-    // catalog, so people see there's a way to get it for free. Tapping it
-    // opens the Подарки shop. Uses getGiftVariants() — the same source the
-    // gifts shop reads — so items configured via the admin's tier settings
-    // (not just Variant.pointsCost) show up here too.
-    const gifts = await getGiftVariants().catch(() => []);
-    const topGift = gifts.length ? gifts[gifts.length - 1] : null; // sorted asc by cost
-    if (topGift) {
-      const gp = lang === "uz" ? topGift.variant.plan.product.titleUz || topGift.variant.plan.product.titleRu : topGift.variant.plan.product.titleRu;
-      const gv = lang === "uz" ? topGift.variant.titleUz || topGift.variant.titleRu : topGift.variant.titleRu;
-      const title = formatItemTitle(gp, gv);
-      const premium = giftPremiumEmoji(gp, topGift.variant.plan.product.premiumEmoji);
-      const btn = kb.text(`${premium ? "" : "🎁 "}${title} — ${t(lang, "free")}`, "gifts_show");
-      if (premium) btn.icon(premium);
-      kb.row();
+      kb.text(stripLeadEmoji(t(lang, "btn_profile")), "profile_show").icon(profileButtonEmoji).row();
     }
   }
 
