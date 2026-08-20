@@ -1,10 +1,12 @@
 import Link from "next/link";
 import { PageHeader, Table, EmptyState, StatCard } from "@/components/admin/ui";
 import { botDb, botConfigured } from "@/lib/botDb";
-import { sourceProducts, sourceBalance, type Source, type SupplierProduct } from "@/lib/supplier";
+import { sourceProducts, sourceBalance, envVexSource, envBuyerSource, type Source, type SupplierProduct } from "@/lib/supplier";
 import { importSourceProductAction } from "./actions";
 
 export const dynamic = "force-dynamic";
+
+type SrcRow = { id: number; slug: string; name: string; baseUrl: string; apiKey: string; format: string };
 
 export default async function BotImportPage({ searchParams }: { searchParams: { src?: string } }) {
   if (!botConfigured()) {
@@ -16,7 +18,17 @@ export default async function BotImportPage({ searchParams }: { searchParams: { 
     );
   }
 
-  const sources = await botDb.apiSource.findMany({ where: { isActive: true }, orderBy: { id: "asc" } });
+  const dbSources = await botDb.apiSource.findMany({ where: { isActive: true }, orderBy: { id: "asc" } });
+  // Env-only sources (key in Railway, not the DB) appear here too, unless a DB
+  // row already claims the same slug.
+  const envRows: SrcRow[] = [envBuyerSource(), envVexSource()]
+    .filter((s): s is Source => !!s)
+    .map((s, i) => ({ id: -1 - i, slug: s.slug, name: s.slug === "somadeth" ? "SoMaDeth" : s.slug.toUpperCase(), baseUrl: s.baseUrl, apiKey: s.apiKey, format: s.format }))
+    .filter((es) => !dbSources.some((d) => d.slug === es.slug));
+  const sources: SrcRow[] = [
+    ...dbSources.map((d) => ({ id: d.id, slug: d.slug, name: d.name, baseUrl: d.baseUrl, apiKey: d.apiKey, format: d.format })),
+    ...envRows,
+  ];
   if (sources.length === 0) {
     return (
       <div className="space-y-4">

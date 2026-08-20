@@ -5,7 +5,7 @@ import { requirePermission } from "@/lib/auth/session";
 import { PERMISSIONS } from "@/lib/security/rbac";
 import { botDb } from "@/lib/botDb";
 import { audit } from "@/lib/security/audit";
-import { sourceProducts, type Source } from "@/lib/supplier";
+import { sourceProducts, envVexSource, envBuyerSource, type Source } from "@/lib/supplier";
 import { geminiLocalize } from "@/lib/gemini";
 
 function num(v: FormDataEntryValue | null): number {
@@ -18,7 +18,11 @@ function priceWithMarkup(base: number, markupPct: number): number {
 
 async function getSource(slug: string): Promise<Source | null> {
   const row = await botDb.apiSource.findFirst({ where: { slug, isActive: true } });
-  return row ? { slug: row.slug, baseUrl: row.baseUrl, apiKey: row.apiKey, format: row.format } : null;
+  if (row) return { slug: row.slug, baseUrl: row.baseUrl, apiKey: row.apiKey, format: row.format };
+  // Env-only sources (key lives in Railway, never in the DB).
+  if (slug === "vex") return envVexSource();
+  if (slug === "somadeth" || slug === "buyer") return envBuyerSource();
+  return null;
 }
 
 /**

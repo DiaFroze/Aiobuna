@@ -10,7 +10,7 @@ try {
 import { Bot, InlineKeyboard, Keyboard, InputFile, type Context } from "grammy";
 import type { MessageEntity } from "grammy/types";
 import { db } from "./db";
-import { sourceOrder, envVexSource, type Source } from "../lib/supplier";
+import { sourceOrder, envVexSource, envBuyerSource, type Source } from "../lib/supplier";
 import { geminiTranslate } from "../lib/gemini";
 import { t, LANGS, LANG_NAMES, normalizeLang, btnVariants, type Lang } from "./i18n";
 import { generateVerificationCode } from "../lib/orderCode";
@@ -486,7 +486,9 @@ async function resolveSource(slug: string | null | undefined): Promise<Source | 
   if (!slug) return null;
   const row = await db.apiSource.findFirst({ where: { slug, isActive: true } });
   if (row) return { slug: row.slug, baseUrl: row.baseUrl, apiKey: row.apiKey, format: row.format };
-  return slug === "vex" ? envVexSource() : null;
+  if (slug === "vex") return envVexSource();
+  if (slug === "somadeth" || slug === "buyer") return envBuyerSource();
+  return null;
 }
 async function disclaimerFor(lang: string): Promise<string> {
   const custom = await setting("disclaimer", "");
