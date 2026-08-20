@@ -17,6 +17,7 @@ import { generateVerificationCode } from "../lib/orderCode";
 import { parseBulkPrices, parseBulkBonus, bulkTotal, bonusQty, bulkSaving, describeBulk } from "../lib/domain/bulk-pricing";
 import { checkUsername } from "../lib/domain/telegram-username";
 import { buildCheckoutUrl, sumToTiyin } from "../lib/domain/payme";
+import { buildClickUrl } from "../lib/domain/click";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -120,10 +121,13 @@ const PAYME_ENABLED = process.env.PAYME_ENABLED === "1";
 const PAYME_MERCHANT_ID = process.env.PAYME_MERCHANT_ID ?? "";
 const PAYME_CHECKOUT_URL = (process.env.PAYME_CHECKOUT_URL ?? "https://checkout.paycom.uz").replace(/\/+$/, "");
 const paymeReady = (ctx?: Context) => PAYME_ENABLED && PAYME_MERCHANT_ID !== "" && (!ctx || isAdmin(ctx));
-// Click — not integrated yet (pending approval). The button is shown so the new
-// flow can be tested; tapping it explains it's coming until CLICK_ENABLED=1.
+// Click SHOP-API (merchant.click.uz). The bot only builds the pay link; the
+// Prepare/Complete callbacks live in the Next.js app (/api/click).
 const CLICK_ENABLED = process.env.CLICK_ENABLED === "1";
-const clickReady = (ctx?: Context) => CLICK_ENABLED && (!ctx || isAdmin(ctx));
+const CLICK_SERVICE_ID = process.env.CLICK_SERVICE_ID ?? "";
+const CLICK_MERCHANT_ID = process.env.CLICK_MERCHANT_ID ?? "";
+const clickReady = (ctx?: Context) =>
+  CLICK_ENABLED && CLICK_SERVICE_ID !== "" && CLICK_MERCHANT_ID !== "" && (!ctx || isAdmin(ctx));
 // Premium-emoji ids for the bank buttons (same ones used in the poll).
 const PAYME_BTN_EMOJI = "5204128408463744787";
 const CLICK_BTN_EMOJI = "5350345287246311562";
@@ -1359,8 +1363,18 @@ async function showBankPicker(
     const url = buildCheckoutUrl({ checkoutBase: PAYME_CHECKOUT_URL, merchantId: PAYME_MERCHANT_ID, topUpId: topup.id, amountTiyin: sumToTiyin(total), lang });
     kb.url("Payme", url).icon(PAYME_BTN_EMOJI).row();
   }
-  // Click not integrated yet → stays a callback that explains it's coming.
-  kb.text("Click", `tclick_buy:${total}:${v.id}:${qty}${suffix}`).icon(CLICK_BTN_EMOJI).row();
+  // Click — same one-tap URL button when configured; a separate pending top-up
+  // (method=click) so Prepare/Complete resolve it by its own id. Until the
+  // merchant service is live it stays a callback explaining it's coming.
+  if (clickReady(ctx)) {
+    const ctopup = await db.topUp.create({
+      data: { userId: user.id, amount: total, method: "click", status: "pending", note, expiresAt: new Date(Date.now() + 30 * 60_000) },
+    });
+    const url = buildClickUrl({ serviceId: CLICK_SERVICE_ID, merchantId: CLICK_MERCHANT_ID, topUpId: ctopup.id, amountSum: total });
+    kb.url("Click", url).icon(CLICK_BTN_EMOJI).row();
+  } else {
+    kb.text("Click", `tclick_buy:${total}:${v.id}:${qty}${suffix}`).icon(CLICK_BTN_EMOJI).row();
+  }
   kb.text(t(lang, "back"), `q:${v.id}:${qty}:0:all`);
 
   const text =
@@ -4722,14 +4736,14 @@ async function maybeResetAdmins() {
 // restart mid-batch) never double-deliver. Money is never touched here.
 async function deliverPaidPaymeTopUps() {
   const pendingDelivery = await db.topUp.findMany({
-    where: { method: "payme", status: "approved", deliveredAt: null },
+    where: { method: { in: ["payme", "click"] }, status: "approved", deliveredAt: null },
     take: 20,
   }).catch(() => [] as Array<{ id: number; userId: number; amount: number; note: string | null }>);
 
   for (const topup of pendingDelivery) {
     // Atomic claim — only the tick that flips deliveredAt proceeds.
     const claim = await db.topUp.updateMany({
-      where: { id: topup.id, method: "payme", status: "approved", deliveredAt: null },
+      where: { id: topup.id, method: { in: ["payme", "click"] }, status: "approved", deliveredAt: null },
       data: { deliveredAt: new Date() },
     }).catch(() => ({ count: 0 }));
     if (claim.count !== 1) continue;
@@ -4752,7 +4766,7 @@ async function deliverPaidPaymeTopUps() {
         ).catch(() => {});
       }
       if (ADMIN_ID) {
-        await bot.api.sendMessage(ADMIN_ID, `💰 (payme) ${money(topup.amount, lang)} — ${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})`).catch(() => {});
+        await bot.api.sendMessage(ADMIN_ID, `💰 (${(topup as { method?: string }).method ?? "payme"}) ${money(topup.amount, lang)} — ${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})`).catch(() => {});
       }
       // buy:variantId:qty[:username] → fulfil the purchase from the fresh balance.
       if (isDirectBuy) {

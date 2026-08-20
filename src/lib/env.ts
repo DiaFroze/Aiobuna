@@ -44,4 +44,12 @@ export const env = {
   // for the sandbox. Trailing slash optional.
   paymeCheckoutUrl: () =>
     (process.env.PAYME_CHECKOUT_URL ?? "https://checkout.paycom.uz").replace(/\/+$/, ""),
+
+  // --- Click Merchant (SHOP-API) ---
+  clickEnabled: () => process.env.CLICK_ENABLED === "1",
+  clickServiceId: () => process.env.CLICK_SERVICE_ID ?? "",
+  clickMerchantId: () => process.env.CLICK_MERCHANT_ID ?? "",
+  // Secret key from the Click merchant cabinet — used to verify the callback
+  // signature. Never logged.
+  clickSecretKey: () => process.env.CLICK_SECRET_KEY ?? "",
 };
