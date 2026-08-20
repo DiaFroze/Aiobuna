@@ -99,6 +99,11 @@ export default async function BotProductEditPage({ params }: { params: { id: str
           Товар активен (показывается в боте)
         </label>
 
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" name="refDiscount" defaultChecked={product.refDiscount} />
+          Скидка за рефералов (5→−10%, 10→−20%, 20→−40%)
+        </label>
+
         <div className="flex gap-2">
           <button className="btn-primary">Сохранить</button>
         </div>

@@ -607,6 +607,8 @@ model Product {
   descEn       String  @default("")
   sortOrder    Int     @default(0)
   isActive     Boolean @default(true)
+  // Eligible for the referral discount (invite N friends → % off at checkout).
+  refDiscount  Boolean @default(false)
   plans        Plan[]
 }
 
@@ -753,6 +755,9 @@ model TopUp {
   // NOT done here — that happens once, in the Payme webhook. This flag only
   // guards the delivery side effects so the bot runs them exactly once.
   deliveredAt DateTime?
+  // Referrals to consume when this purchase is delivered (referral-discount
+  // coupon). 0 = no discount was applied.
+  refSpend   Int      @default(0)
   paymeTxn   PaymeTransaction?
   createdAt  DateTime @default(now())
 }

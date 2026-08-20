@@ -331,6 +331,7 @@ export async function updateBotProductAction(formData: FormData) {
       descUz: dUz,
       descEn: dEn,
       isActive: formData.get("isActive") === "on",
+      refDiscount: formData.get("refDiscount") === "on",
     },
   });
 

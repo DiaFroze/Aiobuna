@@ -140,6 +140,28 @@ const ADMIN_BTN_EMOJI = "6129805886383723340";
 // Direct pay = pay the full price straight to a bank (Payme / Click / Stars),
 // no balance. Now on for everyone — the balance model is retired.
 const directPayEnabled = (_ctx?: Context) => true;
+
+// Referral discount: invite N verified friends → % off eligible products. The
+// discount is a coupon — a purchase SPENDS `min` referrals (the threshold), and
+// the count drops afterwards. Tiers are checked high→low; the best affordable
+// one wins. Only products flagged refDiscount in admin take part.
+const REF_DISCOUNT_TIERS = [
+  { min: 20, pct: 40 },
+  { min: 10, pct: 20 },
+  { min: 5, pct: 10 },
+] as const;
+// Best tier `avail` referrals can buy, or null. cost = referrals it will spend.
+function bestRefDiscount(avail: number): { pct: number; cost: number } | null {
+  for (const tier of REF_DISCOUNT_TIERS) if (avail >= tier.min) return { pct: tier.pct, cost: tier.min };
+  return null;
+}
+// The % that a given referral-spend (5/10/20) corresponds to — used on delivery
+// to recompute the exact discounted price the customer already paid.
+function refDiscountPct(cost: number): number {
+  return REF_DISCOUNT_TIERS.find((tier) => tier.min === cost)?.pct ?? 0;
+}
+// Подарки (free item for referral points) are retired in favour of the discount.
+const GIFTS_ENABLED: boolean = false;
 if (!token) {
   console.error("[bot] TELEGRAM_BOT_TOKEN is not set in .env — cannot start.");
   process.exit(1);
@@ -383,8 +405,10 @@ function premiumIconFor(text: string): string | undefined {
 // button is dropped (admin only for now).
 function mainKeyboard(lang: string, hideWallet = false) {
   const kb = new Keyboard().text(t(lang, "btn_shop")).row();
-  if (hideWallet) kb.text(t(lang, "btn_freebies")).row();
-  else kb.text(t(lang, "btn_wallet")).text(t(lang, "btn_freebies")).row();
+  // Подарки retired (GIFTS_ENABLED=false) — referral rewards are now a discount
+  // applied at checkout, not a free-item shop.
+  if (!hideWallet) kb.text(t(lang, "btn_wallet")).row();
+  if (GIFTS_ENABLED) kb.text(t(lang, "btn_freebies")).row();
   kb.text(t(lang, "btn_profile")).text(t(lang, "btn_instructions")).row();
   return kb.resized().persistent();
 }
@@ -974,7 +998,7 @@ async function refundRefPoints(userId: number, points: number | undefined) {
   ).catch((e) => console.error("[bot] refundRefPoints failed:", (e as Error).message));
 }
 
-async function executePurchase(tgId: string, variantId: number, qty: number, refPointsCost?: number, targetUsername?: string) {
+async function executePurchase(tgId: string, variantId: number, qty: number, refPointsCost?: number, targetUsername?: string, discountCost = 0) {
   const isRefGift = refPointsCost !== undefined && refPointsCost > 0;
   // Direct-pay for everyone: the balance is internal plumbing, so the delivery
   // message must never show a "Осталось: … сум" balance line.
@@ -1007,7 +1031,11 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
   // Bonus items still have to physically exist; never promise more than stock.
   const freeQty = Math.min(deal.free, Math.max(0, max - paidQty));
   const finalQty = paidQty + freeQty;
-  const total = isRefGift ? 0 : deal.total;
+  // Referral-discount coupon: recompute the exact discounted price the customer
+  // already paid on the pay screen (so the balance charge nets to zero), and
+  // spend the referrals below once the order is committed.
+  const discPct = discountCost > 0 ? refDiscountPct(discountCost) : 0;
+  const total = isRefGift ? 0 : Math.round(deal.total * (100 - discPct) / 100);
   const label =
     freeQty > 0 ? `${baseTitle} ×${paidQty} +${freeQty} 🎁`
     : paidQty > 1 ? `${baseTitle} ×${paidQty}`
@@ -1033,6 +1061,9 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
 
       if (!isRefGift && total > 0) {
         await tx.botUser.update({ where: { id: user.id }, data: { balance: { decrement: total } } });
+      }
+      if (discountCost > 0) {
+        await tx.botUser.update({ where: { id: user.id }, data: { spentReferrals: { increment: discountCost } } });
       }
       const order = await tx.botOrder.create({ data: { userId: user.id, variantId, titleRu: label, priceUsdt: 0, payload: "", source: isRefGift ? "referral" : "manual", status: "awaiting_delivery", targetUsername: targetUsername ?? null } });
       return { orderId: order.id };
@@ -1099,6 +1130,9 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
     if (!isRefGift && u.balance < total) return { error: "balance" as const };
     if (!isRefGift && total > 0) {
       await tx.botUser.update({ where: { id: user.id }, data: { balance: { decrement: total } } });
+    }
+    if (discountCost > 0) {
+      await tx.botUser.update({ where: { id: user.id }, data: { spentReferrals: { increment: discountCost } } });
     }
     const order = await tx.botOrder.create({
       data: {
@@ -1342,10 +1376,12 @@ async function showBankPicker(
   label: string,
   total: number,
   targetUsername?: string,
+  disc: { pct: number; cost: number } | null = null,
 ) {
   const user = await getUser(ctx);
   const suffix = targetUsername ? `:${targetUsername}` : "";
   const note = `buy:${v.id}:${qty}${suffix}`;
+  const refSpend = disc?.cost ?? 0;
   const kb = new InlineKeyboard();
 
   // Payme is a direct URL button: pre-create the pending top-up for the full
@@ -1353,7 +1389,7 @@ async function showBankPicker(
   // opens Payme, no intermediate "оплатить" screen.
   if (paymeReady(ctx)) {
     const topup = await db.topUp.create({
-      data: { userId: user.id, amount: total, method: "payme", status: "pending", note, expiresAt: new Date(Date.now() + 30 * 60_000) },
+      data: { userId: user.id, amount: total, method: "payme", status: "pending", note, refSpend, expiresAt: new Date(Date.now() + 30 * 60_000) },
     });
     const url = buildCheckoutUrl({ checkoutBase: PAYME_CHECKOUT_URL, merchantId: PAYME_MERCHANT_ID, topUpId: topup.id, amountTiyin: sumToTiyin(total), lang });
     kb.url("Payme", url).icon(PAYME_BTN_EMOJI).row();
@@ -1363,7 +1399,7 @@ async function showBankPicker(
   // merchant service is live it stays a callback explaining it's coming.
   if (clickReady(ctx)) {
     const ctopup = await db.topUp.create({
-      data: { userId: user.id, amount: total, method: "click", status: "pending", note, expiresAt: new Date(Date.now() + 30 * 60_000) },
+      data: { userId: user.id, amount: total, method: "click", status: "pending", note, refSpend, expiresAt: new Date(Date.now() + 30 * 60_000) },
     });
     const url = buildClickUrl({ serviceId: CLICK_SERVICE_ID, merchantId: CLICK_MERCHANT_ID, topUpId: ctopup.id, amountSum: total });
     kb.url("Click", url).icon(CLICK_BTN_EMOJI).row();
@@ -1375,12 +1411,15 @@ async function showBankPicker(
   // message). The product name is the invoice title. Falls back to a callback
   // invoice if the link can't be created.
   const starLabel = stripLeadEmoji(t(lang, "pay_stars", { n: soumToStars(total) }));
+  // Fixed 8-field payload so the referral-spend rides along to delivery even
+  // when there's no recipient: topup:<amount>:stars:buy:<vid>:<qty>:<uname>:<refSpend>
+  const starPayload = `topup:${total}:stars:buy:${v.id}:${qty}:${targetUsername ?? ""}:${refSpend}`;
   try {
     const cap = await buyInvoiceCaption(note, lang);
     const starLink = await ctx.api.createInvoiceLink(
       cap?.title ?? label.slice(0, 32),
       cap?.desc ?? label.slice(0, 255),
-      `topup:${total}:stars:${note}`,
+      starPayload,
       "", "XTR",
       [{ label: money(total, lang), amount: soumToStars(total) }],
     );
@@ -1399,6 +1438,7 @@ async function showBankPicker(
   const text =
     `🧾 <b>${esc(label)}</b>\n\n` +
     (targetUsername ? `${t(lang, "uname_for")}: <b>@${esc(targetUsername)}</b>\n\n` : "") +
+    (disc ? `🎁 Скидка за рефералов: <b>−${disc.pct}%</b> (спишется ${disc.cost} реф.)\n\n` : "") +
     `<tg-emoji emoji-id="${PAY_STAR_EMOJI}">⭐️</tg-emoji> К оплате: <b>${money(total, lang)}</b>\n\n` +
     `Выберите способ оплаты <tg-emoji emoji-id="${PAY_ARROW_EMOJI}">⬇️</tg-emoji>`;
   await ctx.answerCallbackQuery().catch(() => {});
@@ -1432,12 +1472,18 @@ async function doBuy(ctx: Context, variantId: number, qty: number, targetUsernam
     : qty > 1 ? `${baseTitle} ×${qty}`
     : baseTitle;
 
-  // NEW direct-pay flow — admin only for now (regular users keep the balance
-  // flow untouched). No balance, no "insufficient funds", no how-to-pay video:
-  // straight to a bank picker (Payme / Click). When Payme+Click are approved
-  // this gate flips to everyone.
+  // Referral-discount coupon: eligible product + enough referrals → cut the
+  // price and remember how many referrals delivery will spend. Never on a
+  // Fragment (Stars/Premium) item — those go out at face value.
+  let disc: { pct: number; cost: number } | null = null;
+  if (v.plan.product.refDiscount && !v.needsUsername) {
+    disc = bestRefDiscount(await availableReferralPoints(user));
+  }
+  const payTotal = disc ? Math.round(total * (100 - disc.pct) / 100) : total;
+
+  // Direct-pay flow for everyone: no balance, straight to the bank/Stars picker.
   if (directPayEnabled(ctx)) {
-    return showBankPicker(ctx, lang, v, qty, label, total, targetUsername);
+    return showBankPicker(ctx, lang, v, qty, label, payTotal, targetUsername, disc);
   }
 
   // Enough balance -> execute purchase immediately
@@ -1552,6 +1598,9 @@ async function getGiftVariants() {
 async function buyForReferrals(ctx: Context, variantId: number) {
   const user = await getUser(ctx);
   const lang = user.lang;
+  if (!GIFTS_ENABLED) {
+    return ctx.answerCallbackQuery({ text: "Подарки отключены. Теперь при покупке действует скидка за рефералов.", show_alert: true }).catch(() => {});
+  }
   if (!(await isReferralsEnabled())) {
     return ctx.answerCallbackQuery({ text: "⏸ Реферальная программа временно приостановлена.", show_alert: true });
   }
@@ -1773,6 +1822,20 @@ async function sendTermsGate(ctx: Context, lang: string) {
 async function showGifts(ctx: Context, edit = false, silent = false) {
   const user = await getUser(ctx);
   const lang = user.lang;
+
+  // Подарки retired: referral rewards are now a discount applied at checkout.
+  if (!GIFTS_ENABLED) {
+    if (silent) return;
+    const avail = await availableReferralPoints(user);
+    const tiers = REF_DISCOUNT_TIERS.map((tr) => `• ${tr.min} реф. → −${tr.pct}%`).join("\n");
+    const kb = new InlineKeyboard().text(t(lang, "btn_refer"), "ref").row().text(t(lang, "to_shop"), "m:0:all");
+    await sendOrEdit(
+      ctx,
+      `🎁 <b>Скидка за друзей</b>\n\nПриглашайте друзей — и получайте скидку на покупку:\n${tiers}\n\nСкидка списывается при покупке (как купон).\nУ вас приглашено: <b>${avail}</b> реф.`,
+      { reply_markup: kb },
+    );
+    return;
+  }
 
   if (!(await isReferralsEnabled())) {
     if (silent) return;
@@ -2131,7 +2194,7 @@ async function requestTopUp(ctx: Context, lang: string, amount: number, method =
   }
 }
 
-async function creditPaidTopUp(ctx: Context, amount: number, method: string, chargeId: string, variantId?: number, qty?: number, targetUsername?: string) {
+async function creditPaidTopUp(ctx: Context, amount: number, method: string, chargeId: string, variantId?: number, qty?: number, targetUsername?: string, discountCost = 0) {
   const user = await getUser(ctx);
   const lang = user.lang;
 
@@ -2139,7 +2202,7 @@ async function creditPaidTopUp(ctx: Context, amount: number, method: string, cha
 
   await db.$transaction([
     db.botUser.update({ where: { id: user.id }, data: { balance: { increment: amount } } }),
-    db.topUp.create({ data: { userId: user.id, amount, method, status: "approved", externalId: chargeId, note } }),
+    db.topUp.create({ data: { userId: user.id, amount, method, status: "approved", externalId: chargeId, note, refSpend: discountCost } }),
   ]);
   const u = await db.botUser.findUnique({ where: { id: user.id } });
   // A product purchase (buy note) gets its own delivery message from
@@ -2151,7 +2214,7 @@ async function creditPaidTopUp(ctx: Context, amount: number, method: string, cha
   if (ADMIN_ID) await ctx.api.sendMessage(ADMIN_ID, `💰 (${method}) ${money(amount, lang)} — ${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})`).catch(() => {});
 
   if (variantId && qty) {
-    await executePurchase(user.tgId, variantId, qty, undefined, targetUsername).catch((err) => {
+    await executePurchase(user.tgId, variantId, qty, undefined, targetUsername, discountCost).catch((err) => {
       console.error("[bot] creditPaidTopUp auto-purchase fail:", err.message);
     });
   }
@@ -4438,12 +4501,13 @@ bot.on("message:successful_payment", async (ctx) => {
   const amount = Number(amtStr);
   if (!Number.isFinite(amount) || amount <= 0) return;
 
-  // Payload: topup:<amount>:<method>[:buy:<variantId>:<qty>[:<username>]]
+  // Payload: topup:<amount>:<method>[:buy:<variantId>:<qty>[:<username>[:<refSpend>]]]
   const variantId = parts[3] === "buy" ? Number(parts[4]) : undefined;
   const qty = parts[3] === "buy" ? Number(parts[5]) : undefined;
   const uname = parts[3] === "buy" ? (parts[6] || undefined) : undefined;
+  const discountCost = parts[3] === "buy" ? Number(parts[7] || 0) : 0;
 
-  await creditPaidTopUp(ctx, amount, method || "stars", sp.telegram_payment_charge_id, variantId, qty, uname);
+  await creditPaidTopUp(ctx, amount, method || "stars", sp.telegram_payment_charge_id, variantId, qty, uname, discountCost);
 });
 
 bot.catch((err) => console.error("[bot] error:", err.error));
@@ -4627,6 +4691,8 @@ async function ensureSchema() {
     )`,
     `CREATE INDEX IF NOT EXISTS "BotPollVote_choice_idx" ON "BotPollVote"("choice")`,
     `ALTER TABLE "TopUp" ADD COLUMN IF NOT EXISTS "deliveredAt" TIMESTAMP(3)`,
+    `ALTER TABLE "TopUp" ADD COLUMN IF NOT EXISTS "refSpend" INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS "refDiscount" BOOLEAN NOT NULL DEFAULT false`,
     `CREATE TABLE IF NOT EXISTS "PaymeTransaction" (
       "id" TEXT NOT NULL,
       "paymeId" TEXT NOT NULL,
@@ -4779,7 +4845,7 @@ async function deliverPaidPaymeTopUps() {
   const pendingDelivery = await db.topUp.findMany({
     where: { method: { in: ["payme", "click"] }, status: "approved", deliveredAt: null },
     take: 20,
-  }).catch(() => [] as Array<{ id: number; userId: number; amount: number; note: string | null }>);
+  }).catch(() => [] as Array<{ id: number; userId: number; amount: number; note: string | null; refSpend: number }>);
 
   for (const topup of pendingDelivery) {
     // Atomic claim — only the tick that flips deliveredAt proceeds.
@@ -4815,7 +4881,7 @@ async function deliverPaidPaymeTopUps() {
         const variantId = Number(varIdStr);
         const qty = Number(qtyStr);
         if (variantId && qty) {
-          await executePurchase(user.tgId, variantId, qty, undefined, uname || undefined).catch((e) => {
+          await executePurchase(user.tgId, variantId, qty, undefined, uname || undefined, topup.refSpend ?? 0).catch((e) => {
             console.error("[bot] payme auto-purchase fail:", (e as Error).message);
           });
         }
