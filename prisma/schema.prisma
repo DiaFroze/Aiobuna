@@ -609,6 +609,8 @@ model Product {
   isActive     Boolean @default(true)
   // Eligible for the referral discount (invite N friends → % off at checkout).
   refDiscount  Boolean @default(false)
+  // Telegram file_id of a video shown on the product card and on delivery.
+  videoFileId  String?
   plans        Plan[]
 }
 

@@ -204,6 +204,7 @@ const pending = new Map<
   | { type: "reject_custom_reason"; topupId: number }
   | { type: "target_username"; variantId: number; qty: number }
   | { type: "set_banner" }
+  | { type: "set_product_video"; productId: number }
 >();
 
 const bot = new Bot(token);
@@ -778,6 +779,22 @@ async function showProduct(ctx: Context, id: number, back: string) {
   const suffix = `\n\n${t(lang, "choose_plan")}`;
   text += suffix;
 
+  // A per-product video sits on top of the card: send it with the card as its
+  // caption (entities carry over). If the caption is too long (>1024) or the
+  // send fails, fall back to the text card below.
+  if (p.videoFileId) {
+    await ctx.deleteMessage().catch(() => {});
+    try {
+      await ctx.replyWithVideo(p.videoFileId, { caption: text, caption_entities: entities, reply_markup: kb });
+      await ctx.answerCallbackQuery().catch(() => {});
+      return;
+    } catch {
+      await ctx.reply(text, { reply_markup: kb, entities }).catch(() => {});
+      await ctx.answerCallbackQuery().catch(() => {});
+      return;
+    }
+  }
+
   // Product card uses message entities (custom_emoji/bold), not HTML — so the
   // parse_mode-based sendOrEdit doesn't apply here. Try in-place text edit
   // first (fast, no flicker); if the source was a photo message (catalog
@@ -1290,7 +1307,8 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
     // of stacking a separate video on top of it).
     const u = await db.botUser.findUnique({ where: { id: user.id } });
     const isLargeOrder = deliveredQty > 5;
-    const activateVideo = howToActivateFile();
+    // Per-product video (set via /pvideo) wins; else the global how-to-activate.
+    const activateVideo: string | InputFile | null = v.plan.product.videoFileId || howToActivateFile();
     // "Я получил" comes first: the customer confirms the goods actually work
     // before anything is asked of them. Tapping it is what triggers the review
     // prompt — a review from someone who has not yet checked their purchase is
@@ -3881,6 +3899,16 @@ bot.command("terms", async (ctx) => {
   const u = await getUser(ctx);
   await sendTermsGate(ctx, u.lang);
 });
+// Set a per-product video (shown on the product card + on delivery): pick a
+// product, then send the video. 🎬 marks products that already have one.
+bot.command("pvideo", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const products = await db.product.findMany({ where: { isActive: true }, orderBy: { sortOrder: "asc" }, select: { id: true, titleRu: true, videoFileId: true } });
+  if (!products.length) return ctx.reply("Нет активных товаров.").catch(() => {});
+  const kb = new InlineKeyboard();
+  for (const p of products) kb.text(`${p.videoFileId ? "🎬 " : ""}${p.titleRu}`, `pvid:${p.id}`).row();
+  await ctx.reply("🎬 Выберите товар, чтобы задать видео (🎬 = видео уже есть):", { reply_markup: kb }).catch(() => {});
+});
 
 bot.command("post", async (ctx) => {
   if (!isAdmin(ctx)) return;
@@ -4292,6 +4320,12 @@ bot.on("callback_query:data", async (ctx) => {
     if (tag === "tcheck_buy") return startReceiptPayment(ctx, lang, Number(rest[0]), `buy:${rest[1]}:${rest[2]}${rest[3] ? `:${rest[3]}` : ""}`);
     if (tag === "tstar_buy") return starsInvoice(ctx, lang, Number(rest[0]), `buy:${rest[1]}:${rest[2]}${rest[3] ? `:${rest[3]}` : ""}`);
     if (tag === "tman_buy") { await ctx.answerCallbackQuery().catch(() => {}); return requestTopUp(ctx, lang, Number(rest[0]), "manual", `buy:${rest[1]}:${rest[2]}${rest[3] ? `:${rest[3]}` : ""}`); }
+    if (tag === "pvid") {
+      if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {});
+      pending.set(String(ctx.from?.id), { type: "set_product_video", productId: Number(rest[0]) });
+      await ctx.answerCallbackQuery().catch(() => {});
+      return ctx.reply("Пришлите видео для этого товара одним сообщением.\nЧтобы убрать видео — напишите: убрать").catch(() => {});
+    }
     if (tag === "ap") return resolveTopUp(ctx, Number(rest[0]), true);
     if (tag === "rj") return resolveTopUp(ctx, Number(rest[0]), false);
     if (tag === "rjs") return handleRejectChoice(ctx, Number(rest[0]), rest[1]);
@@ -4307,6 +4341,16 @@ bot.on("message:text", async (ctx) => {
   const key = String(ctx.from?.id);
   const state = pending.get(key);
   if (!state) return;
+
+  if (state.type === "set_product_video") {
+    const txt = (ctx.message.text ?? "").trim().toLowerCase();
+    if (["убрать", "убери", "удалить", "-", "reset", "o‘chir", "ochirish"].includes(txt)) {
+      pending.delete(key);
+      await db.product.update({ where: { id: state.productId }, data: { videoFileId: null } }).catch(() => {});
+      return ctx.reply("♻️ Видео товара убрано.");
+    }
+    return ctx.reply("Пришлите видео сообщением, либо напишите: убрать");
+  }
 
   if (state.type === "reject_custom_reason") {
     pending.delete(key);
@@ -4448,30 +4492,47 @@ async function saveShopBanner(ctx: Context, fileId: string, isVideo: boolean) {
   await db.setting.upsert({ where: { key: "shop_banner_is_video" }, create: { key: "shop_banner_is_video", valueRu: isVideo ? "1" : "0" }, update: { valueRu: isVideo ? "1" : "0" } });
   await ctx.reply(`✅ Баннер магазина обновлён (${isVideo ? "видео" : "фото"}). Откройте «Магазин» — проверьте.`).catch(() => {});
 }
-// True + consumes the pending state if this admin is mid-/banner.
-function claimBannerUpload(ctx: Context): boolean {
+async function saveProductVideo(ctx: Context, productId: number, fileId: string) {
+  await db.product.update({ where: { id: productId }, data: { videoFileId: fileId } }).catch(() => {});
+  await ctx.reply("✅ Видео товара сохранено — оно показывается в карточке товара и при выдаче.").catch(() => {});
+}
+// Route an admin media upload to whatever /banner or /pvideo flow is pending.
+// Returns true if it was consumed (so it isn't also treated as a receipt).
+async function handleAdminMedia(ctx: Context, fileId: string | undefined, isVideo: boolean): Promise<boolean> {
+  if (!isAdmin(ctx)) return false;
   const key = String(ctx.from?.id);
-  if (isAdmin(ctx) && pending.get(key)?.type === "set_banner") { pending.delete(key); return true; }
+  const st = pending.get(key);
+  if (st?.type === "set_banner") {
+    pending.delete(key);
+    if (fileId) await saveShopBanner(ctx, fileId, isVideo);
+    return true;
+  }
+  if (st?.type === "set_product_video") {
+    if (!isVideo) { await ctx.reply("Для товара пришлите именно видео.").catch(() => {}); return true; }
+    pending.delete(key);
+    if (fileId) await saveProductVideo(ctx, st.productId, fileId);
+    return true;
+  }
   return false;
 }
 
 bot.on("message:photo", async (ctx) => {
   const photos = ctx.message.photo;
   const fileId = photos[photos.length - 1]?.file_id; // largest size
-  if (claimBannerUpload(ctx)) return fileId ? saveShopBanner(ctx, fileId, false) : undefined;
+  if (await handleAdminMedia(ctx, fileId, false)) return;
   if (fileId) await handleReceiptPhoto(ctx, fileId);
 });
-// Banner video (iPhone .MOV usually arrives as video or animation).
+// Video (iPhone .MOV usually arrives as video or animation).
 bot.on("message:video", async (ctx) => {
-  if (claimBannerUpload(ctx)) { const id = ctx.message.video?.file_id; if (id) await saveShopBanner(ctx, id, true); }
+  await handleAdminMedia(ctx, ctx.message.video?.file_id, true);
 });
 bot.on("message:animation", async (ctx) => {
-  if (claimBannerUpload(ctx)) { const id = ctx.message.animation?.file_id; if (id) await saveShopBanner(ctx, id, true); }
+  await handleAdminMedia(ctx, ctx.message.animation?.file_id, true);
 });
-// Receipt sent as an image file (document); also catches a banner sent as a file.
+// Receipt sent as an image file (document); also catches a banner/video as a file.
 bot.on("message:document", async (ctx) => {
   const doc = ctx.message.document;
-  if (claimBannerUpload(ctx)) { if (doc.file_id) await saveShopBanner(ctx, doc.file_id, !!doc.mime_type?.startsWith("video/")); return; }
+  if (await handleAdminMedia(ctx, doc.file_id, !!doc.mime_type?.startsWith("video/"))) return;
   if (doc.mime_type?.startsWith("image/") && doc.file_id) await handleReceiptPhoto(ctx, doc.file_id);
 });
 
@@ -4767,6 +4828,7 @@ async function ensureSchema() {
     `ALTER TABLE "TopUp" ADD COLUMN IF NOT EXISTS "deliveredAt" TIMESTAMP(3)`,
     `ALTER TABLE "TopUp" ADD COLUMN IF NOT EXISTS "refSpend" INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS "refDiscount" BOOLEAN NOT NULL DEFAULT false`,
+    `ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS "videoFileId" TEXT`,
     `CREATE TABLE IF NOT EXISTS "PaymeTransaction" (
       "id" TEXT NOT NULL,
       "paymeId" TEXT NOT NULL,
