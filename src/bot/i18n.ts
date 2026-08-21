@@ -60,7 +60,7 @@ const RU: Dict = {
     "<b>5. Ограничение ответственности</b>\n" +
     "AI OBUNA отвечает только за факт передачи заказанного товара. Решения сторонних платформ (блокировка аккаунта, отмена подписки, изменение тарифов), а также неполадки интернета или устройства пользователя находятся вне контроля бота.\n\n" +
     "<b>6. ⚠️ Оплата и возврат средств</b>\n" +
-    "После успешной выдачи товара заказ считается выполненным, и уплаченная сумма <b>не возвращается</b> — в том числе если подписка была впоследствии отменена третьей стороной, изменились условия площадки-поставщика, либо пользователь передумал использовать товар. На все товары действует гарантия <b>15 дней</b>: при подтверждённой неисправности не по вине пользователя товар подлежит замене (не возврату денег).\n\n" +
+    "После успешной выдачи товара заказ считается выполненным, и уплаченная сумма <b>не возвращается</b> — в том числе если подписка была впоследствии отменена третьей стороной, изменились условия площадки-поставщика, либо пользователь передумал использовать товар. <b>Срок гарантии указывается индивидуально для каждого товара</b> в его описании. По истечении срока гарантии претензии не принимаются — что бы ни произошло.\n\n" +
     "<b>7. Заключительные положения</b>\n" +
     "Нажимая кнопку «✅ Принимаю условия», вы подтверждаете полное и безоговорочное согласие с публичной офертой AI OBUNA.",
   terms_accept_btn: "✅ Принимаю условия",
@@ -249,7 +249,7 @@ const EN: Dict = {
     "<b>5. Limitation of liability</b>\n" +
     "AI OBUNA is only responsible for delivering the ordered item. Decisions made by third-party platforms (account bans, subscription cancellations, pricing changes), as well as issues with the user's internet or device, are outside the bot's control.\n\n" +
     "<b>6. ⚠️ Payment and refunds</b>\n" +
-    "Once an item is successfully delivered, the order is considered fulfilled and the amount paid is <b>not refunded</b> — including if the subscription is later cancelled by a third party, supplier terms change, or the user decides not to use the item. Every item carries a <b>15-day</b> warranty: if a confirmed fault occurs through no fault of the user, the item is replaced (not refunded).\n\n" +
+    "Once an item is successfully delivered, the order is considered fulfilled and the amount paid is <b>not refunded</b> — including if the subscription is later cancelled by a third party, supplier terms change, or the user decides not to use the item. <b>The warranty period is stated individually for each item</b> in its description. After the warranty period ends, no claims are accepted — whatever happens.\n\n" +
     "<b>7. Final provision</b>\n" +
     "By tapping “✅ I accept the terms”, you confirm your full and unconditional acceptance of the AI OBUNA public offer.",
   terms_accept_btn: "✅ I accept the terms",
@@ -438,7 +438,7 @@ const UZ: Dict = {
     "<b>5. Javobgarlikni cheklash</b>\n" +
     "AI OBUNA faqat buyurtma qilingan tovarni yetkazib berish faktiga javobgar. Uchinchi tomon platformalarining qarorlari (akkauntni bloklash, obunani bekor qilish, tarif o‘zgarishi), shuningdek foydalanuvchi internet yoki qurilmasidagi nosozliklar bot nazorati doirasidan tashqarida.\n\n" +
     "<b>6. ⚠️ To‘lov va mablag‘ni qaytarish</b>\n" +
-    "Tovar muvaffaqiyatli yetkazilgach buyurtma bajarilgan hisoblanadi va to‘langan mablag‘ <b>qaytarilmaydi</b> — shu jumladan obuna keyinchalik uchinchi tomon tomonidan bekor qilingan, ta’minotchi shartlari o‘zgargan yoki foydalanuvchi tovardan foydalanishdan voz kechgan holatlarda ham. Barcha tovarlarga <b>15 kunlik</b> kafolat beriladi: foydalanuvchi aybisiz tasdiqlangan nosozlik holida tovar almashtiriladi (pul qaytarilmaydi).\n\n" +
+    "Tovar muvaffaqiyatli yetkazilgach buyurtma bajarilgan hisoblanadi va to‘langan mablag‘ <b>qaytarilmaydi</b> — shu jumladan obuna keyinchalik uchinchi tomon tomonidan bekor qilingan, ta’minotchi shartlari o‘zgargan yoki foydalanuvchi tovardan foydalanishdan voz kechgan holatlarda ham. <b>Kafolat muddati har bir tovar uchun alohida</b> uning tavsifida ko‘rsatiladi. Kafolat muddati tugagach, nima bo‘lishidan qat’i nazar, e’tirozlar qabul qilinmaydi.\n\n" +
     "<b>7. Yakuniy qoida</b>\n" +
     "«✅ Roziman» tugmasini bosish orqali siz AI OBUNA ommaviy ofertasi bilan to‘liq va so‘zsiz rozilik bildirganingizni tasdiqlaysiz.",
   terms_accept_btn: "✅ Roziman",

@@ -50,6 +50,22 @@ function giftsBannerAsset(): { file: InputFile; isVideo: boolean } | null {
   return null;
 }
 const shopBannerFile = () => mediaAssetFile("shop-banner.jpg");
+// Shop banner: an admin-set Telegram file_id (photo OR video) wins; otherwise a
+// file on disk (shop-banner.mov/.mp4 → video, .jpg/.png → photo). Set it from
+// the phone with /banner — no redeploy needed to change it.
+async function shopBanner(): Promise<{ src: string | InputFile; isVideo: boolean } | null> {
+  const fileId = (await setting("shop_banner_file_id", "")).trim();
+  if (fileId) return { src: fileId, isVideo: (await setting("shop_banner_is_video", "")).trim() === "1" };
+  for (const name of ["shop-banner.mov", "shop-banner.mp4"]) {
+    const f = mediaAssetFile(name);
+    if (f) return { src: f, isVideo: true };
+  }
+  for (const name of ["shop-banner.jpg", "shop-banner.png"]) {
+    const f = mediaAssetFile(name);
+    if (f) return { src: f, isVideo: false };
+  }
+  return null;
+}
 const promoInstructionsFile = () => mediaAssetFile("promo-instructions.mp4");
 const howToPayFile = () => mediaAssetFile("how-to-pay.mp4");
 const howToActivateFile = () => mediaAssetFile("how-to-activate.mp4");
@@ -60,8 +76,8 @@ const howToActivateFile = () => mediaAssetFile("how-to-activate.mp4");
 // fresh media message with the given photo or video as its caption target.
 type SendOrEditOpts = {
   reply_markup?: InlineKeyboard | undefined;
-  photo?: InputFile | null;
-  video?: InputFile | null;
+  photo?: string | InputFile | null;
+  video?: string | InputFile | null;
   link_preview_options?: { url?: string; show_above_text?: boolean; prefer_large_media?: boolean; is_disabled?: boolean } | undefined;
 };
 async function sendOrEdit(ctx: Context, text: string, opts: SendOrEditOpts = {}) {
@@ -187,6 +203,7 @@ const pending = new Map<
   | { type: "formatter_links"; startIndex: number; collectedLinks?: string[]; timeoutId?: any }
   | { type: "reject_custom_reason"; topupId: number }
   | { type: "target_username"; variantId: number; qty: number }
+  | { type: "set_banner" }
 >();
 
 const bot = new Bot(token);
@@ -632,11 +649,18 @@ async function showMenu(ctx: Context, page: number, sort: Sort, edit: boolean, f
     // The main catalog page (not the freebies view) leads with the shop
     // banner as one combined photo+caption+buttons message. sendOrEdit
     // handles the media-vs-text edit correctness for callback navigation.
-    const banner = !freebies ? shopBannerFile() : null;
+    const banner = !freebies ? await shopBanner() : null;
     if (edit) {
-      await sendOrEdit(ctx, text, { reply_markup: kb, photo: banner });
+      await sendOrEdit(ctx, text, {
+        reply_markup: kb,
+        photo: banner && !banner.isVideo ? banner.src : null,
+        video: banner && banner.isVideo ? banner.src : null,
+      });
     } else if (banner) {
-      await ctx.replyWithPhoto(banner, { caption: text, parse_mode: "HTML", reply_markup: kb }).catch(async () => {
+      const send = banner.isVideo
+        ? ctx.replyWithVideo(banner.src, { caption: text, parse_mode: "HTML", reply_markup: kb })
+        : ctx.replyWithPhoto(banner.src, { caption: text, parse_mode: "HTML", reply_markup: kb });
+      await send.catch(async () => {
         await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
       });
     } else {
@@ -2387,9 +2411,12 @@ async function sendHome(ctx: Context, user: Awaited<ReturnType<typeof getUser>>)
   // media-source messages via delete+resend when a plain text edit isn't
   // possible — so the buttons work even though they live on a photo.
   const menu = await buildMenu(user.lang, user.balance, 0, "all", user.id, false, directPayEnabled(ctx));
-  const banner = shopBannerFile();
+  const banner = await shopBanner();
   if (banner) {
-    await ctx.replyWithPhoto(banner, { caption: menu.text, parse_mode: "HTML", reply_markup: menu.kb }).catch(async () => {
+    const send = banner.isVideo
+      ? ctx.replyWithVideo(banner.src, { caption: menu.text, parse_mode: "HTML", reply_markup: menu.kb })
+      : ctx.replyWithPhoto(banner.src, { caption: menu.text, parse_mode: "HTML", reply_markup: menu.kb });
+    await send.catch(async () => {
       await ctx.reply(menu.text, { parse_mode: "HTML", reply_markup: menu.kb }).catch(() => {});
     });
   } else {
@@ -3835,6 +3862,26 @@ bot.command("pollsend", async (ctx) => {
   );
 });
 
+// Set the shop banner from the phone: /banner, then send a photo or video.
+bot.command("banner", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  pending.set(String(ctx.from?.id), { type: "set_banner" });
+  await ctx.reply("🖼 Пришлите новое <b>фото или видео</b> для баннера магазина одним сообщением.", { parse_mode: "HTML" }).catch(() => {});
+});
+// Reset the banner back to the built-in default (drops the admin-set file_id).
+bot.command("banner_reset", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  await db.setting.upsert({ where: { key: "shop_banner_file_id" }, create: { key: "shop_banner_file_id", valueRu: "" }, update: { valueRu: "" } }).catch(() => {});
+  await ctx.reply("♻️ Баннер сброшен на стандартный.").catch(() => {});
+});
+// Preview the terms screen exactly as users see it (admin already accepted, so
+// the gate no longer shows on its own).
+bot.command("terms", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const u = await getUser(ctx);
+  await sendTermsGate(ctx, u.lang);
+});
+
 bot.command("post", async (ctx) => {
   if (!isAdmin(ctx)) return;
   const replyTo = ctx.message?.reply_to_message;
@@ -4395,14 +4442,36 @@ bot.on("message:text", async (ctx) => {
 });
 
 // ---------- receipt photo (card payment verification) ----------
+// Save an admin-supplied file_id as the shop banner (photo or video).
+async function saveShopBanner(ctx: Context, fileId: string, isVideo: boolean) {
+  await db.setting.upsert({ where: { key: "shop_banner_file_id" }, create: { key: "shop_banner_file_id", valueRu: fileId }, update: { valueRu: fileId } });
+  await db.setting.upsert({ where: { key: "shop_banner_is_video" }, create: { key: "shop_banner_is_video", valueRu: isVideo ? "1" : "0" }, update: { valueRu: isVideo ? "1" : "0" } });
+  await ctx.reply(`✅ Баннер магазина обновлён (${isVideo ? "видео" : "фото"}). Откройте «Магазин» — проверьте.`).catch(() => {});
+}
+// True + consumes the pending state if this admin is mid-/banner.
+function claimBannerUpload(ctx: Context): boolean {
+  const key = String(ctx.from?.id);
+  if (isAdmin(ctx) && pending.get(key)?.type === "set_banner") { pending.delete(key); return true; }
+  return false;
+}
+
 bot.on("message:photo", async (ctx) => {
   const photos = ctx.message.photo;
   const fileId = photos[photos.length - 1]?.file_id; // largest size
+  if (claimBannerUpload(ctx)) return fileId ? saveShopBanner(ctx, fileId, false) : undefined;
   if (fileId) await handleReceiptPhoto(ctx, fileId);
 });
-// Receipt sent as an image file (document)
+// Banner video (iPhone .MOV usually arrives as video or animation).
+bot.on("message:video", async (ctx) => {
+  if (claimBannerUpload(ctx)) { const id = ctx.message.video?.file_id; if (id) await saveShopBanner(ctx, id, true); }
+});
+bot.on("message:animation", async (ctx) => {
+  if (claimBannerUpload(ctx)) { const id = ctx.message.animation?.file_id; if (id) await saveShopBanner(ctx, id, true); }
+});
+// Receipt sent as an image file (document); also catches a banner sent as a file.
 bot.on("message:document", async (ctx) => {
   const doc = ctx.message.document;
+  if (claimBannerUpload(ctx)) { if (doc.file_id) await saveShopBanner(ctx, doc.file_id, !!doc.mime_type?.startsWith("video/")); return; }
   if (doc.mime_type?.startsWith("image/") && doc.file_id) await handleReceiptPhoto(ctx, doc.file_id);
 });
 
@@ -4469,9 +4538,12 @@ bot.on("chat_member", async (ctx) => {
 
   // Returning user: open shop directly.
   const menu = await buildMenu(lang, user.balance, 0, "all", user.id, false, directPayEnabled(ctx));
-  const banner = shopBannerFile();
+  const banner = await shopBanner();
   if (banner) {
-    await bot.api.sendPhoto(tgId, banner, { caption: menu.text, parse_mode: "HTML", reply_markup: menu.kb }).catch(async () => {
+    const send = banner.isVideo
+      ? bot.api.sendVideo(tgId, banner.src, { caption: menu.text, parse_mode: "HTML", reply_markup: menu.kb })
+      : bot.api.sendPhoto(tgId, banner.src, { caption: menu.text, parse_mode: "HTML", reply_markup: menu.kb });
+    await send.catch(async () => {
       await bot.api.sendMessage(tgId, menu.text, { parse_mode: "HTML", reply_markup: menu.kb }).catch(() => {});
     });
   } else {
