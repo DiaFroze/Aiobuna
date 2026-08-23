@@ -884,8 +884,6 @@ async function buildQtyChooser(
     .text("➖", `q:${v.id}:${qty - 1}:${back}`)
     .text(`${qty}`, "noop")
     .text("➕", `q:${v.id}:${qty + 1}:${back}`)
-    .row()
-    .text(t(lang, "enter_qty_btn"), `qi:${v.id}:${back}`)
     .row();
   // Offer the cheapest bundle as a one-tap shortcut. Only tiers that fit stock.
   const shortcut = deal.tiers.filter((tier) => tier.qty !== qty && tier.qty <= max).slice(0, 3);
@@ -893,7 +891,6 @@ async function buildQtyChooser(
     const s = Math.max(0, unitPrice * tier.qty - tier.totalUzs);
     kb.text(`${tier.qty} шт. — ${money(tier.totalUzs, lang)}${s > 0 ? ` 🔥` : ""}`, `q:${v.id}:${tier.qty}:${back}`).row();
   }
-  if (max > 1 && max < STOCK_UNLIMITED) kb.text(t(lang, "maximum", { n: max }), `q:${v.id}:${max}:${back}`).row();
   // Pay right here: Fragment (username-first) items keep a single buy button
   // that asks for the recipient; everything else gets the direct-pay buttons.
   if (v.needsUsername) {
@@ -913,7 +910,6 @@ async function buildQtyChooser(
     (desc ? `\n${esc(desc)}\n` : "") +
     (vipLabel ? `\n💎 <b>${esc(vipLabel)}</b>` : "") +
     `\n${t(lang, "price_each", { v: unitPrice > 0 ? money(unitPrice, lang) : t(lang, "free") })}` +
-    `\n${t(lang, "in_stock", { n: stockDisplay(max) })}` +
     `\n${t(lang, "qty", { n: qty })}` +
     (deal.free > 0 ? `\n🎁 <b>+${deal.free} в подарок</b> → получите ${qty + deal.free} шт.` : "") +
     (disc ? `\n🎁 Скидка за рефералов: <b>−${disc.pct}%</b> (спишется ${disc.cost} реф.)` : "") +
