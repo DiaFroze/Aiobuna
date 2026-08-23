@@ -153,6 +153,9 @@ const PAY_STAR_EMOJI = "5359512328003941083";
 const PAY_ARROW_EMOJI = "5771449161123631882";
 const STARS_BTN_EMOJI = "5895708410447401643";
 const ADMIN_BTN_EMOJI = "6129805886383723340";
+// Flash-sale badge: 🔺 percent, ⏱ countdown.
+const FLASH_PCT_EMOJI = "5289682726775967230";
+const FLASH_TIME_EMOJI = "5382194935057372936";
 // Direct pay = pay the full price straight to a bank (Payme / Click / Stars),
 // no balance. Now on for everyone — the balance model is retired.
 const directPayEnabled = (_ctx?: Context) => true;
@@ -824,6 +827,30 @@ function quantityDeal(
   };
 }
 
+// "4d 17h 56m" style countdown from a millisecond remainder.
+function formatCountdown(ms: number): string {
+  if (ms <= 0) return "0m";
+  const totalMin = Math.floor(ms / 60_000);
+  const d = Math.floor(totalMin / 1440);
+  const h = Math.floor((totalMin % 1440) / 60);
+  const m = totalMin % 60;
+  const parts: string[] = [];
+  if (d > 0) parts.push(`${d}d`);
+  if (d > 0 || h > 0) parts.push(`${h}h`);
+  parts.push(`${m}m`);
+  return parts.join(" ");
+}
+// Live flash-sale info for a variant, from the promo_active marker (/promo).
+async function activePromoForVariant(variantId: number): Promise<{ originalPrice: number; expiresAt: number } | null> {
+  const raw = (await setting("promo_active", "")).trim();
+  if (!raw) return null;
+  try {
+    const p = JSON.parse(raw) as { variantId: number; originalPrice: number; expiresAt: number };
+    if (p.variantId === variantId && Date.now() < p.expiresAt) return { originalPrice: p.originalPrice, expiresAt: p.expiresAt };
+  } catch { /* malformed marker */ }
+  return null;
+}
+
 // Append the direct-pay buttons (Payme / Click / Stars / contact-admin) to a
 // keyboard for the "all-in-one" buy card. Payme and Click are one-tap URL
 // buttons (a pending top-up is pre-created for the exact price); Stars is a
@@ -868,7 +895,16 @@ async function buildQtyChooser(
   const payTotal = disc ? Math.round(total * (100 - disc.pct) / 100) : total;
   const label = qty > 1 ? `${title} ×${qty}` : title;
 
-  const kb = new InlineKeyboard()
+  // Flash sale (from /promo): auto % off + a live countdown, shown as a badge
+  // button and in the caption.
+  const promo = await activePromoForVariant(v.id);
+  const flashPct = promo && promo.originalPrice > unitPrice ? Math.round((promo.originalPrice - unitPrice) / promo.originalPrice * 100) : 0;
+
+  const kb = new InlineKeyboard();
+  if (promo && flashPct > 0) {
+    kb.text(`FLASH SALE −${flashPct}% · ${money(unitPrice, lang)} (${money(promo.originalPrice, lang)})`, "noop").icon(FLASH_PCT_EMOJI).row();
+  }
+  kb
     .text("➖", `q:${v.id}:${qty - 1}:${back}`)
     .text(`${qty}`, "noop")
     .text("➕", `q:${v.id}:${qty + 1}:${back}`)
@@ -897,9 +933,16 @@ async function buildQtyChooser(
   const desc = descFull.length > 380 ? `${descFull.slice(0, 380)}…` : descFull;
   const offers = describeBulk(unitPrice, deal.tiers, deal.bonuses, (n) => money(n, lang));
 
+  const flashBlock = promo && flashPct > 0
+    ? `<tg-emoji emoji-id="${FLASH_PCT_EMOJI}">🔺</tg-emoji> <b>FLASH SALE −${flashPct}%</b>\n` +
+      `<s>${money(promo.originalPrice, lang)}</s> → <b>${money(unitPrice, lang)}</b>\n` +
+      `<tg-emoji emoji-id="${FLASH_TIME_EMOJI}">⏱</tg-emoji> ${formatCountdown(promo.expiresAt - Date.now())}\n`
+    : "";
+
   const text =
     `🧾 <b>${esc(title)}</b>\n` +
     (desc ? `\n${esc(desc)}\n` : "") +
+    (flashBlock ? `\n${flashBlock}` : "") +
     (vipLabel ? `\n💎 <b>${esc(vipLabel)}</b>` : "") +
     `\n${t(lang, "price_each", { v: unitPrice > 0 ? money(unitPrice, lang) : t(lang, "free") })}` +
     `\n${t(lang, "qty", { n: qty })}` +
@@ -3864,12 +3907,13 @@ type PromoDraft = { variantId: number; name: string; originalPrice: number; pric
 const promoDraft = new Map<string, PromoDraft>();
 
 function promoMessage(name: string, oldPrice: number, newPrice: number, hours: number, variantId: number): { text: string; kb: InlineKeyboard } {
-  const kb = new InlineKeyboard().text(`🛒 ${money(newPrice, "uz")} — sotib olish`, `b:${variantId}:0:all`);
+  const pct = oldPrice > newPrice ? Math.round((oldPrice - newPrice) / oldPrice * 100) : 0;
+  const kb = new InlineKeyboard().text(`🛒 −${pct}% · ${money(newPrice, "uz")}`, `b:${variantId}:0:all`);
   const text =
-    `🔥 <b>Chegirma — faqat ${hours} soat!</b>\n\n` +
+    `<tg-emoji emoji-id="${FLASH_PCT_EMOJI}">🔺</tg-emoji> <b>FLASH SALE −${pct}%</b>\n\n` +
     `💎 <b>${esc(name)}</b>\n` +
     `<s>${money(oldPrice, "uz")}</s> → <b>${money(newPrice, "uz")}</b>\n\n` +
-    `⏳ Ulgurib qoling, narx tez orada tugaydi!`;
+    `<tg-emoji emoji-id="${FLASH_TIME_EMOJI}">⏱</tg-emoji> Chegirma ${hours} soat davom etadi — ulgurib qoling!`;
   return { text, kb };
 }
 
