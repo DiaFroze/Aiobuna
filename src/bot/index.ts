@@ -783,21 +783,9 @@ async function showProduct(ctx: Context, id: number, back: string) {
   const suffix = `\n\n${t(lang, "choose_plan")}`;
   text += suffix;
 
-  // A per-product video sits on top of the card: send it with the card as its
-  // caption (entities carry over). If the caption is too long (>1024) or the
-  // send fails, fall back to the text card below.
-  if (p.videoFileId) {
-    await ctx.deleteMessage().catch(() => {});
-    try {
-      await ctx.replyWithVideo(p.videoFileId, { caption: text, caption_entities: entities, reply_markup: kb });
-      await ctx.answerCallbackQuery().catch(() => {});
-      return;
-    } catch {
-      await ctx.reply(text, { reply_markup: kb, entities }).catch(() => {});
-      await ctx.answerCallbackQuery().catch(() => {});
-      return;
-    }
-  }
+  // The per-product video now lives on the buy card (buildQtyChooser), so the
+  // multi-variant plan list stays text-only — showing the video here too would
+  // play it twice (plan list + buy card).
 
   // Product card uses message entities (custom_emoji/bold), not HTML — so the
   // parse_mode-based sendOrEdit doesn't apply here. Try in-place text edit
@@ -898,7 +886,11 @@ async function buildQtyChooser(
   } else {
     await appendCardPayButtons(kb, user.id, v.id, qty, label, payTotal, disc?.cost ?? 0, lang);
   }
-  kb.text(t(lang, "back"), `p:${v.plan.product.id}:${back}`);
+  // Back goes to the plan list only when there IS one; a single-variant product
+  // opens this card directly (showProduct skips its page), so "back" there must
+  // return to the shop — otherwise it loops straight back onto this card.
+  const siblings = await db.variant.count({ where: { isActive: true, plan: { productId: v.plan.product.id } } });
+  kb.text(t(lang, "back"), siblings > 1 ? `p:${v.plan.product.id}:${back}` : `m:${back}`);
 
   const pd = await pick3(v.plan.product.descRu ?? "", v.plan.product.descEn, v.plan.product.descUz, lang);
   const descFull = pd?.trim() ? stripTags(pd.trim()) : "";
