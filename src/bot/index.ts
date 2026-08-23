@@ -887,15 +887,16 @@ async function activePromoForVariant(variantId: number): Promise<{ originalPrice
 // admin opens a chat with the product pre-filled.
 async function appendCardPayButtons(kb: InlineKeyboard, userId: number, variantId: number, qty: number, label: string, total: number, refSpend: number, lang: string) {
   const note = `buy:${variantId}:${qty}`;
+  const amt = money(total, lang);
   if (paymeReady()) {
     const topup = await db.topUp.create({ data: { userId, amount: total, method: "payme", status: "pending", note, refSpend, expiresAt: new Date(Date.now() + 30 * 60_000) } }).catch(() => null);
-    if (topup) kb.url("Payme", buildCheckoutUrl({ checkoutBase: PAYME_CHECKOUT_URL, merchantId: PAYME_MERCHANT_ID, topUpId: topup.id, amountTiyin: sumToTiyin(total), lang })).icon(PAYME_BTN_EMOJI).row();
+    if (topup) kb.url(`Payme · ${amt}`, buildCheckoutUrl({ checkoutBase: PAYME_CHECKOUT_URL, merchantId: PAYME_MERCHANT_ID, topUpId: topup.id, amountTiyin: sumToTiyin(total), lang })).icon(PAYME_BTN_EMOJI).row();
   }
   if (clickReady()) {
     const ctopup = await db.topUp.create({ data: { userId, amount: total, method: "click", status: "pending", note, refSpend, expiresAt: new Date(Date.now() + 30 * 60_000) } }).catch(() => null);
-    if (ctopup) kb.url("Click", buildClickUrl({ serviceId: CLICK_SERVICE_ID, merchantId: CLICK_MERCHANT_ID, topUpId: ctopup.id, amountSum: total })).icon(CLICK_BTN_EMOJI).row();
+    if (ctopup) kb.url(`Click · ${amt}`, buildClickUrl({ serviceId: CLICK_SERVICE_ID, merchantId: CLICK_MERCHANT_ID, topUpId: ctopup.id, amountSum: total })).icon(CLICK_BTN_EMOJI).row();
   } else {
-    kb.text("Click", `tclick_buy:${total}:${variantId}:${qty}`).icon(CLICK_BTN_EMOJI).row();
+    kb.text(`Click · ${amt}`, `tclick_buy:${total}:${variantId}:${qty}`).icon(CLICK_BTN_EMOJI).row();
   }
   kb.text(stripLeadEmoji(t(lang, "pay_stars", { n: soumToStars(total) })), `tstar_buy:${total}:${variantId}:${qty}`).icon(STARS_BTN_EMOJI).row();
   const adminUser = (await setting("support_username", "Aiobuna_support")).replace(/^@/, "");
@@ -933,11 +934,7 @@ async function buildQtyChooser(
   const promo = await activePromoForVariant(v.id);
   const flashPct = promo && promo.originalPrice > unitPrice ? Math.round((promo.originalPrice - unitPrice) / promo.originalPrice * 100) : 0;
 
-  const kb = new InlineKeyboard();
-  if (promo && flashPct > 0) {
-    kb.text(`FLASH SALE −${flashPct}% · ${money(unitPrice, lang)} (${money(promo.originalPrice, lang)})`, "noop").icon(FLASH_PCT_EMOJI).row();
-  }
-  kb
+  const kb = new InlineKeyboard()
     .text("➖", `q:${v.id}:${qty - 1}:${back}`)
     .text(`${qty}`, "noop")
     .text("➕", `q:${v.id}:${qty + 1}:${back}`)
@@ -1544,7 +1541,7 @@ async function showBankPicker(
       data: { userId: user.id, amount: total, method: "payme", status: "pending", note, refSpend, expiresAt: new Date(Date.now() + 30 * 60_000) },
     });
     const url = buildCheckoutUrl({ checkoutBase: PAYME_CHECKOUT_URL, merchantId: PAYME_MERCHANT_ID, topUpId: topup.id, amountTiyin: sumToTiyin(total), lang });
-    kb.url("Payme", url).icon(PAYME_BTN_EMOJI).row();
+    kb.url(`Payme · ${money(total, lang)}`, url).icon(PAYME_BTN_EMOJI).row();
   }
   // Click — same one-tap URL button when configured; a separate pending top-up
   // (method=click) so Prepare/Complete resolve it by its own id. Until the
@@ -1554,9 +1551,9 @@ async function showBankPicker(
       data: { userId: user.id, amount: total, method: "click", status: "pending", note, refSpend, expiresAt: new Date(Date.now() + 30 * 60_000) },
     });
     const url = buildClickUrl({ serviceId: CLICK_SERVICE_ID, merchantId: CLICK_MERCHANT_ID, topUpId: ctopup.id, amountSum: total });
-    kb.url("Click", url).icon(CLICK_BTN_EMOJI).row();
+    kb.url(`Click · ${money(total, lang)}`, url).icon(CLICK_BTN_EMOJI).row();
   } else {
-    kb.text("Click", `tclick_buy:${total}:${v.id}:${qty}${suffix}`).icon(CLICK_BTN_EMOJI).row();
+    kb.text(`Click · ${money(total, lang)}`, `tclick_buy:${total}:${v.id}:${qty}${suffix}`).icon(CLICK_BTN_EMOJI).row();
   }
   // Telegram Stars — one-tap like Click: build an invoice link and put it on a
   // URL button, so tapping opens the Stars payment sheet directly (no second
