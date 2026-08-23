@@ -205,6 +205,7 @@ const pending = new Map<
   | { type: "target_username"; variantId: number; qty: number }
   | { type: "set_banner" }
   | { type: "set_product_video"; productId: number }
+  | { type: "promo_price"; variantId: number }
 >();
 
 const bot = new Bot(token);
@@ -3823,6 +3824,66 @@ async function broadcastInBackground(
   })().catch((e) => console.error("[bot] broadcast failed:", (e as Error).message));
 }
 
+// ---------- limited-time promo broadcast ----------
+// Temporarily drops a variant's price, blasts an Uzbek offer with a one-tap buy
+// button, and auto-restores the price after N hours (checkPromoExpiry, on the
+// delivery interval). The buy button is `bc:` — straight to the pay screen.
+type PromoDraft = { variantId: number; name: string; originalPrice: number; price: number; hours: number };
+const promoDraft = new Map<string, PromoDraft>();
+
+function promoMessage(name: string, oldPrice: number, newPrice: number, hours: number, variantId: number): { text: string; kb: InlineKeyboard } {
+  const kb = new InlineKeyboard().text(`🛒 ${money(newPrice, "uz")} — sotib olish`, `bc:${variantId}:1`);
+  const text =
+    `🔥 <b>Chegirma — faqat ${hours} soat!</b>\n\n` +
+    `💎 <b>${esc(name)}</b>\n` +
+    `<s>${money(oldPrice, "uz")}</s> → <b>${money(newPrice, "uz")}</b>\n\n` +
+    `⏳ Ulgurib qoling, narx tez orada tugaydi!`;
+  return { text, kb };
+}
+
+bot.command("promo", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const variants = await db.variant.findMany({
+    where: { isActive: true, plan: { product: { isActive: true } } },
+    include: { plan: { include: { product: true } } },
+    orderBy: { id: "asc" },
+  });
+  if (!variants.length) return ctx.reply("Нет активных товаров.").catch(() => {});
+  const kb = new InlineKeyboard();
+  for (const v of variants) kb.text(`${v.plan.product.titleRu} — ${v.titleRu} (${money(v.priceUzs, "ru")})`, `promo_v:${v.id}`).row();
+  await ctx.reply("🔥 Выберите товар для акции:", { reply_markup: kb }).catch(() => {});
+});
+
+async function sendPromoBroadcast(ctx: Context) {
+  const key = String(ctx.from?.id);
+  const draft = promoDraft.get(key);
+  if (!draft) return ctx.answerCallbackQuery({ text: "Черновик не найден. Начните заново: /promo", show_alert: true }).catch(() => {});
+  promoDraft.delete(key);
+  await ctx.answerCallbackQuery().catch(() => {});
+  // Apply the promo price and record the revert time.
+  await db.variant.update({ where: { id: draft.variantId }, data: { priceUzs: draft.price } }).catch(() => {});
+  const payload = JSON.stringify({ variantId: draft.variantId, originalPrice: draft.originalPrice, expiresAt: Date.now() + draft.hours * 3600_000 });
+  await db.setting.upsert({ where: { key: "promo_active" }, create: { key: "promo_active", valueRu: payload }, update: { valueRu: payload } }).catch(() => {});
+  await ctx.editMessageText(`✅ Акция запущена. Цена ${money(draft.price, "ru")} на ${draft.hours} ч, потом вернётся на ${money(draft.originalPrice, "ru")}.`).catch(() => {});
+  await broadcastInBackground(ctx, async (tgId) => {
+    const { text, kb } = promoMessage(draft.name, draft.originalPrice, draft.price, draft.hours, draft.variantId);
+    await bot.api.sendMessage(tgId, text, { parse_mode: "HTML", reply_markup: kb });
+  }, "Акция");
+}
+
+// Restore the promo price once the timer runs out (called on the delivery tick).
+async function checkPromoExpiry() {
+  const raw = (await setting("promo_active", "")).trim();
+  if (!raw) return;
+  try {
+    const p = JSON.parse(raw) as { variantId: number; originalPrice: number; expiresAt: number };
+    if (Date.now() < p.expiresAt) return;
+    await db.variant.update({ where: { id: p.variantId }, data: { priceUzs: p.originalPrice } }).catch(() => {});
+    await db.setting.update({ where: { key: "promo_active" }, data: { valueRu: "" } }).catch(() => {});
+    if (ADMIN_ID) await bot.api.sendMessage(ADMIN_ID, `⏱ Акция завершена — цена возвращена на ${money(p.originalPrice, "ru")}.`).catch(() => {});
+  } catch { /* malformed marker — ignore */ }
+}
+
 // ---------- bank poll ----------
 // Premium-emoji ids supplied by the admin, one per bank. The base emoji is the
 // fallback if a premium one ever becomes invalid (the API transformer strips it).
@@ -4326,6 +4387,18 @@ bot.on("callback_query:data", async (ctx) => {
       await ctx.answerCallbackQuery().catch(() => {});
       return ctx.reply("Пришлите видео для этого товара одним сообщением.\nЧтобы убрать видео — напишите: убрать").catch(() => {});
     }
+    if (tag === "promo_v") {
+      if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {});
+      pending.set(String(ctx.from?.id), { type: "promo_price", variantId: Number(rest[0]) });
+      await ctx.answerCallbackQuery().catch(() => {});
+      return ctx.reply("Введите цену со скидкой и часы через пробел.\nНапример: <code>35000 1</code> — цена 35000, на 1 час.", { parse_mode: "HTML" }).catch(() => {});
+    }
+    if (tag === "promo_send") { if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {}); return sendPromoBroadcast(ctx); }
+    if (tag === "promo_cancel") {
+      promoDraft.delete(String(ctx.from?.id));
+      await ctx.answerCallbackQuery({ text: "Отменено" }).catch(() => {});
+      return ctx.editMessageText("❌ Акция отменена.").catch(() => {});
+    }
     if (tag === "ap") return resolveTopUp(ctx, Number(rest[0]), true);
     if (tag === "rj") return resolveTopUp(ctx, Number(rest[0]), false);
     if (tag === "rjs") return handleRejectChoice(ctx, Number(rest[0]), rest[1]);
@@ -4350,6 +4423,23 @@ bot.on("message:text", async (ctx) => {
       return ctx.reply("♻️ Видео товара убрано.");
     }
     return ctx.reply("Пришлите видео сообщением, либо напишите: убрать");
+  }
+
+  if (state.type === "promo_price") {
+    pending.delete(key);
+    const parts = (ctx.message.text ?? "").trim().split(/\s+/);
+    const price = Math.floor(Number(parts[0]));
+    const hours = Math.max(1, Math.floor(Number(parts[1]) || 1));
+    if (!Number.isFinite(price) || price <= 0) return ctx.reply("❌ Неверная цена. Пример: <code>35000 1</code>", { parse_mode: "HTML" });
+    const v = await db.variant.findUnique({ where: { id: state.variantId }, include: { plan: { include: { product: true } } } });
+    if (!v) return ctx.reply("❌ Товар не найден.");
+    const name = v.plan.product.titleUz || v.plan.product.titleRu;
+    promoDraft.set(key, { variantId: v.id, name, originalPrice: v.priceUzs, price, hours });
+    const { text, kb: msgKb } = promoMessage(name, v.priceUzs, price, hours, v.id);
+    await ctx.reply("👇 Так увидят пользователи (на узбекском):").catch(() => {});
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: msgKb }).catch(() => {});
+    const ctrlKb = new InlineKeyboard().text("✅ Отправить всем", "promo_send").row().text("❌ Отмена", "promo_cancel");
+    return ctx.reply(`Цена станет <b>${money(price, "ru")}</b> на <b>${hours} ч</b> (потом вернётся на ${money(v.priceUzs, "ru")}). Отправить всем?`, { parse_mode: "HTML", reply_markup: ctrlKb });
   }
 
   if (state.type === "reject_custom_reason") {
@@ -5033,7 +5123,7 @@ async function bootstrap() {
   await backfillChannelVerified();  // one-time referral verification backfill (guarded)
   await maybeResetAdmins();         // one-time admin reset (guarded)
   // Poll for Payme top-ups the webhook credited, to notify + fulfil them.
-  setInterval(() => { deliverPaidPaymeTopUps().catch(() => {}); }, 12_000);
+  setInterval(() => { deliverPaidPaymeTopUps().catch(() => {}); checkPromoExpiry().catch(() => {}); }, 12_000);
   await bot.start({
     drop_pending_updates: false,
     allowed_updates: [
