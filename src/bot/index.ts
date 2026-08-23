@@ -3798,8 +3798,9 @@ async function broadcastInBackground(
   ctx: Context,
   send: (tgId: string) => Promise<void>,
   label: string,
+  usersOverride?: Array<{ tgId: string }>,
 ) {
-  const users = await db.botUser.findMany({ select: { tgId: true } });
+  const users = usersOverride ?? await db.botUser.findMany({ select: { tgId: true } });
   const total = users.length;
   const statusMsg = await ctx.reply(`📢 ${label}: запуск… (0/${total})`).catch(() => null);
   const chatId = ctx.chat?.id;
@@ -3882,6 +3883,44 @@ async function checkPromoExpiry() {
     await db.setting.update({ where: { key: "promo_active" }, data: { valueRu: "" } }).catch(() => {});
     if (ADMIN_ID) await bot.api.sendMessage(ADMIN_ID, `⏱ Акция завершена — цена возвращена на ${money(p.originalPrice, "ru")}.`).catch(() => {});
   } catch { /* malformed marker — ignore */ }
+}
+
+// ---------- review request to buyers only ----------
+// One-off broadcast of the review ask, targeted to users who have at least one
+// order (bought or received free). Each gets it in their own language.
+async function buyerTgLangs(): Promise<Array<{ tgId: string; lang: string }>> {
+  const rows = await db.botOrder.findMany({ distinct: ["userId"], select: { userId: true } });
+  const ids = rows.map((r) => r.userId);
+  if (!ids.length) return [];
+  return db.botUser.findMany({ where: { id: { in: ids } }, select: { tgId: true, lang: true } });
+}
+
+bot.command("askreview", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const cfg = await reviewConfig();
+  if (!cfg.url) return ctx.reply("❌ Сначала укажите ссылку на отзыв:\n<code>/review url https://...</code>", { parse_mode: "HTML" }).catch(() => {});
+  const buyers = await buyerTgLangs();
+  const { body } = reviewMessage("ru", cfg.reward);
+  const previewKb = new InlineKeyboard().url(t("ru", "review_btn_open"), cfg.url).row().text(t("ru", "review_btn_done"), "rev:done");
+  await ctx.reply("👇 Так увидят покупатели (каждый на своём языке):").catch(() => {});
+  await ctx.reply(body, { parse_mode: "HTML", reply_markup: previewKb, link_preview_options: { is_disabled: true } }).catch(() => {});
+  const ctrlKb = new InlineKeyboard().text(`📢 Отправить покупателям (${buyers.length})`, "askrev_send").row().text("❌ Отмена", "askrev_cancel");
+  await ctx.reply(`Получат только те, кто покупал или получал бесплатно: <b>${buyers.length}</b> чел. Отправить?`, { parse_mode: "HTML", reply_markup: ctrlKb }).catch(() => {});
+});
+
+async function sendReviewToBuyers(ctx: Context) {
+  await ctx.answerCallbackQuery().catch(() => {});
+  const cfg = await reviewConfig();
+  if (!cfg.url) return ctx.reply("❌ Ссылка не задана: /review url ...").catch(() => {});
+  const buyers = await buyerTgLangs();
+  const langByTg = new Map(buyers.map((b) => [b.tgId, b.lang]));
+  await ctx.editMessageText(`📢 Отправляю просьбу об отзыве ${buyers.length} покупателям…`).catch(() => {});
+  await broadcastInBackground(ctx, async (tgId) => {
+    const lang = normalizeLang(langByTg.get(tgId) ?? "ru");
+    const { body } = reviewMessage(lang, cfg.reward);
+    const kb = new InlineKeyboard().url(t(lang, "review_btn_open"), cfg.url).row().text(t(lang, "review_btn_done"), "rev:done");
+    await bot.api.sendMessage(tgId, body, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } });
+  }, "Просьба об отзыве", buyers);
 }
 
 // ---------- bank poll ----------
@@ -4399,6 +4438,8 @@ bot.on("callback_query:data", async (ctx) => {
       await ctx.answerCallbackQuery({ text: "Отменено" }).catch(() => {});
       return ctx.editMessageText("❌ Акция отменена.").catch(() => {});
     }
+    if (tag === "askrev_send") { if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {}); return sendReviewToBuyers(ctx); }
+    if (tag === "askrev_cancel") { await ctx.answerCallbackQuery({ text: "Отменено" }).catch(() => {}); return ctx.editMessageText("❌ Отменено.").catch(() => {}); }
     if (tag === "ap") return resolveTopUp(ctx, Number(rest[0]), true);
     if (tag === "rj") return resolveTopUp(ctx, Number(rest[0]), false);
     if (tag === "rjs") return handleRejectChoice(ctx, Number(rest[0]), rest[1]);
