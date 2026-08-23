@@ -684,6 +684,9 @@ async function showProduct(ctx: Context, id: number, back: string) {
   if (!p) return ctx.answerCallbackQuery({ text: t(lang, "out_of_stock"), show_alert: true });
 
   const variants = p.plans.flatMap((pl) => pl.variants);
+  // Single-variant product: skip the plan list and open the all-in-one buy card
+  // straight away (video + description + qty ± + pay buttons in one message).
+  if (variants.length === 1) return showQtyChooser(ctx, variants[0].id, 1, back, true, true);
   const overrides = await priceOverridesFor(user.id, variants.map((v) => v.id));
   const availablePoints = await availableReferralPoints(user);
   const kb = new InlineKeyboard();
@@ -833,10 +836,32 @@ function quantityDeal(
   };
 }
 
+// Append the direct-pay buttons (Payme / Click / Stars / contact-admin) to a
+// keyboard for the "all-in-one" buy card. Payme and Click are one-tap URL
+// buttons (a pending top-up is pre-created for the exact price); Stars is a
+// callback (an invoice message, to avoid a slow API call on every ± re-render);
+// admin opens a chat with the product pre-filled.
+async function appendCardPayButtons(kb: InlineKeyboard, userId: number, variantId: number, qty: number, label: string, total: number, refSpend: number, lang: string) {
+  const note = `buy:${variantId}:${qty}`;
+  if (paymeReady()) {
+    const topup = await db.topUp.create({ data: { userId, amount: total, method: "payme", status: "pending", note, refSpend, expiresAt: new Date(Date.now() + 30 * 60_000) } }).catch(() => null);
+    if (topup) kb.url("Payme", buildCheckoutUrl({ checkoutBase: PAYME_CHECKOUT_URL, merchantId: PAYME_MERCHANT_ID, topUpId: topup.id, amountTiyin: sumToTiyin(total), lang })).icon(PAYME_BTN_EMOJI).row();
+  }
+  if (clickReady()) {
+    const ctopup = await db.topUp.create({ data: { userId, amount: total, method: "click", status: "pending", note, refSpend, expiresAt: new Date(Date.now() + 30 * 60_000) } }).catch(() => null);
+    if (ctopup) kb.url("Click", buildClickUrl({ serviceId: CLICK_SERVICE_ID, merchantId: CLICK_MERCHANT_ID, topUpId: ctopup.id, amountSum: total })).icon(CLICK_BTN_EMOJI).row();
+  } else {
+    kb.text("Click", `tclick_buy:${total}:${variantId}:${qty}`).icon(CLICK_BTN_EMOJI).row();
+  }
+  kb.text(stripLeadEmoji(t(lang, "pay_stars", { n: soumToStars(total) })), `tstar_buy:${total}:${variantId}:${qty}`).icon(STARS_BTN_EMOJI).row();
+  const adminUser = (await setting("support_username", "Aiobuna_support")).replace(/^@/, "");
+  kb.url(stripLeadEmoji(t(lang, "admin_topup")), `https://t.me/${adminUser}?text=${encodeURIComponent(`${label} — ${money(total, lang)}`)}`).icon(ADMIN_BTN_EMOJI).row();
+}
+
 async function buildQtyChooser(
-  v: { id: number; priceUzs: number; autoSupplier: boolean; supplierStock: number; titleRu: string; titleUz: string; durationDays: number; bulkPrices?: string | null; bulkBonus?: string | null; plan: { product: { id: number; titleRu: string; titleEn: string; titleUz: string } } },
+  v: { id: number; priceUzs: number; autoSupplier: boolean; supplierStock: number; titleRu: string; titleUz: string; durationDays: number; needsUsername?: boolean; bulkPrices?: string | null; bulkBonus?: string | null; plan: { product: { id: number; titleRu: string; titleEn: string; titleUz: string; descRu?: string; descEn?: string; descUz?: string; refDiscount?: boolean; videoFileId?: string | null } } },
   lang: string,
-  balance: number,
+  user: { id: number; tgId: string; bonusReferrals?: number | null; spentReferrals?: number | null },
   qty: number,
   back: string,
   unitPrice: number,
@@ -850,7 +875,10 @@ async function buildQtyChooser(
   qty = clamp(Math.floor(qty) || 1, 1, max);
   const deal = quantityDeal(v, unitPrice, qty);
   const total = deal.total;
-  const disclaimer = await disclaimerFor(lang);
+  // Referral discount (same rule as doBuy): eligible product + enough referrals.
+  const disc = v.plan.product.refDiscount && !v.needsUsername ? bestRefDiscount(await availableReferralPoints(user)) : null;
+  const payTotal = disc ? Math.round(total * (100 - disc.pct) / 100) : total;
+  const label = qty > 1 ? `${title} ×${qty}` : title;
 
   const kb = new InlineKeyboard()
     .text("➖", `q:${v.id}:${qty - 1}:${back}`)
@@ -859,40 +887,43 @@ async function buildQtyChooser(
     .row()
     .text(t(lang, "enter_qty_btn"), `qi:${v.id}:${back}`)
     .row();
-  // Offer the cheapest bundle as a one-tap shortcut — the deal is worthless if
-  // nobody notices it. Only tiers that actually fit in stock are shown.
+  // Offer the cheapest bundle as a one-tap shortcut. Only tiers that fit stock.
   const shortcut = deal.tiers.filter((tier) => tier.qty !== qty && tier.qty <= max).slice(0, 3);
-  if (shortcut.length > 0) {
-    for (const tier of shortcut) {
-      const s = Math.max(0, unitPrice * tier.qty - tier.totalUzs);
-      kb.text(`${tier.qty} шт. — ${money(tier.totalUzs, lang)}${s > 0 ? ` 🔥` : ""}`, `q:${v.id}:${tier.qty}:${back}`).row();
-    }
+  for (const tier of shortcut) {
+    const s = Math.max(0, unitPrice * tier.qty - tier.totalUzs);
+    kb.text(`${tier.qty} шт. — ${money(tier.totalUzs, lang)}${s > 0 ? ` 🔥` : ""}`, `q:${v.id}:${tier.qty}:${back}`).row();
   }
-  // Skip the "buy max" shortcut for unlimited manual-delivery items — there's
-  // no real ceiling to jump to, and 999999 would be a nonsensical quantity.
   if (max > 1 && max < STOCK_UNLIMITED) kb.text(t(lang, "maximum", { n: max }), `q:${v.id}:${max}:${back}`).row();
-  kb.text(t(lang, "buy_for", { v: money(total, lang) }), `bc:${v.id}:${qty}`).row();
+  // Pay right here: Fragment (username-first) items keep a single buy button
+  // that asks for the recipient; everything else gets the direct-pay buttons.
+  if (v.needsUsername) {
+    kb.text(t(lang, "buy_for", { v: money(payTotal, lang) }), `bc:${v.id}:${qty}`).row();
+  } else {
+    await appendCardPayButtons(kb, user.id, v.id, qty, label, payTotal, disc?.cost ?? 0, lang);
+  }
   kb.text(t(lang, "back"), `p:${v.plan.product.id}:${back}`);
 
-  // Show the whole offer list so the customer can see the next tier up.
+  const pd = await pick3(v.plan.product.descRu ?? "", v.plan.product.descEn, v.plan.product.descUz, lang);
+  const descFull = pd?.trim() ? stripTags(pd.trim()) : "";
+  const desc = descFull.length > 380 ? `${descFull.slice(0, 380)}…` : descFull;
   const offers = describeBulk(unitPrice, deal.tiers, deal.bonuses, (n) => money(n, lang));
 
   const text =
-    `🧾 <b>${esc(title)}</b>\n\n` +
-    (vipLabel ? `💎 <b>${esc(vipLabel)}</b>\n` : "") +
-    `${t(lang, "price_each", { v: unitPrice > 0 ? money(unitPrice, lang) : t(lang, "free") })}\n` +
-    `${t(lang, "in_stock", { n: stockDisplay(max) })}\n` +
-    `${t(lang, "qty", { n: qty })}\n` +
-    (deal.free > 0 ? `🎁 <b>+${deal.free} в подарок</b> → получите ${qty + deal.free} шт.\n` : "") +
-    `${t(lang, "total", { v: money(total, lang) })}` +
-    (deal.saved > 0 ? ` <b>(−${money(deal.saved, lang)})</b>` : "") +
-    `\n${t(lang, "your_balance", { v: money(balance, lang) })}` +
-    (offers.length > 0 ? `\n\n🔥 <b>Выгодные наборы:</b>\n${offers.map((o) => `• ${o}`).join("\n")}` : "") +
-    (disclaimer ? `\n\n${disclaimer}` : "");
-  return { text, kb, max };
+    `🧾 <b>${esc(title)}</b>\n` +
+    (desc ? `\n${esc(desc)}\n` : "") +
+    (vipLabel ? `\n💎 <b>${esc(vipLabel)}</b>` : "") +
+    `\n${t(lang, "price_each", { v: unitPrice > 0 ? money(unitPrice, lang) : t(lang, "free") })}` +
+    `\n${t(lang, "in_stock", { n: stockDisplay(max) })}` +
+    `\n${t(lang, "qty", { n: qty })}` +
+    (deal.free > 0 ? `\n🎁 <b>+${deal.free} в подарок</b> → получите ${qty + deal.free} шт.` : "") +
+    (disc ? `\n🎁 Скидка за рефералов: <b>−${disc.pct}%</b> (спишется ${disc.cost} реф.)` : "") +
+    `\n${t(lang, "total", { v: money(payTotal, lang) })}` +
+    (deal.saved > 0 && !disc ? ` <b>(−${money(deal.saved, lang)})</b>` : "") +
+    (offers.length > 0 ? `\n\n🔥 <b>Выгодные наборы:</b>\n${offers.map((o) => `• ${o}`).join("\n")}` : "");
+  return { text, kb, max, videoFileId: v.plan.product.videoFileId ?? null };
 }
 
-async function showQtyChooser(ctx: Context, variantId: number, qty: number, back: string, edit: boolean) {
+async function showQtyChooser(ctx: Context, variantId: number, qty: number, back: string, edit: boolean, initial = false) {
   const user = await getUser(ctx);
   const lang = user.lang;
   const ack = (o?: { text: string; show_alert: boolean }) =>
@@ -900,7 +931,7 @@ async function showQtyChooser(ctx: Context, variantId: number, qty: number, back
   const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
   if (!v || !v.isActive) return ack({ text: t(lang, "plan_unavailable"), show_alert: true });
   const eff = await effPriceFor(user.id, variantId, v.priceUzs);
-  const built = await buildQtyChooser(v, lang, user.balance, qty, back, eff.price, eff.label);
+  const built = await buildQtyChooser(v, lang, user, qty, back, eff.price, eff.label);
   if (!built) {
     const pt = await pick3(v.plan.product.titleRu, v.plan.product.titleEn, v.plan.product.titleUz, lang);
     const vt = await locName(v.titleRu, v.titleUz, lang);
@@ -912,10 +943,22 @@ async function showQtyChooser(ctx: Context, variantId: number, qty: number, back
     else await ctx.reply(noStockText, { parse_mode: "HTML", reply_markup: noStockKb });
     return ack();
   }
-  if (edit) {
-    await sendOrEdit(ctx, built.text, { reply_markup: built.kb });
+  const video = built.videoFileId;
+  if (!edit) {
+    // Fresh message (e.g. after typing a quantity).
+    if (video) {
+      await ctx.replyWithVideo(video, { caption: built.text, parse_mode: "HTML", reply_markup: built.kb }).catch(async () => {
+        await ctx.reply(built.text, { parse_mode: "HTML", reply_markup: built.kb }).catch(() => {});
+      });
+    } else {
+      await ctx.reply(built.text, { parse_mode: "HTML", reply_markup: built.kb });
+    }
+  } else if (initial && video) {
+    // First entry from the product card: replace it with the video buy card.
+    await sendOrEdit(ctx, built.text, { reply_markup: built.kb, video });
   } else {
-    await ctx.reply(built.text, { parse_mode: "HTML", reply_markup: built.kb });
+    // ± re-render: edit text/caption in place — keeps the video, no flicker.
+    await sendOrEdit(ctx, built.text, { reply_markup: built.kb });
   }
   await ack();
 }
@@ -3833,7 +3876,7 @@ type PromoDraft = { variantId: number; name: string; originalPrice: number; pric
 const promoDraft = new Map<string, PromoDraft>();
 
 function promoMessage(name: string, oldPrice: number, newPrice: number, hours: number, variantId: number): { text: string; kb: InlineKeyboard } {
-  const kb = new InlineKeyboard().text(`🛒 ${money(newPrice, "uz")} — sotib olish`, `bc:${variantId}:1`);
+  const kb = new InlineKeyboard().text(`🛒 ${money(newPrice, "uz")} — sotib olish`, `b:${variantId}:0:all`);
   const text =
     `🔥 <b>Chegirma — faqat ${hours} soat!</b>\n\n` +
     `💎 <b>${esc(name)}</b>\n` +
@@ -4366,7 +4409,7 @@ bot.on("callback_query:data", async (ctx) => {
     const [tag, ...rest] = data.split(":");
     if (tag === "m") { const page = Number(rest[0]) || 0; const sort = (SORTS.includes(rest[1] as Sort) ? rest[1] : "all") as Sort; await ctx.answerCallbackQuery().catch(() => {}); return showMenu(ctx, page, sort, true); }
     if (tag === "p") return showProduct(ctx, Number(rest[0]), `${Number(rest[1]) || 0}:${rest[2] ?? "all"}`);
-    if (tag === "b") return showQtyChooser(ctx, Number(rest[0]), 1, `${rest[1] ?? "0"}:${rest[2] ?? "all"}`, true);
+    if (tag === "b") return showQtyChooser(ctx, Number(rest[0]), 1, `${rest[1] ?? "0"}:${rest[2] ?? "all"}`, true, true);
     if (tag === "q") return showQtyChooser(ctx, Number(rest[0]), Number(rest[1]) || 1, `${rest[2] ?? "0"}:${rest[3] ?? "all"}`, true);
     if (tag === "qi") { pending.set(String(ctx.from?.id), { type: "qty", variantId: Number(rest[0]), back: `${rest[1] ?? "0"}:${rest[2] ?? "all"}` }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "enter_qty_msg")); }
     if (tag === "bc") return doBuy(ctx, Number(rest[0]), Number(rest[1]) || 1);
