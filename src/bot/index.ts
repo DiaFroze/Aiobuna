@@ -884,7 +884,11 @@ async function buildQtyChooser(
 ) {
   const pt = await pick3(v.plan.product.titleRu, v.plan.product.titleEn, v.plan.product.titleUz, lang);
   const vt = await locName(v.titleRu, v.titleUz, lang);
-  const title = `${pt} — ${vt}`;
+  // formatItemTitle drops the duplicate when product and variant names repeat
+  // ("Gemini AI Pro 18 Oy — Gemini AI Pro 18m" → "Gemini AI Pro 18m").
+  const title = formatItemTitle(pt, vt);
+  const brandEmoji = giftPremiumEmoji(pt);
+  const head = brandEmoji ? `<tg-emoji emoji-id="${brandEmoji}">💎</tg-emoji>` : "🧾";
   const max = await availableStock(v);
   if (max <= 0) return null;
   qty = clamp(Math.floor(qty) || 1, 1, max);
@@ -940,7 +944,7 @@ async function buildQtyChooser(
     : "";
 
   const text =
-    `🧾 <b>${esc(title)}</b>\n` +
+    `${head} <b>${esc(title)}</b>\n` +
     (desc ? `\n${esc(desc)}\n` : "") +
     (flashBlock ? `\n${flashBlock}` : "") +
     (vipLabel ? `\n💎 <b>${esc(vipLabel)}</b>` : "") +
@@ -3908,10 +3912,13 @@ const promoDraft = new Map<string, PromoDraft>();
 
 function promoMessage(name: string, oldPrice: number, newPrice: number, hours: number, variantId: number): { text: string; kb: InlineKeyboard } {
   const pct = oldPrice > newPrice ? Math.round((oldPrice - newPrice) / oldPrice * 100) : 0;
-  const kb = new InlineKeyboard().text(`🛒 −${pct}% · ${money(newPrice, "uz")}`, `b:${variantId}:0:all`);
+  // Brand premium emoji (e.g. 🤖 for Gemini) instead of a generic 💎.
+  const pe = giftPremiumEmoji(name);
+  const brand = pe ? `<tg-emoji emoji-id="${pe}">💎</tg-emoji>` : "💎";
+  const kb = new InlineKeyboard().text(`🛒 Ulgurib qoling −${pct}%`, `b:${variantId}:0:all`);
   const text =
     `<tg-emoji emoji-id="${FLASH_PCT_EMOJI}">🔺</tg-emoji> <b>FLASH SALE −${pct}%</b>\n\n` +
-    `💎 <b>${esc(name)}</b>\n` +
+    `${brand} <b>${esc(name)}</b>\n` +
     `<s>${money(oldPrice, "uz")}</s> → <b>${money(newPrice, "uz")}</b>\n\n` +
     `<tg-emoji emoji-id="${FLASH_TIME_EMOJI}">⏱</tg-emoji> Chegirma ${hours} soat davom etadi — ulgurib qoling!`;
   return { text, kb };
