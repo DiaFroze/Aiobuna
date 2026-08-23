@@ -615,15 +615,41 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
   if (sort === "price") items.sort((a, b) => a.minPrice - b.minPrice);
   else if (sort === "stock") items.sort((a, b) => b.stock - a.stock);
 
+  // Active flash sale (from /promo): find which product carries the discounted
+  // variant, so its catalog row shows old→new price + % and the header gets a
+  // countdown line.
+  let promo: { productId: number; originalPrice: number; newPrice: number; pct: number; expiresAt: number } | null = null;
+  const promoRaw = (await setting("promo_active", "")).trim();
+  if (promoRaw) {
+    try {
+      const p = JSON.parse(promoRaw) as { variantId: number; originalPrice: number; expiresAt: number };
+      if (Date.now() < p.expiresAt) {
+        for (const prod of products) {
+          const vv = prod.plans.flatMap((pl) => pl.variants).find((v) => v.id === p.variantId);
+          if (vv) {
+            const newPrice = priceOf(vv);
+            const pct = p.originalPrice > newPrice ? Math.round((p.originalPrice - newPrice) / p.originalPrice * 100) : 0;
+            if (pct > 0) promo = { productId: prod.id, originalPrice: p.originalPrice, newPrice, pct, expiresAt: p.expiresAt };
+            break;
+          }
+        }
+      }
+    } catch { /* malformed marker */ }
+  }
+
   // No pagination — every product is shown at once.
   const kb = new InlineKeyboard();
   for (const it of items) {
-    const price = it.minPrice > 0 ? money(it.minPrice, lang) : t(lang, "free");
     const cleanTitle = stripLeadEmoji(it.title);
+    const onSale = promo && promo.productId === it.id;
+    const priceStr = onSale
+      ? `${money(promo!.originalPrice, lang)}→${money(promo!.newPrice, lang)} (−${promo!.pct}%)`
+      : it.minPrice > 0 ? money(it.minPrice, lang) : t(lang, "free");
+    const label = onSale ? `🔥 ${cleanTitle} — ${priceStr}` : `${cleanTitle} - ${priceStr}`;
     if (it.premiumEmoji) {
-      kb.text(`${cleanTitle} - ${price}`, `p:${it.id}:0:${sort}`).icon(it.premiumEmoji).row();
+      kb.text(label, `p:${it.id}:0:${sort}`).icon(it.premiumEmoji).row();
     } else {
-      kb.text(`${it.emoji} ${cleanTitle} - ${price}`, `p:${it.id}:0:${sort}`).row();
+      kb.text(onSale ? label : `${it.emoji} ${label}`, `p:${it.id}:0:${sort}`).row();
     }
   }
   if (!freebies && items.length > 0) {
@@ -639,8 +665,11 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
   }
 
   const head = freebies ? t(lang, "promo_title") : t(lang, "products_available");
+  const flashLine = promo
+    ? `<tg-emoji emoji-id="${FLASH_PCT_EMOJI}">🔺</tg-emoji> <b>FLASH SALE −${promo.pct}%</b> · <tg-emoji emoji-id="${FLASH_TIME_EMOJI}">⏱</tg-emoji> ${formatCountdown(promo.expiresAt - Date.now())}\n\n`
+    : "";
   const text =
-    `${t(lang, "balance_line", { v: money(balance, lang) })}\n\n` +
+    flashLine +
     (items.length === 0
       ? freebies ? t(lang, "no_promo") : t(lang, "catalog_empty")
       : `<b>${head}</b>\n${t(lang, "choose_below")}`);
