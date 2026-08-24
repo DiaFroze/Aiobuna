@@ -8,6 +8,9 @@ import {
   classifyGiftError,
   decideAfterReconcile,
   canAutoDeliver,
+  deliversToAccount,
+  closeDeliveryPatch,
+  isAlreadyDelivered,
   describeRecipient,
   buildBuyNote,
   parseBuyNote,
@@ -144,6 +147,104 @@ describe("recipient", () => {
   it("describes both resolved and unresolved recipients", () => {
     expect(describeRecipient(mk({ tgId: "42", username: "bob", source: "shared" }))).toBe("@bob (id 42)");
     expect(describeRecipient(mk({ username: "bob" }))).toContain("не определён");
+  });
+});
+
+describe("deliversToAccount — regression guard for the existing catalogue", () => {
+  // The buy flow branches on this. Anything that returns false keeps the
+  // unchanged one-message checkout (video, qty ±, Payme/Click/Stars/admin);
+  // anything true gets a single buy button that asks who it is for first.
+
+  it("ordinary code-delivered products are UNCHANGED", () => {
+    // Gemini, CapCut, Canva, ElevenLabs, Railway, Higgsfield … — every product
+    // that hands over a login or a key. These must never start asking "кому?".
+    for (const v of [
+      {},
+      { needsUsername: false },
+      { fragmentKind: "" },
+      { needsUsername: false, fragmentKind: "" },
+      { needsUsername: null, fragmentKind: null },
+    ]) {
+      expect(deliversToAccount(v), JSON.stringify(v)).toBe(false);
+    }
+  });
+
+  it("existing Stars items configured the documented way are UNCHANGED", () => {
+    // The admin hint tells you to tick "Спрашивать @username" alongside the
+    // Fragment type, so these already used the single buy button before.
+    expect(deliversToAccount({ needsUsername: true, fragmentKind: "stars" })).toBe(true);
+    expect(deliversToAccount({ needsUsername: true, fragmentKind: "" })).toBe(true);
+  });
+
+  it("Premium is caught even though it does not need a username", () => {
+    // The bug: Premium is addressed by numeric id, so needsUsername is false,
+    // and the old check let it reach payment without ever asking who it is for.
+    expect(deliversToAccount({ needsUsername: false, fragmentKind: "premium" })).toBe(true);
+  });
+
+  it("a Stars item saved without the username tick is still caught", () => {
+    // The two fields are independent in the admin form, so this combination is
+    // reachable by mistake; it must not silently sell with no recipient.
+    expect(deliversToAccount({ needsUsername: false, fragmentKind: "stars" })).toBe(true);
+  });
+
+  it("an unknown fragmentKind is treated as an ordinary product", () => {
+    // updateVariantAction only ever writes "", "stars" or "premium"; anything
+    // else means the field is not meaningfully configured.
+    expect(deliversToAccount({ fragmentKind: "gift" })).toBe(false);
+    expect(deliversToAccount({ fragmentKind: "PREMIUM" })).toBe(false);
+  });
+});
+
+describe("delivery closure invariants — /give and the admin panel must agree", () => {
+  // Regression: the admin web panel closed only `status`, leaving deliveryState
+  // at PAID. The order then still counted as pending in /health AND /give would
+  // deliver it a second time. Both paths now share this one patch.
+
+  it("both paths produce the SAME final state for a Fragment order", () => {
+    const order = { status: "awaiting_delivery", deliveryState: "PAID" };
+    const now = new Date("2026-08-24T12:00:00Z");
+    const viaGive = closeDeliveryPatch(order, now);
+    const viaAdminPanel = closeDeliveryPatch(order, now);
+
+    expect(viaGive).toEqual(viaAdminPanel);
+    expect(viaGive).toEqual({ status: "delivered", deliveryState: "COMPLETED", deliveredAt: now });
+  });
+
+  it("closes the state machine and stamps deliveredAt", () => {
+    const patch = closeDeliveryPatch({ status: "awaiting_delivery", deliveryState: "PAID" });
+    expect(patch.deliveryState).toBe("COMPLETED");
+    expect(patch.deliveredAt).toBeInstanceOf(Date);
+  });
+
+  it("a COMPLETED order is recognised as already delivered", () => {
+    // This is what stops a second /give handing the goods over again.
+    expect(isAlreadyDelivered({ status: "delivered", deliveryState: "COMPLETED" })).toBe(true);
+    expect(isAlreadyDelivered({ status: "awaiting_delivery", deliveryState: "COMPLETED" })).toBe(true);
+    expect(isAlreadyDelivered({ status: "delivered", deliveryState: "" })).toBe(true);
+  });
+
+  it("an order still awaiting delivery is not treated as delivered", () => {
+    expect(isAlreadyDelivered({ status: "awaiting_delivery", deliveryState: "PAID" })).toBe(false);
+    expect(isAlreadyDelivered({ status: "awaiting_delivery", deliveryState: "" })).toBe(false);
+    expect(isAlreadyDelivered({ status: "processing", deliveryState: "PROCESSING" })).toBe(false);
+  });
+
+  it("ordinary products (Gemini/CapCut/Canva) are untouched by the state machine", () => {
+    // No deliveryState in, no deliveryState out — their closure is exactly what
+    // it has always been.
+    for (const order of [{ status: "awaiting_delivery" }, { status: "awaiting_delivery", deliveryState: "" }, { status: "awaiting_delivery", deliveryState: null }]) {
+      const patch = closeDeliveryPatch(order);
+      expect(patch).toEqual({ status: "delivered" });
+      expect(patch).not.toHaveProperty("deliveryState");
+      expect(patch).not.toHaveProperty("deliveredAt");
+    }
+  });
+
+  it("closing is idempotent in shape — re-closing yields the same patch", () => {
+    const closed = { status: "delivered", deliveryState: "COMPLETED" };
+    expect(closeDeliveryPatch(closed).deliveryState).toBe("COMPLETED");
+    expect(isAlreadyDelivered(closed)).toBe(true); // …and callers must refuse first
   });
 });
 

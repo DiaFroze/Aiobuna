@@ -187,6 +187,25 @@ export interface Recipient {
   source: RecipientSource;
 }
 
+/**
+ * Is this item delivered to a Telegram account (rather than handed over as a
+ * code)? Such items must learn their recipient BEFORE payment, so they get a
+ * single buy button that routes through the recipient question instead of the
+ * direct-pay buttons.
+ *
+ * Keyed on both flags on purpose. `needsUsername` alone was not enough: a
+ * Premium item is addressed by numeric id and normally has needsUsername =
+ * false, so it slipped straight to payment and was then delivered to the buyer.
+ * `fragmentKind` alone is not enough either — the two are independent fields in
+ * the admin form, and an older Stars item may carry only needsUsername.
+ *
+ * Ordinary products (fragmentKind "" and needsUsername false — Gemini, CapCut,
+ * Canva and every other code-delivered item) are unaffected.
+ */
+export function deliversToAccount(v: { needsUsername?: boolean | null; fragmentKind?: string | null }): boolean {
+  return Boolean(v.needsUsername) || v.fragmentKind === "premium" || v.fragmentKind === "stars";
+}
+
 /** Auto delivery requires a numeric id; a username alone cannot be delivered to. */
 export function canAutoDeliver(r: Recipient): boolean {
   return r.tgId !== null && r.tgId.trim() !== "";
@@ -196,6 +215,42 @@ export function canAutoDeliver(r: Recipient): boolean {
 export function describeRecipient(r: Recipient): string {
   const uname = r.username ? `@${r.username}` : "—";
   return r.tgId ? `${uname} (id ${r.tgId})` : `${uname} (id не определён)`;
+}
+
+// ---------------------------------------------------------------------------
+// Closing an order
+// ---------------------------------------------------------------------------
+
+/**
+ * An order carries two status fields: the legacy `status`, which the whole
+ * existing shop reads, and `deliveryState`, which only Fragment goods use.
+ * Delivery happens from two places (the bot's /give and the admin web panel),
+ * and they must land on the SAME final state — the web panel once closed only
+ * `status`, leaving deliveryState at PAID, so the order still looked pending and
+ * /give would hand the goods over a second time.
+ */
+export interface OrderDeliveryFields {
+  status?: string | null;
+  deliveryState?: string | null;
+}
+
+/** True when the order has already been delivered and must not go out again. */
+export function isAlreadyDelivered(order: OrderDeliveryFields): boolean {
+  return order.deliveryState === "COMPLETED" || order.status === "delivered";
+}
+
+/**
+ * The patch that closes an order, for both delivery paths. `deliveryState` is
+ * only touched when the order actually has one, so ordinary products (Gemini,
+ * CapCut, Canva …) keep their empty value and are unaffected.
+ */
+export function closeDeliveryPatch(
+  order: OrderDeliveryFields,
+  now: Date = new Date(),
+): { status: "delivered"; deliveryState?: "COMPLETED"; deliveredAt?: Date } {
+  return order.deliveryState
+    ? { status: "delivered", deliveryState: "COMPLETED", deliveredAt: now }
+    : { status: "delivered" };
 }
 
 // ---------------------------------------------------------------------------

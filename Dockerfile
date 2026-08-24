@@ -1,3 +1,7 @@
+# ⚠️ DEPRECATED — not used by production.
+# Railway builds this project with NIXPACKS and starts it with
+# `npm run start:all` (see railway.json). This Dockerfile is unverified and
+# predates the removal of the storefront and queue worker; see docker-compose.yml.
 # syntax=docker/dockerfile:1
 FROM node:20-alpine AS base
 WORKDIR /app

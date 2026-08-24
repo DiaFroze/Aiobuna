@@ -5,6 +5,7 @@ import { requirePermission } from "@/lib/auth/session";
 import { PERMISSIONS } from "@/lib/security/rbac";
 import { botDb } from "@/lib/botDb";
 import { audit } from "@/lib/security/audit";
+import { closeDeliveryPatch } from "@/lib/domain/premium-delivery";
 
 /**
  * Deliver manual order from the admin panel.
@@ -32,14 +33,22 @@ export async function deliverManualOrderAction(formData: FormData) {
     throw new Error("Этот заказ уже выдан или отменен");
   }
 
-  // Update order status and payload
-  await botDb.botOrder.update({
-    where: { id: orderId },
-    data: {
-      payload,
-      status: "delivered",
-    },
+  // Compare-and-set, not update-by-id: the check above can be passed by two
+  // admins at once (or a double-submitted form), and only the caller whose
+  // UPDATE actually changes a row may deliver.
+  //
+  // deliveryState is closed here too. Leaving it behind was a real double-
+  // delivery path: an order delivered from this panel kept deliveryState =
+  // "PAID", so it still counted as pending in /health AND /give would happily
+  // hand the goods over a second time.
+  const claimed = await botDb.botOrder.updateMany({
+    where: { id: orderId, status: "awaiting_delivery" },
+    data: { payload, ...closeDeliveryPatch(order) },
   });
+
+  if (claimed.count !== 1) {
+    throw new Error("Этот заказ уже выдан или отменен");
+  }
 
   // Log audit
   await audit({

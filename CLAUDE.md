@@ -1,98 +1,114 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code working in this repository.
 
 ## Project overview
 
-SB Store — a digital goods reseller platform: a public storefront + protected admin panel + integration with multiple reseller supplier APIs. Stack: Next.js 14 (App Router) + TypeScript + PostgreSQL + Prisma + Redis + BullMQ + Tailwind CSS. All supplier logic runs through deterministic **mock adapters** by default, so the project runs and demos fully offline without real API keys.
+**AI OBUNA** — a Telegram shop selling digital subscriptions (Gemini, CapCut,
+Canva, ElevenLabs …) to customers in Uzbekistan. Prices are in **UZS (сум)**.
+
+There is no public storefront: customers buy **only through the Telegram bot**,
+and the Next.js app exists to serve the **admin panel** and the **payment
+webhooks**. (An earlier storefront, queue worker and Redis/BullMQ stack were
+removed; if you find docs describing them, those docs are stale.)
 
 ## Commands
 
 ```bash
-# Local dev (requires running Postgres + Redis, or use Docker Compose below)
 npm install
-cp .env.example .env          # fill in DATABASE_URL, REDIS_URL, secrets
-npm run setup                 # prisma db push + seed (roles, admin, mock suppliers, initial sync)
-npm run dev                   # http://localhost:3000
-npm run worker                # queue worker, run in a separate terminal
-
-# Docker Compose (db + redis + web + worker)
-cp .env.example .env
-docker compose up --build
-
-# Tests
-npm test                      # vitest run — all tests (tests/**/*.test.ts)
-npx vitest run tests/pricing.test.ts   # single test file
-npm run test:watch            # vitest watch mode
-
-# Types / lint / build
-npm run typecheck             # tsc --noEmit
-npm run lint                  # next lint
-npm run build                 # prisma generate && next build
-
-# Prisma
-npm run db:push               # push schema without migration
-npm run db:migrate            # prisma migrate dev
-npm run db:seed               # tsx --conditions=react-server prisma/seed.ts
-npm run admin:create          # node --env-file=.env scripts/create-admin.mjs
+npm run dev          # admin panel, http://localhost:3000
+npm run bot          # Telegram bot (long-polling), separate terminal
+npm run db:push      # apply prisma/schema.prisma to the database
+npm run db:seed      # roles + admin
+npm run typecheck    # tsc --noEmit
+npm test             # vitest run
+npm run build        # prisma generate && next build
 ```
 
-Default seeded admin login: `admin@sb.eu` / `admin12345` (via `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`).
+`npm run lint` is **not usable**: ESLint has never been configured here and
+`next lint` drops into an interactive setup. Treat typecheck + tests as the gate.
 
-## Architecture
+## Runtime
+
+Two processes share one PostgreSQL database:
 
 ```
-Browser (shop / admin)
-      │  HTTPS
-      ▼
-Next.js App Router — Server Components / Server Actions / Route Handlers
-      │
-      ├── src/lib/services    orchestration (sync, candidates, catalog, orders, dashboard)
-      ├── src/lib/domain      pure functions (pricing, supplier-selection, rounding, content-diff)
-      ├── src/lib/suppliers   SupplierAdapter interface + mock/http adapters + registry
-      └── src/lib/security    auth sessions, RBAC, AES-GCM crypto, HTML sanitize, audit
-      ▼
-Prisma → PostgreSQL         Redis → BullMQ queues
-                                 ├── supplier-sync    (import products/prices/availability)
-                                 ├── price-recalc
-                                 ├── order-fulfil     (purchase from supplier + fallback)
-                                 └── notifications    (Telegram)
+Railway (NIXPACKS, 1 replica) → npm run start:all → scripts/start-all.mjs
+   ├─ prisma db push            (blocking; a failure aborts the deploy)
+   ├─ next start -p $PORT       admin panel + /api/payme + /api/click
+   └─ tsx src/bot/index.ts      the bot; runs ensureSchema() before serving
 ```
 
-The queue worker is a separate process (`src/worker/index.ts`, the `worker` service in `docker-compose.yml`) and reuses the same `src/lib/services` as the web process — business logic never lives in the route handlers or worker entrypoint directly.
+`start-all.mjs` supervises both children: if either dies, the container exits
+non-zero so Railway restarts it. One long-poller per bot token — never run a
+second bot process against production.
 
-### Core principles (from IMPLEMENTATION_PLAN.md)
+## Layout
 
-- **Secrets stay server-only.** Supplier API keys are AES-256-GCM encrypted in the DB and decrypted only in `src/lib/env.ts` (`import "server-only"`). Nothing secret is prefixed `NEXT_PUBLIC_`.
-- **No invented supplier endpoints.** Every supplier implements the `SupplierAdapter` interface (`src/lib/suppliers/adapter.ts`). `MockSupplierAdapter` is active by default; `HttpSupplierAdapter` (`src/lib/suppliers/http-adapter.ts`) is a template with every real-endpoint integration point marked `// TODO(supplier-api):` — see `docs/API_INTEGRATION_GUIDE.md` before wiring a real supplier.
-- **Transport is a thin wrapper.** All business logic lives in `src/lib/services` and `src/lib/domain`; API routes and server actions just call into it.
-- **Everything sensitive is logged**: prices, terms, suppliers, markups → `AuditLog`, `PriceHistory`, `ProductContentVersion`, `SupplierSyncLog`, `SupplierApiError`.
-- **`premium_emoji_code` is always VARCHAR** — long numeric codes that must never round-trip through BigInt/Number.
-- **i18n-ready**: UI strings are dictionary keys in `src/i18n` (default `ru`; `uz`/`en` scaffolded).
+| Path | What |
+| --- | --- |
+| `src/bot/index.ts` | the whole bot (~5k lines): catalog, purchase, payments, referrals, admin commands |
+| `src/lib/domain/*` | pure, unit-tested logic — no DB, no network, no grammY |
+| `src/lib/supplier.ts` | supplier adapters (`vex`, `somadeth`); add new formats here |
+| `src/app/admin/(protected)/*` | admin panel (server components + server actions) |
+| `src/app/api/payme`, `api/click` | payment webhooks |
+| `prisma/schema.prisma` | schema; `ensureSchema()` in the bot adds what `db push` cannot express |
 
-### Key modules (`src/lib`)
+Domain modules: `payme`, `click`, `bulk-pricing`, `premium-delivery`,
+`topup-approval`, `telegram-username`. Anything worth testing belongs here —
+that is why these exist.
 
-| Module | Responsibility | Tests |
-| --- | --- | --- |
-| `domain/pricing.ts` | final price calc: fixed/markup, min_price, min_profit, rounding, currencies | `tests/pricing.test.ts` |
-| `domain/supplier-selection.ts` | best-supplier selection + fallback + manual-review flag | `tests/supplier-selection.test.ts`, `tests/fallback.test.ts` |
-| `domain/rounding.ts` | "nice" rounding rules (e.g. 0.63→0.65, 8570→9000) | covered in pricing tests |
-| `domain/content-diff.ts` | content version comparison | `tests/content.test.ts` |
-| `security/sanitize-html.ts` | strips supplier HTML/Markdown (no script/iframe/onerror) | `tests/content.test.ts` |
-| `suppliers/registry.ts` | looks up adapter by `Supplier.adapterKey` | — |
-| `emoji/renderer.ts` | `PremiumEmojiRenderer`, extensible provider | `tests/premium-emoji.test.ts` |
-| `security/crypto.ts` | AES-256-GCM encryption of supplier credentials | — |
-| `security/rbac.ts` | role/permission checks for admin routes | — |
+## Database
 
-### Data model
+`prisma db push` is the workflow; there are **no migrations** (`prisma/migrations`
+does not exist, and `prisma migrate dev` would offer to reset the database — do
+not add it back casually). Schema changes go in `schema.prisma` **and**, when the
+bot needs them immediately or Prisma cannot express them, in `ensureSchema()` as
+idempotent raw DDL.
 
-Full schema in `prisma/schema.prisma` / `docs/DATABASE_SCHEMA.md`. Orders (`Order`/`OrderItem`) store a **snapshot** of price/terms/warranty at purchase time rather than referencing live product data — don't join back to `CanonicalProduct` for historical order display.
+Orders store a snapshot of price and title at purchase time — do not join back to
+live product rows for historical display.
 
-### Routes
+## i18n
 
-- `src/app/(shop)`: storefront — home, catalog, categories, product, cart, checkout, payment, orders, profile, support, terms, warranties, FAQ.
-- `src/app/admin`: dashboard, products, categories, candidates, suppliers, product links, pricing/markup rules, terms/warranties, orders, customers, payments, profit analytics, price history, sync logs, API errors, settings, admins, audit logs. Protected by server-side sessions + RBAC guard.
+Three languages (`ru` default, `uz`, `en`) in `src/bot/i18n.ts`. A new key must
+be added to **all three**, or `t()` returns the key itself to the customer.
 
-### Env vars
+## Invariants (do not break)
 
-See `.env.example`. `SUPPLIER_MODE=mock|live` toggles real vs. mock supplier adapters. `CREDENTIALS_ENC_KEY` must be exactly 32 bytes hex (`openssl rand -hex 32`).
+These are load-bearing rules, learned from real bugs. Each one has tests.
+
+- **Money moves exactly once.** Every credit, charge and delivery is guarded by a
+  compare-and-set (`UPDATE … WHERE <state>` / `updateMany` + row count), never by
+  read-then-write. Reading a row, checking its status and then updating it lets
+  two concurrent callers both pass the check. See `domain/topup-approval.ts`.
+- **No payment approval without CAS.** The status transition *is* the lock; only
+  the caller whose update changed a row may credit and fulfil.
+- **No duplicate fulfilment.** An order is delivered from two places (`/give` and
+  the admin panel) — both must use `closeDeliveryPatch()` and refuse an order
+  that `isAlreadyDelivered()`. `COMPLETED` is terminal.
+- **Recipient before payment.** Anything delivered to a Telegram account
+  (`deliversToAccount()`) must capture its recipient before money moves, and the
+  recipient travels in the purchase note (`buildBuyNote`/`parseBuyNote`) — never
+  hand-rolled `split(":")`. Delivery is addressed by numeric id; a username alone
+  is never sufficient.
+- **Payme / Click are not edited without regression tests.** `tests/payme.test.ts`
+  and `tests/click.test.ts` must stay green; they encode provider protocol rules.
+- **Production schema never uses `--accept-data-loss`.** Startup must fail closed
+  on a destructive change. Verified: without the flag Prisma refuses when a column
+  holding data would be dropped; additive changes still apply normally. Partial
+  indexes live in `ensureSchema()` raw DDL (Prisma cannot express them) and are
+  left untouched by `db push`.
+- **Secrets only via env.** Never a hardcoded token, key or seed — not even as a
+  fallback, and not even a revoked one.
+- **Fragment is not implemented.** No Fragment API, cookies, session, wallet, seed
+  or private key, and `giftPremiumSubscription` is not called. Telegram Premium
+  delivery stays `PREMIUM_DELIVERY_MODE=manual` until a separate, explicit task.
+
+## Deployment reality
+
+Production is Railway (NIXPACKS) running `npm run start:all`, which runs
+`prisma db push` and then supervises the Next.js and bot processes — if either
+dies, the container exits non-zero so the platform restarts it. `Dockerfile` and
+`docker-compose.yml` are **not** used by production and are stale (compose still
+references a removed `worker` service).

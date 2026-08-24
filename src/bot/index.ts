@@ -22,7 +22,8 @@ import { buildClickUrl } from "../lib/domain/click";
 // lives in the same module and is unit-tested, but is intentionally NOT wired up
 // yet: PREMIUM_DELIVERY_MODE stays "manual" until the Star-balance experiment
 // confirms the bot can actually pay for giftPremiumSubscription.
-import { premiumStarCost, buildBuyNote, parseBuyNote } from "../lib/domain/premium-delivery";
+import { premiumStarCost, buildBuyNote, parseBuyNote, deliversToAccount, closeDeliveryPatch } from "../lib/domain/premium-delivery";
+import { approveTopUp, APPROVABLE_STATUSES } from "../lib/domain/topup-approval";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -925,7 +926,7 @@ async function appendCardPayButtons(kb: InlineKeyboard, userId: number, variantI
 }
 
 async function buildQtyChooser(
-  v: { id: number; priceUzs: number; autoSupplier: boolean; supplierStock: number; titleRu: string; titleUz: string; durationDays: number; needsUsername?: boolean; bulkPrices?: string | null; bulkBonus?: string | null; plan: { product: { id: number; titleRu: string; titleEn: string; titleUz: string; descRu?: string; descEn?: string; descUz?: string; refDiscount?: boolean; videoFileId?: string | null } } },
+  v: { id: number; priceUzs: number; autoSupplier: boolean; supplierStock: number; titleRu: string; titleUz: string; durationDays: number; needsUsername?: boolean; fragmentKind?: string; bulkPrices?: string | null; bulkBonus?: string | null; plan: { product: { id: number; titleRu: string; titleEn: string; titleUz: string; descRu?: string; descEn?: string; descUz?: string; refDiscount?: boolean; videoFileId?: string | null } } },
   lang: string,
   user: { id: number; tgId: string; bonusReferrals?: number | null; spentReferrals?: number | null },
   qty: number,
@@ -966,9 +967,13 @@ async function buildQtyChooser(
     const s = Math.max(0, unitPrice * tier.qty - tier.totalUzs);
     kb.text(`${tier.qty} шт. — ${money(tier.totalUzs, lang)}${s > 0 ? ` 🔥` : ""}`, `q:${v.id}:${tier.qty}:${back}`).row();
   }
-  // Pay right here: Fragment (username-first) items keep a single buy button
-  // that asks for the recipient; everything else gets the direct-pay buttons.
-  if (v.needsUsername) {
+  // Anything delivered to a Telegram account must learn its recipient BEFORE
+  // money moves, so those items get a single buy button that routes through
+  // doBuy (which asks) instead of the direct-pay buttons. Keying this on
+  // needsUsername alone was wrong: a Premium item is identified by a numeric id
+  // and normally has needsUsername = false, so it slipped straight to payment
+  // and was then delivered to the buyer instead of the intended recipient.
+  if (deliversToAccount(v)) {
     kb.text(t(lang, "buy_for", { v: money(payTotal, lang) }), `bc:${v.id}:${qty}`).row();
   } else {
     await appendCardPayButtons(kb, user.id, v.id, qty, label, payTotal, disc?.cost ?? 0, lang);
@@ -1618,7 +1623,11 @@ async function showBankPicker(
   recipientTgId?: string,
 ) {
   const user = await getUser(ctx);
-  const suffix = targetUsername ? `:${targetUsername}` : "";
+  // Callback-data suffix for the fallback pay buttons. Mirrors the note layout
+  // (username, then numeric id) so those paths carry the recipient too.
+  const suffix = (targetUsername || recipientTgId)
+    ? `:${targetUsername ?? ""}${recipientTgId ? `:${recipientTgId}` : ""}`
+    : "";
   // The note is what carries the recipient through the payment round-trip.
   const note = buildBuyNote(v.id, qty, targetUsername ?? null, recipientTgId ?? null);
   const refSpend = disc?.cost ?? 0;
@@ -1697,8 +1706,11 @@ async function doBuy(ctx: Context, variantId: number, qty: number, targetUsernam
   if (v.fragmentKind === "premium" && !recipientTgId && !targetUsername) {
     return askPremiumRecipient(ctx, v, qty, lang);
   }
-  // Other goods delivered to an account (Stars) still capture a username.
-  if (v.needsUsername && !targetUsername && !recipientTgId) return askTargetUsername(ctx, v, qty, lang);
+  // Other goods delivered to an account (Stars) still capture a username. This
+  // mirrors deliversToAccount(): the buy card routes every account-delivered
+  // item here, so a Stars item configured without needsUsername would otherwise
+  // reach payment with no recipient captured at all.
+  if (deliversToAccount(v) && !targetUsername && !recipientTgId) return askTargetUsername(ctx, v, qty, lang);
   const pt = await pick3(v.plan.product.titleRu, v.plan.product.titleEn, v.plan.product.titleUz, lang);
   const vt = await locName(v.titleRu, v.titleUz, lang);
   const baseTitle = `${pt} — ${vt}`;
@@ -2613,31 +2625,52 @@ async function executeRejectTopup(
 
 async function resolveTopUp(ctx: Context, id: number, approve: boolean) {
   if (!isAdmin(ctx)) return ctx.answerCallbackQuery({ text: "Admin only", show_alert: true });
-  const topup = await db.topUp.findUnique({ where: { id }, include: { user: true } });
-  if (!topup || !["pending", "review", "awaiting_receipt"].includes(topup.status)) return ctx.answerCallbackQuery({ text: "Done already", show_alert: true });
-  const ulang = topup.user.lang;
-  if (approve) {
-    await db.$transaction([
-      db.topUp.update({ where: { id }, data: { status: "approved" } }),
-      db.botUser.update({ where: { id: topup.userId }, data: { balance: { increment: topup.amount } } }),
-    ]);
-    await ctx.editMessageText(`✅ #${id} +${money(topup.amount, ulang)}`).catch(() => {});
-    await ctx.api.sendMessage(topup.user.tgId, t(ulang, "paid_received", { v: money(topup.amount, ulang), b: "" }).split("\n")[0]).catch(() => {});
+  if (!approve) return promptRejectReason(ctx, id);
 
-    // Auto-purchase on approval if there is an associated note. The 4th part,
-    // when present, is the Stars/Premium recipient captured before payment.
-    if (topup.note && topup.note.startsWith("buy:")) {
-      const [, varIdStr, qtyStr, uname] = topup.note.split(":");
-      const variantId = Number(varIdStr);
-      const qty = Number(qtyStr);
-      if (variantId && qty) {
-        await executePurchase(topup.user.tgId, variantId, qty, undefined, uname || undefined).catch((err) => {
-          console.error("[bot] resolveTopUp auto-purchase fail:", err.message);
+  const result = await approveTopUp(id, {
+    // Compare-and-set: the status transition IS the lock. Reading the row and
+    // then updating it let two concurrent approvals (admin double-tap, two
+    // admins, a redelivered callback) both see "pending" and both credit the
+    // balance. Here only the caller whose UPDATE actually changed a row gets
+    // past this point, and the credit rides inside the same transaction.
+    claim: async (topUpId) =>
+      db.$transaction(async (tx) => {
+        const changed = await tx.topUp.updateMany({
+          where: { id: topUpId, status: { in: [...APPROVABLE_STATUSES] } },
+          data: { status: "approved" },
+        });
+        if (changed.count !== 1) return null; // lost the race, or not approvable
+        const t = await tx.topUp.findUnique({ where: { id: topUpId } });
+        if (!t) return null;
+        await tx.botUser.update({ where: { id: t.userId }, data: { balance: { increment: t.amount } } });
+        return { id: t.id, userId: t.userId, amount: t.amount, note: t.note };
+      }),
+
+    // Runs only for the winner, and outside the transaction: it talks to
+    // Telegram and suppliers, and holding a row lock across that would turn a
+    // slow supplier into a database lock timeout.
+    fulfil: async (claimed) => {
+      const user = await db.botUser.findUnique({ where: { id: claimed.userId } });
+      if (!user) return;
+      const ulang = user.lang;
+      await ctx.editMessageText(`✅ #${claimed.id} +${money(claimed.amount, ulang)}`).catch(() => {});
+      await ctx.api.sendMessage(user.tgId, t(ulang, "paid_received", { v: money(claimed.amount, ulang), b: "" }).split("\n")[0]).catch(() => {});
+
+      const parsed = parseBuyNote(claimed.note);
+      if (parsed) {
+        await executePurchase(
+          user.tgId, parsed.variantId, parsed.qty, undefined,
+          parsed.username ?? undefined, 0, parsed.recipientTgId ?? undefined,
+          "admin", String(claimed.id),
+        ).catch((err) => {
+          console.error(`[bot] resolveTopUp auto-purchase fail: topup=${claimed.id} user=${user.tgId} ${(err as Error).message}`);
         });
       }
-    }
-  } else {
-    await promptRejectReason(ctx, id);
+    },
+  });
+
+  if (result.kind === "already_processed") {
+    return ctx.answerCallbackQuery({ text: "Уже обработано", show_alert: true }).catch(() => {});
   }
 }
 
@@ -3975,12 +4008,7 @@ bot.command("give", async (ctx) => {
   }
   await db.botOrder.update({
     where: { id: orderId },
-    data: {
-      payload: text, status: "delivered",
-      // Close the delivery state machine for Fragment goods; ordinary orders
-      // keep deliveryState = "" and are unaffected.
-      ...(order.deliveryState ? { deliveryState: "COMPLETED", deliveredAt: new Date() } : {}),
-    },
+    data: { payload: text, ...closeDeliveryPatch(order) },
   });
   const ulang = order.user.lang;
   // A Stars / Premium order has no credentials to hand over — the goods went
@@ -4157,10 +4185,23 @@ async function sendPromoBroadcast(ctx: Context) {
   if (!draft) return ctx.answerCallbackQuery({ text: "Черновик не найден. Начните заново: /promo", show_alert: true }).catch(() => {});
   promoDraft.delete(key);
   await ctx.answerCallbackQuery().catch(() => {});
-  // Apply the promo price and record the revert time.
-  await db.variant.update({ where: { id: draft.variantId }, data: { priceUzs: draft.price } }).catch(() => {});
+  // Write the revert marker FIRST, and only then cut the price. The marker is
+  // the only thing that ever restores the original price, so doing it the other
+  // way round (and swallowing the failure, as this did) could discount a product
+  // permanently: the price was already live, the broadcast still went out, and
+  // nothing remembered what to put back.
   const payload = JSON.stringify({ variantId: draft.variantId, originalPrice: draft.originalPrice, expiresAt: Date.now() + draft.hours * 3600_000 });
-  await db.setting.upsert({ where: { key: "promo_active" }, create: { key: "promo_active", valueRu: payload }, update: { valueRu: payload } }).catch(() => {});
+  try {
+    await db.setting.upsert({ where: { key: "promo_active" }, create: { key: "promo_active", valueRu: payload }, update: { valueRu: payload } });
+    await db.variant.update({ where: { id: draft.variantId }, data: { priceUzs: draft.price } });
+  } catch (e) {
+    console.error(`[bot] promo start failed: variant=${draft.variantId} price=${draft.price} ${(e as Error).message}`);
+    // Best effort: put the price back, so a half-applied promo can't linger.
+    await db.variant.update({ where: { id: draft.variantId }, data: { priceUzs: draft.originalPrice } }).catch(() => {});
+    await db.setting.update({ where: { key: "promo_active" }, data: { valueRu: "" } }).catch(() => {});
+    await ctx.editMessageText("❌ Не удалось запустить акцию — цена не изменена, рассылка отменена.").catch(() => {});
+    return;
+  }
   await ctx.editMessageText(`✅ Акция запущена. Цена ${money(draft.price, "ru")} на ${draft.hours} ч, потом вернётся на ${money(draft.originalPrice, "ru")}.`).catch(() => {});
   await broadcastInBackground(ctx, async (tgId) => {
     const { text, kb } = promoMessage(draft.name, draft.originalPrice, draft.price, draft.hours, draft.variantId);
@@ -4175,7 +4216,16 @@ async function checkPromoExpiry() {
   try {
     const p = JSON.parse(raw) as { variantId: number; originalPrice: number; expiresAt: number };
     if (Date.now() < p.expiresAt) return;
-    await db.variant.update({ where: { id: p.variantId }, data: { priceUzs: p.originalPrice } }).catch(() => {});
+    // Restore the price first and clear the marker only if that succeeded.
+    // Swallowing a failed restore and clearing anyway (as this did) left the
+    // product discounted forever with nothing left to remember the old price.
+    // Leaving the marker in place instead just means the next tick retries.
+    try {
+      await db.variant.update({ where: { id: p.variantId }, data: { priceUzs: p.originalPrice } });
+    } catch (e) {
+      console.error(`[bot] promo expiry restore failed, will retry: variant=${p.variantId} ${(e as Error).message}`);
+      return;
+    }
     await db.setting.update({ where: { key: "promo_active" }, data: { valueRu: "" } }).catch(() => {});
     if (ADMIN_ID) await bot.api.sendMessage(ADMIN_ID, `⏱ Акция завершена — цена возвращена на ${money(p.originalPrice, "ru")}.`).catch(() => {});
   } catch { /* malformed marker — ignore */ }
@@ -4714,7 +4764,10 @@ bot.on("callback_query:data", async (ctx) => {
     if (tag === "tman") { await ctx.answerCallbackQuery().catch(() => {}); return requestTopUp(ctx, lang, Number(rest[0]), "manual"); }
     // rest[3], when present, is the Stars/Premium recipient chosen before payment.
     if (tag === "tcheck_buy") return startReceiptPayment(ctx, lang, Number(rest[0]), `buy:${rest[1]}:${rest[2]}${rest[3] ? `:${rest[3]}` : ""}`);
-    if (tag === "tstar_buy") return starsInvoice(ctx, lang, Number(rest[0]), `buy:${rest[1]}:${rest[2]}${rest[3] ? `:${rest[3]}` : ""}`);
+    // rest[3] = username (may be empty), rest[4] = numeric recipient id. Built
+    // via buildBuyNote so the recipient survives the payment round-trip — a
+    // hand-built note here used to drop it and deliver to the buyer instead.
+    if (tag === "tstar_buy") return starsInvoice(ctx, lang, Number(rest[0]), buildBuyNote(Number(rest[1]), Number(rest[2]) || 1, rest[3] || null, rest[4] || null));
     if (tag === "tman_buy") { await ctx.answerCallbackQuery().catch(() => {}); return requestTopUp(ctx, lang, Number(rest[0]), "manual", `buy:${rest[1]}:${rest[2]}${rest[3] ? `:${rest[3]}` : ""}`); }
     if (tag === "pvid") {
       if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {});
@@ -5362,9 +5415,19 @@ async function ensureSchema() {
     // Idempotency for Telegram Stars payments: externalId holds the
     // telegram_payment_charge_id, so the same payment can never be credited
     // twice. Partial (externalId IS NOT NULL) because Payme/Click rows leave it
-    // empty and identify themselves via txnRef. Deliberately NOT declared in
-    // schema.prisma: `prisma db push` runs on every boot and would abort the
-    // deploy if legacy duplicates existed, whereas this statement is non-fatal.
+    // empty and identify themselves via txnRef.
+    //
+    // SOURCE OF TRUTH: this index lives here, not in schema.prisma, and that is
+    // deliberate on two counts. Prisma 5 cannot express a partial index, and
+    // replacing it with a plain unique index would change its meaning (every
+    // Payme/Click row has externalId NULL). Declaring it would also put it in
+    // the `db push` diff, which runs on every boot and would abort the deploy if
+    // legacy duplicates existed; as a raw statement it is non-fatal instead.
+    //
+    // Verified on a throwaway database (2026-08-24): `prisma db push` leaves
+    // indexes it does not manage alone — pushing twice with these present
+    // reported "already in sync" and both survived. So there is no drift risk
+    // from keeping them here.
     `CREATE UNIQUE INDEX IF NOT EXISTS "TopUp_externalId_key"
        ON "TopUp"("externalId") WHERE "externalId" IS NOT NULL`,
   ];

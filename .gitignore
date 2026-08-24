@@ -31,3 +31,6 @@ next-env.d.ts
 
 # generated prisma bot client
 /src/generated/
+
+# typescript incremental build cache (generated)
+tsconfig.tsbuildinfo

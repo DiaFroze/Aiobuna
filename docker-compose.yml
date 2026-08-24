@@ -1,3 +1,18 @@
+# ⚠️ DEPRECATED — DOES NOT WORK AS WRITTEN. Kept for reference only.
+#
+# Production does NOT use this file. Railway builds with NIXPACKS and runs
+# `npm run start:all` (see railway.json).
+#
+# Why it is broken:
+#   • the `worker` service runs `npm run worker`, a script removed with the
+#     old queue worker — the service cannot start;
+#   • the `redis` service is no longer used by anything: bullmq and ioredis
+#     were uninstalled once the storefront/worker were removed;
+#   • `web` runs `npm run start` (Next.js only), so the Telegram bot would not
+#     run at all — production starts both via start:all.
+#
+# Do not "fix" this blind: it has not been runnable or verified for a long
+# time. Either rewrite and actually test it against Docker, or delete it.
 services:
   db:
     image: postgres:16-alpine
