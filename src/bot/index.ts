@@ -24,6 +24,7 @@ import { buildClickUrl } from "../lib/domain/click";
 // confirms the bot can actually pay for giftPremiumSubscription.
 import { premiumStarCost, buildBuyNote, parseBuyNote, deliversToAccount, closeDeliveryPatch } from "../lib/domain/premium-delivery";
 import { STARS_MIN_QUANTITY, STARS_MAX_QUANTITY, isValidStarsQuantity } from "../lib/fragment/api-types";
+import { STARS_RATE_CARRIER_AMOUNT, minQtyForStars } from "../lib/domain/stars-pricing";
 import { approveTopUp, APPROVABLE_STATUSES } from "../lib/domain/topup-approval";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
@@ -763,7 +764,13 @@ async function showProduct(ctx: Context, id: number, back: string) {
   // catalogue — an older message still carries a working button to it.
   if (!p || !p.isActive) return ctx.answerCallbackQuery({ text: t(lang, "plan_unavailable"), show_alert: true });
 
-  const variants = p.plans.flatMap((pl) => pl.variants);
+  const allVariants = p.plans.flatMap((pl) => pl.variants);
+  // The one-star Stars variant carries the rate for freely typed amounts; it is
+  // not a pack. Listed as one it reads "1 звезда — 260 сум", and buying it would
+  // be refused by the supplier, whose minimum is 50.
+  const isRateCarrier = (v: { fragmentKind?: string | null; fragmentAmount?: number | null }) =>
+    v.fragmentKind === "stars" && v.fragmentAmount === STARS_RATE_CARRIER_AMOUNT;
+  const variants = allVariants.filter((v) => !isRateCarrier(v));
   // Single-variant product: skip the plan list and open the all-in-one buy card
   // straight away (video + description + qty ± + pay buttons in one message).
   //
@@ -808,7 +815,7 @@ async function showProduct(ctx: Context, id: number, back: string) {
   // a per-star variant (fragmentAmount = 1, priceUzs = price of one star), so the
   // rate stays editable in the admin panel like every other price. Without such a
   // variant there is nothing to multiply, so the button simply is not offered.
-  const perStar = variants.find((v) => v.fragmentKind === "stars" && v.fragmentAmount === 1);
+  const perStar = allVariants.find(isRateCarrier);
   if (perStar) {
     kb.text(`✏️ ${t(lang, "stars_custom_btn")}`, `starsq:${perStar.id}:${back}`).row();
   }
@@ -972,7 +979,7 @@ async function appendCardPayButtons(kb: InlineKeyboard, userId: number, variantI
 }
 
 async function buildQtyChooser(
-  v: { id: number; priceUzs: number; autoSupplier: boolean; supplierStock: number; titleRu: string; titleUz: string; durationDays: number; needsUsername?: boolean; fragmentKind?: string; bulkPrices?: string | null; bulkBonus?: string | null; plan: { product: { id: number; titleRu: string; titleEn: string; titleUz: string; descRu?: string; descEn?: string; descUz?: string; refDiscount?: boolean; videoFileId?: string | null } } },
+  v: { id: number; priceUzs: number; autoSupplier: boolean; supplierStock: number; titleRu: string; titleUz: string; durationDays: number; needsUsername?: boolean; fragmentKind?: string; fragmentAmount?: number; bulkPrices?: string | null; bulkBonus?: string | null; plan: { product: { id: number; titleRu: string; titleEn: string; titleUz: string; descRu?: string; descEn?: string; descUz?: string; refDiscount?: boolean; videoFileId?: string | null } } },
   lang: string,
   user: { id: number; tgId: string; bonusReferrals?: number | null; spentReferrals?: number | null },
   qty: number,
@@ -989,7 +996,15 @@ async function buildQtyChooser(
   const head = brandEmoji ? `<tg-emoji emoji-id="${brandEmoji}">💎</tg-emoji>` : "🧾";
   const max = await availableStock(v);
   if (max <= 0) return null;
-  qty = clamp(Math.floor(qty) || 1, 1, max);
+  // Fragment refuses anything under 50 stars, so the ± buttons must not be able
+  // to walk below that — a card offering "3 stars" would take money for an order
+  // the supplier cannot fill.
+  const starsPerUnit = v.fragmentKind === "stars" ? (v.fragmentAmount ?? 0) : 0;
+  const minQty = starsPerUnit > 0 ? minQtyForStars(starsPerUnit, STARS_MIN_QUANTITY) : 1;
+  // Stepping one star at a time from 50 to 500 would be 450 taps, so the
+  // one-star variant gets coarse steps. Packs still move one pack at a time.
+  const starStep = starsPerUnit === STARS_RATE_CARRIER_AMOUNT;
+  qty = clamp(Math.floor(qty) || minQty, minQty, max);
   const deal = quantityDeal(v, unitPrice, qty);
   const total = deal.total;
   // Referral discount (same rule as doBuy): eligible product + enough referrals.
@@ -1002,13 +1017,22 @@ async function buildQtyChooser(
   const promo = await activePromoForVariant(v.id);
   const flashPct = promo && promo.originalPrice > unitPrice ? Math.round((promo.originalPrice - unitPrice) / promo.originalPrice * 100) : 0;
 
-  const kb = new InlineKeyboard()
-    .text("➖", `q:${v.id}:${qty - 1}:${back}`)
-    .text(`${qty}`, "noop")
-    .text("➕", `q:${v.id}:${qty + 1}:${back}`)
-    .row();
+  const kb = new InlineKeyboard();
+  if (starStep) {
+    kb.text("−50", `q:${v.id}:${qty - 50}:${back}`)
+      .text("−10", `q:${v.id}:${qty - 10}:${back}`)
+      .text(`${qty} ⭐`, "noop")
+      .text("+10", `q:${v.id}:${qty + 10}:${back}`)
+      .text("+50", `q:${v.id}:${qty + 50}:${back}`)
+      .row();
+  } else {
+    kb.text("➖", `q:${v.id}:${qty - 1}:${back}`)
+      .text(`${qty}`, "noop")
+      .text("➕", `q:${v.id}:${qty + 1}:${back}`)
+      .row();
+  }
   // Offer the cheapest bundle as a one-tap shortcut. Only tiers that fit stock.
-  const shortcut = deal.tiers.filter((tier) => tier.qty !== qty && tier.qty <= max).slice(0, 3);
+  const shortcut = deal.tiers.filter((tier) => tier.qty !== qty && tier.qty <= max && tier.qty >= minQty).slice(0, 3);
   for (const tier of shortcut) {
     const s = Math.max(0, unitPrice * tier.qty - tier.totalUzs);
     kb.text(`${tier.qty} шт. — ${money(tier.totalUzs, lang)}${s > 0 ? ` 🔥` : ""}`, `q:${v.id}:${tier.qty}:${back}`).row();
@@ -1239,7 +1263,12 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
   const baseTitle = `${pt} — ${vt}`;
   const max = await availableStock(v);
   if (max <= 0) return abort("out_of_stock");
-  const paidQty = clamp(Math.floor(qty) || 1, 1, max);
+  // Last line of defence on the supplier's 50-star floor. The buy card already
+  // clamps it, but a quantity also arrives from a stale callback and from the
+  // typed-amount flow, and an order below the floor cannot be filled at all.
+  const starsUnit = v.fragmentKind === "stars" ? v.fragmentAmount : 0;
+  const minQty = starsUnit > 0 ? minQtyForStars(starsUnit, STARS_MIN_QUANTITY) : 1;
+  const paidQty = clamp(Math.floor(qty) || minQty, minQty, max);
   const eff = await effPriceFor(user.id, variantId, v.priceUzs);
 
   // Quantity rules: the bundle price is what we charge, and the bonus items are

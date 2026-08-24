@@ -2,7 +2,12 @@ import Link from "next/link";
 import { PageHeader, EmptyState } from "@/components/admin/ui";
 import { botDb, botConfigured } from "@/lib/botDb";
 import { toggleBotProductActiveAction } from "../bot-products/actions";
-import { updateFragmentPricesAction } from "./actions";
+import { applyStarsRateAction, updateFragmentPricesAction } from "./actions";
+import {
+  STARS_ROUNDING_STEPS,
+  decodeStarsRate,
+  priceForStars,
+} from "@/lib/domain/stars-pricing";
 
 export const dynamic = "force-dynamic";
 
@@ -41,6 +46,15 @@ export default async function BotFragmentPage() {
     }))
     .filter((g) => g.variants.length > 0);
 
+  // The saved Stars rate per product, so the form comes back filled in with
+  // what was last applied rather than a guess.
+  const rateRows = await botDb.botSetting.findMany({
+    where: { key: { in: groups.map((g) => `stars_rate_${g.product.id}`) } },
+  });
+  const rates = new Map(
+    rateRows.map((r) => [r.key, decodeStarsRate(r.valueRu)] as const),
+  );
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -59,6 +73,13 @@ export default async function BotFragmentPage() {
         groups.map(({ product, variants }) => {
           const stars = variants.filter((v) => v.fragmentKind === "stars");
           const perStar = stars.find((v) => v.fragmentAmount === 1);
+          const saved = rates.get(`stars_rate_${product.id}`) ?? null;
+          // Default the form to the smallest pack at its current price — that is
+          // almost always the rate the admin is thinking in.
+          const anchor = [...stars].filter((v) => v.fragmentAmount > 1)
+            .sort((a, b) => a.fragmentAmount - b.fragmentAmount)[0];
+          const formRate = saved?.rate ?? (anchor ? { stars: anchor.fragmentAmount, priceUzs: anchor.priceUzs } : { stars: 50, priceUzs: 13000 });
+          const formStep = saved?.step ?? 100;
           return (
             <div key={product.id} className="card p-5 space-y-4">
               <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -82,6 +103,52 @@ export default async function BotFragmentPage() {
                   </Link>
                 </div>
               </div>
+
+
+              {stars.length > 0 && (
+                /* One rate, every pack. The preview shows exactly what the
+                   button will write, so nothing is applied blind. */
+                <form action={applyStarsRateAction} className="rounded-lg bg-surface-2 p-3 space-y-3">
+                  <input type="hidden" name="productId" value={product.id} />
+                  <div className="text-sm font-medium">⭐ Курс звёзд</div>
+                  <div className="flex items-end gap-2 flex-wrap">
+                    <label className="text-xs text-muted">
+                      За сколько звёзд
+                      <input name="rateStars" type="number" min="1" step="1" defaultValue={formRate.stars}
+                             className="input text-sm font-mono w-28 block mt-1" />
+                    </label>
+                    <label className="text-xs text-muted">
+                      Цена, сум
+                      <input name="ratePrice" type="number" min="1" step="1" defaultValue={formRate.priceUzs}
+                             className="input text-sm font-mono w-36 block mt-1" />
+                    </label>
+                    <label className="text-xs text-muted">
+                      Округление
+                      <select name="rateStep" defaultValue={String(formStep)} className="input text-sm w-32 block mt-1">
+                        {STARS_ROUNDING_STEPS.map((st) => (
+                          <option key={st} value={st}>{st === 1 ? "точно" : `до ${st} сум`}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <button className="btn-primary text-sm">🔄 Пересчитать все цены</button>
+                  </div>
+                  <div className="text-xs text-muted">
+                    По этому курсу получится:{" "}
+                    {stars
+                      .filter((v) => v.fragmentAmount > 1)
+                      .sort((a, b) => a.fragmentAmount - b.fragmentAmount)
+                      .map((v) => {
+                        const next = priceForStars(v.fragmentAmount, formRate, formStep);
+                        return (
+                          <span key={v.id} className="font-mono mr-3 whitespace-nowrap">
+                            {v.fragmentAmount}⭐ = {next.toLocaleString("ru-RU")}
+                            {next !== v.priceUzs && <span className="text-warning"> (было {v.priceUzs.toLocaleString("ru-RU")})</span>}
+                          </span>
+                        );
+                      })}
+                  </div>
+                </form>
+              )}
 
               {/* Every price on this product in a single save. */}
               <form action={updateFragmentPricesAction} className="space-y-2">
@@ -119,15 +186,16 @@ export default async function BotFragmentPage() {
                 <p className="text-xs text-muted border-t pt-3">
                   {perStar ? (
                     <>
-                      ✅ Произвольное количество включено: в боте есть кнопка «Своё количество».
-                      Цена считается по варианту <b>{perStar.titleRu}</b> — {perStar.priceUzs} сум за 1 звезду.
-                      Минимум у поставщика — 50 звёзд.
+                      ✅ Произвольное количество включено: в боте есть кнопка «Своё количество»,
+                      можно заказать любое число звёзд от 50 (например 501). Цена считается по
+                      курсу — {perStar.priceUzs.toLocaleString("ru-RU")} сум за 1 звезду. Сам вариант
+                      «{perStar.titleRu}» покупателям в списке не показывается.
                     </>
                   ) : (
                     <>
-                      ⓘ Чтобы клиент мог выбрать любое количество звёзд, заведите вариант с
-                      «Кол-во (звёзд)» = <b>1</b> и ценой одной звезды. Тогда в боте появится кнопка
-                      «Своё количество», а цена умножится на выбранное число.
+                      ⓘ Кнопки «Своё количество» пока нет. Нажмите «Пересчитать все цены» — вариант
+                      с ценой одной звезды будет создан автоматически, и покупатель сможет выбрать
+                      любое число звёзд от 50.
                     </>
                   )}
                 </p>
