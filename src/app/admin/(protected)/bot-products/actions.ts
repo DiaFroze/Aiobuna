@@ -117,6 +117,34 @@ export async function createBotProductAction(formData: FormData) {
   redirect(`/admin/bot-products/${product.id}`);
 }
 
+/**
+ * Flip a product between visible and hidden straight from the products list.
+ *
+ * Hiding is the fast lever when something is sold but cannot be delivered right
+ * now — a supplier outage, an empty wallet, an integration still being wired up.
+ * It used to mean opening the product, finding the checkbox, saving; that is too
+ * many steps for something you reach for in a hurry, so it is one click here.
+ *
+ * This only controls whether customers see the product. It never touches prices,
+ * variants or stock, so switching it back on restores exactly what was there.
+ */
+export async function toggleBotProductActiveAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.PRODUCTS_WRITE);
+  const id = Number(formData.get("id"));
+  const product = await botDb.product.findUnique({ where: { id }, select: { isActive: true } });
+  if (!product) return;
+
+  const next = !product.isActive;
+  await botDb.product.update({ where: { id }, data: { isActive: next } });
+  await audit({
+    adminId: admin.id,
+    action: next ? "bot.product.enable" : "bot.product.disable",
+    entityType: "BotProduct",
+    entityId: String(id),
+  });
+  revalidatePath("/admin/bot-products");
+}
+
 export async function deleteBotProductAction(formData: FormData) {
   const admin = await requirePermission(PERMISSIONS.PRODUCTS_WRITE);
   const id = Number(formData.get("id"));

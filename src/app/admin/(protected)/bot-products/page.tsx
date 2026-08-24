@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { botDb, botConfigured } from "@/lib/botDb";
 import { PageHeader, Table, EmptyState } from "@/components/admin/ui";
-import { createBotProductAction, deleteBotProductAction, uploadBannerAction, deleteBannerAction } from "./actions";
+import { createBotProductAction, deleteBotProductAction, toggleBotProductActiveAction, uploadBannerAction, deleteBannerAction } from "./actions";
 
 export const dynamic = "force-dynamic";
 
@@ -118,9 +118,19 @@ export default async function BotProductsPage({
                   {active}/{variants.length}
                 </td>
                 <td className="px-4 py-3">
-                  <span className={`badge ${p.isActive ? "bg-success/10 text-success" : "bg-danger/10 text-danger"}`}>
-                    {p.isActive ? "да" : "нет"}
-                  </span>
+                  {/* One click to hide or show the product in the bot. Kept on the
+                      list because this is the lever you reach for in a hurry —
+                      a supplier is down, a wallet is empty — and hunting through
+                      the edit form for a checkbox is too slow for that. */}
+                  <form action={toggleBotProductActiveAction}>
+                    <input type="hidden" name="id" value={p.id} />
+                    <button
+                      className={`badge cursor-pointer ${p.isActive ? "bg-success/10 text-success" : "bg-danger/10 text-danger"}`}
+                      title={p.isActive ? "Нажмите, чтобы скрыть товар в боте" : "Нажмите, чтобы показать товар в боте"}
+                    >
+                      {p.isActive ? "✅ Включён" : "🚫 Выключен"}
+                    </button>
+                  </form>
                 </td>
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-1">

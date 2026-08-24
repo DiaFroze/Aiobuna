@@ -63,6 +63,9 @@ const RU: Dict = {
     "После успешной выдачи товара заказ считается выполненным, и уплаченная сумма <b>не возвращается</b> — в том числе если подписка была впоследствии отменена третьей стороной, изменились условия площадки-поставщика, либо пользователь передумал использовать товар. <b>Срок гарантии указывается индивидуально для каждого товара</b> в его описании. По истечении срока гарантии претензии не принимаются — что бы ни произошло.\n\n" +
     "<b>7. Заключительные положения</b>\n" +
     "Нажимая кнопку «✅ Принимаю условия», вы подтверждаете полное и безоговорочное согласие с публичной офертой AI OBUNA.",
+  stars_custom_btn: "Своё количество",
+  stars_custom_ask: "⭐️ <b>Сколько звёзд купить?</b>\n\nНапишите число от {min} до {max}.\nЦена: {price} за 1 звезду.",
+  stars_custom_bad: "⚠️ Нужно число от {min} до {max}. Напишите ещё раз:",
   terms_accept_btn: "✅ Принимаю условия",
   terms_accepted_toast: "Спасибо! Условия приняты.",
   terms_required_toast: "⚠️ Сначала примите условия использования ниже.",
@@ -252,6 +255,9 @@ const EN: Dict = {
     "Once an item is successfully delivered, the order is considered fulfilled and the amount paid is <b>not refunded</b> — including if the subscription is later cancelled by a third party, supplier terms change, or the user decides not to use the item. <b>The warranty period is stated individually for each item</b> in its description. After the warranty period ends, no claims are accepted — whatever happens.\n\n" +
     "<b>7. Final provision</b>\n" +
     "By tapping “✅ I accept the terms”, you confirm your full and unconditional acceptance of the AI OBUNA public offer.",
+  stars_custom_btn: "Custom amount",
+  stars_custom_ask: "⭐️ <b>How many stars?</b>\n\nSend a number between {min} and {max}.\nPrice: {price} per star.",
+  stars_custom_bad: "⚠️ Needs a number between {min} and {max}. Try again:",
   terms_accept_btn: "✅ I accept the terms",
   terms_accepted_toast: "Thank you! Terms accepted.",
   terms_required_toast: "⚠️ Please accept the terms of use below first.",
@@ -441,6 +447,9 @@ const UZ: Dict = {
     "Tovar muvaffaqiyatli yetkazilgach buyurtma bajarilgan hisoblanadi va to‘langan mablag‘ <b>qaytarilmaydi</b> — shu jumladan obuna keyinchalik uchinchi tomon tomonidan bekor qilingan, ta’minotchi shartlari o‘zgargan yoki foydalanuvchi tovardan foydalanishdan voz kechgan holatlarda ham. <b>Kafolat muddati har bir tovar uchun alohida</b> uning tavsifida ko‘rsatiladi. Kafolat muddati tugagach, nima bo‘lishidan qat’i nazar, e’tirozlar qabul qilinmaydi.\n\n" +
     "<b>7. Yakuniy qoida</b>\n" +
     "«✅ Roziman» tugmasini bosish orqali siz AI OBUNA ommaviy ofertasi bilan to‘liq va so‘zsiz rozilik bildirganingizni tasdiqlaysiz.",
+  stars_custom_btn: "O‘z miqdoringiz",
+  stars_custom_ask: "⭐️ <b>Nechta yulduz kerak?</b>\n\n{min} dan {max} gacha son yuboring.\nNarxi: 1 yulduz uchun {price}.",
+  stars_custom_bad: "⚠️ {min} dan {max} gacha son kerak. Qaytadan yuboring:",
   terms_accept_btn: "✅ Roziman",
   terms_accepted_toast: "Rahmat! Shartlar qabul qilindi.",
   terms_required_toast: "⚠️ Iltimos, avval quyidagi foydalanish shartlarini qabul qiling.",

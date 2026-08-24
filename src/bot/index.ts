@@ -23,6 +23,7 @@ import { buildClickUrl } from "../lib/domain/click";
 // yet: PREMIUM_DELIVERY_MODE stays "manual" until the Star-balance experiment
 // confirms the bot can actually pay for giftPremiumSubscription.
 import { premiumStarCost, buildBuyNote, parseBuyNote, deliversToAccount, closeDeliveryPatch } from "../lib/domain/premium-delivery";
+import { STARS_MIN_QUANTITY, STARS_MAX_QUANTITY, isValidStarsQuantity } from "../lib/fragment/api-types";
 import { approveTopUp, APPROVABLE_STATUSES } from "../lib/domain/topup-approval";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
@@ -231,6 +232,8 @@ const pending = new Map<
   // Premium: waiting for a native contact pick (users_shared) for "gift to
   // someone else". Carries the order so the shared id lands on the right item.
   | { type: "premium_pick_user"; variantId: number; qty: number }
+  // Telegram Stars bought by a freely typed amount rather than a fixed pack.
+  | { type: "stars_custom_qty"; variantId: number; back: string }
 >();
 
 const bot = new Bot(token);
@@ -516,6 +519,13 @@ async function stockMap(): Promise<Map<number, number>> {
 // this number to the buyer as-is — render it via stockDisplay() instead.
 const STOCK_UNLIMITED = 999999;
 const stockDisplay = (n: number): string => (n >= STOCK_UNLIMITED ? "♾" : String(n));
+// A variant is only buyable while BOTH it and its product are switched on.
+// Checking the variant alone was not enough: turning a product off in the admin
+// panel left every variant active, so anyone still holding an older catalog
+// message could walk straight past the hidden product and pay for it.
+const isVariantBuyable = (v: { isActive: boolean; plan: { product: { isActive: boolean } } }): boolean =>
+  v.isActive && v.plan.product.isActive;
+
 // Goods fulfilled by an external supplier rather than from our own stock.
 const isFragmentBacked = (v: { fragmentKind?: string | null }): boolean =>
   v.fragmentKind === "stars" || v.fragmentKind === "premium";
@@ -749,7 +759,9 @@ async function showProduct(ctx: Context, id: number, back: string) {
     where: { id },
     include: { plans: { include: { variants: { where: { isActive: true }, orderBy: { sortOrder: "asc" } } } } },
   });
-  if (!p) return ctx.answerCallbackQuery({ text: t(lang, "out_of_stock"), show_alert: true });
+  // A switched-off product is refused here too, not just hidden from the
+  // catalogue — an older message still carries a working button to it.
+  if (!p || !p.isActive) return ctx.answerCallbackQuery({ text: t(lang, "plan_unavailable"), show_alert: true });
 
   const variants = p.plans.flatMap((pl) => pl.variants);
   // Single-variant product: skip the plan list and open the all-in-one buy card
@@ -790,6 +802,15 @@ async function showProduct(ctx: Context, id: number, back: string) {
       if (premium) rbBtn.icon(premium);
       kb.row();
     }
+  }
+  // "Any amount" for Telegram Stars. Fixed packs cover the common cases, but
+  // someone who wants 137 stars should not have to buy 250. The price comes from
+  // a per-star variant (fragmentAmount = 1, priceUzs = price of one star), so the
+  // rate stays editable in the admin panel like every other price. Without such a
+  // variant there is nothing to multiply, so the button simply is not offered.
+  const perStar = variants.find((v) => v.fragmentKind === "stars" && v.fragmentAmount === 1);
+  if (perStar) {
+    kb.text(`✏️ ${t(lang, "stars_custom_btn")}`, `starsq:${perStar.id}:${back}`).row();
   }
   kb.text(t(lang, "back_to_list"), `m:${back}`).row();
 
@@ -1041,7 +1062,7 @@ async function showQtyChooser(ctx: Context, variantId: number, qty: number, back
   const ack = (o?: { text: string; show_alert: boolean }) =>
     ctx.callbackQuery ? ctx.answerCallbackQuery(o).catch(() => {}) : Promise.resolve();
   const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
-  if (!v || !v.isActive) return ack({ text: t(lang, "plan_unavailable"), show_alert: true });
+  if (!v || !isVariantBuyable(v)) return ack({ text: t(lang, "plan_unavailable"), show_alert: true });
   const eff = await effPriceFor(user.id, variantId, v.priceUzs);
   const built = await buildQtyChooser(v, lang, user, qty, back, eff.price, eff.label);
   if (!built) {
@@ -1212,7 +1233,7 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
     await bot.api.sendMessage(tgId, t(lang, msgKey) + suffix, { parse_mode: "HTML" }).catch(() => {});
   };
   const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
-  if (!v || !v.isActive) return abort("plan_unavailable");
+  if (!v || !isVariantBuyable(v)) return abort("plan_unavailable");
   const pt = await pick3(v.plan.product.titleRu, v.plan.product.titleEn, v.plan.product.titleUz, lang);
   const vt = await locName(v.titleRu, v.titleUz, lang);
   const baseTitle = `${pt} — ${vt}`;
@@ -1241,7 +1262,15 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
     : baseTitle;
 
   // --- Manual delivery: charge, then the admin sends the goods by hand ---
-  if (v.manualDelivery) {
+  //
+  // Supplier-backed goods (Stars / Premium) always come through here for now,
+  // whatever the admin ticked. They have no warehouse, so the stock+supplier
+  // path below finds nothing, reports a shortfall and tells the customer
+  // "автоматическая выдача не сработала" — which reads as a broken shop when in
+  // fact the automatic supplier simply is not built yet. Routing them here
+  // gives the ordinary "order accepted, the admin is on it" message and a clean
+  // job for the admin. Remove this once the Fragment client fulfils them.
+  if (v.manualDelivery || isFragmentBacked(v)) {
     // Fragment goods (Premium / Stars) additionally enter the delivery state
     // machine. Everything else keeps deliveryState = "" and is untouched by the
     // Premium pipeline. "Себе" defaults the recipient to the buyer.
@@ -1725,7 +1754,7 @@ async function doBuy(ctx: Context, variantId: number, qty: number, targetUsernam
   const user = await getUser(ctx);
   const lang = user.lang;
   const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
-  if (!v || !v.isActive) return ctx.answerCallbackQuery({ text: t(lang, "plan_unavailable"), show_alert: true });
+  if (!v || !isVariantBuyable(v)) return ctx.answerCallbackQuery({ text: t(lang, "plan_unavailable"), show_alert: true });
   // Telegram Premium: the recipient is a numeric id, so ask who it's for rather
   // than demanding a username. needsUsername stays optional for these items.
   if (v.fragmentKind === "premium" && !recipientTgId && !targetUsername) {
@@ -4808,6 +4837,18 @@ bot.on("callback_query:data", async (ctx) => {
     if (tag === "premgift") {
       return askPremiumSharedUser(ctx, Number(rest[0]), Number(rest[1]) || 1, lang);
     }
+    if (tag === "starsq") {
+      const vid = Number(rest[0]);
+      const v = await db.variant.findUnique({ where: { id: vid }, include: { plan: { include: { product: true } } } });
+      if (!v || !isVariantBuyable(v)) return ctx.answerCallbackQuery({ text: t(lang, "plan_unavailable"), show_alert: true });
+      pending.set(String(ctx.from?.id), { type: "stars_custom_qty", variantId: vid, back: `${rest[1] ?? "0"}:${rest[2] ?? "all"}` });
+      await ctx.answerCallbackQuery().catch(() => {});
+      const eff = await effPriceFor(user.id, vid, v.priceUzs);
+      return ctx.reply(
+        t(lang, "stars_custom_ask", { min: STARS_MIN_QUANTITY, max: STARS_MAX_QUANTITY, price: money(eff.price, lang) }),
+        { parse_mode: "HTML" },
+      ).catch(() => {});
+    }
     if (tag === "promo_v") {
       if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {});
       pending.set(String(ctx.from?.id), { type: "promo_price", variantId: Number(rest[0]) });
@@ -4872,6 +4913,21 @@ bot.on("message:text", async (ctx) => {
       { reply_markup: { remove_keyboard: true } },
     ).catch(() => {});
     return doBuy(ctx, state.variantId, state.qty, res.username, known?.tgId ?? undefined);
+  }
+
+  // A freely typed Stars amount. Fragment refuses anything under 50, so the
+  // check happens here rather than after the customer has paid.
+  if (state.type === "stars_custom_qty") {
+    const buyer = await getUser(ctx);
+    const typed = Math.floor(Number((ctx.message.text ?? "").replace(/[^\d]/g, "")));
+    if (!isValidStarsQuantity(typed)) {
+      pending.set(key, state); // keep it, so a typo does not restart the flow
+      return ctx.reply(t(buyer.lang, "stars_custom_bad", { min: STARS_MIN_QUANTITY, max: STARS_MAX_QUANTITY }));
+    }
+    pending.delete(key);
+    // The per-star variant is priced for one star, so the ordinary quantity
+    // machinery turns this into the right total with no special-case pricing.
+    return showQtyChooser(ctx, state.variantId, typed, state.back, false);
   }
 
   if (state.type === "promo_price") {
