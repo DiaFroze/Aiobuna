@@ -2349,10 +2349,35 @@ async function creditPaidTopUp(ctx: Context, amount: number, method: string, cha
 
   const note = (variantId && qty) ? `buy:${variantId}:${qty}${targetUsername ? `:${targetUsername}` : ""}` : null;
 
-  await db.$transaction([
-    db.botUser.update({ where: { id: user.id }, data: { balance: { increment: amount } } }),
-    db.topUp.create({ data: { userId: user.id, amount, method, status: "approved", externalId: chargeId, note, refSpend: discountCost } }),
-  ]);
+  // Idempotency. Telegram can deliver the same successful_payment more than once
+  // (a restart mid-processing replays the long-polling offset), and this path
+  // both credits money and ships goods, so it must run exactly once per payment.
+  // The charge id identifies the payment uniquely and is guarded twice: this
+  // check catches the ordinary repeat, and the partial unique index on
+  // TopUp.externalId (see ensureSchema) makes the loser of a genuine race fail
+  // instead of double-crediting. Payme and Click have their own guards
+  // (state machine / SELECT … FOR UPDATE); this closes the Stars path.
+  if (chargeId) {
+    const seen = await db.topUp.findFirst({ where: { externalId: chargeId }, select: { id: true } });
+    if (seen) {
+      console.warn(`[bot] duplicate payment ignored (already credited): charge=${chargeId} user=${user.tgId}`);
+      return;
+    }
+  }
+
+  try {
+    await db.$transaction([
+      db.botUser.update({ where: { id: user.id }, data: { balance: { increment: amount } } }),
+      db.topUp.create({ data: { userId: user.id, amount, method, status: "approved", externalId: chargeId, note, refSpend: discountCost } }),
+    ]);
+  } catch (e) {
+    // P2002 = unique violation → a concurrent handler credited this charge first.
+    if ((e as { code?: string }).code === "P2002") {
+      console.warn(`[bot] duplicate payment ignored (race): charge=${chargeId} user=${user.tgId}`);
+      return;
+    }
+    throw e;
+  }
   const u = await db.botUser.findUnique({ where: { id: user.id } });
   // A product purchase (buy note) gets its own delivery message from
   // executePurchase below — don't also show a "balance credited" screen, since
@@ -5103,6 +5128,14 @@ async function ensureSchema() {
     `CREATE UNIQUE INDEX IF NOT EXISTS "StockAlert_tgId_variantId_key" ON "StockAlert"("tgId", "variantId")`,
     `CREATE INDEX IF NOT EXISTS "BotUser_referredBy_verified_idx"
        ON "BotUser"("referredBy") WHERE "channelVerifiedAt" IS NOT NULL`,
+    // Idempotency for Telegram Stars payments: externalId holds the
+    // telegram_payment_charge_id, so the same payment can never be credited
+    // twice. Partial (externalId IS NOT NULL) because Payme/Click rows leave it
+    // empty and identify themselves via txnRef. Deliberately NOT declared in
+    // schema.prisma: `prisma db push` runs on every boot and would abort the
+    // deploy if legacy duplicates existed, whereas this statement is non-fatal.
+    `CREATE UNIQUE INDEX IF NOT EXISTS "TopUp_externalId_key"
+       ON "TopUp"("externalId") WHERE "externalId" IS NOT NULL`,
   ];
   for (const sql of statements) {
     try {
