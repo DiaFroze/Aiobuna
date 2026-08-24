@@ -516,8 +516,21 @@ async function stockMap(): Promise<Map<number, number>> {
 // this number to the buyer as-is — render it via stockDisplay() instead.
 const STOCK_UNLIMITED = 999999;
 const stockDisplay = (n: number): string => (n >= STOCK_UNLIMITED ? "♾" : String(n));
+// Goods fulfilled by an external supplier rather than from our own stock.
+const isFragmentBacked = (v: { fragmentKind?: string | null }): boolean =>
+  v.fragmentKind === "stars" || v.fragmentKind === "premium";
 
-async function availableStock(v: { id: number; autoSupplier: boolean; supplierStock: number; manualDelivery?: boolean; manualStockLimit?: number }): Promise<number> {
+async function availableStock(v: { id: number; autoSupplier: boolean; supplierStock: number; manualDelivery?: boolean; manualStockLimit?: number; fragmentKind?: string }): Promise<number> {
+  // Supplier-backed goods (Telegram Stars / Premium) have no warehouse at all:
+  // they are bought on demand from Fragment, so counting uploaded codes or a
+  // manual limit is meaningless. Deriving availability from those fields is why
+  // a Stars pack could read "товара временно нет" while nothing was actually
+  // wrong — a limit of 0 left over in the admin form was enough.
+  //
+  // Visibility stays the admin's decision (product.isActive). Whether a
+  // purchase can actually go through — supplier reachable, wallet funded, quote
+  // fresh — is a separate live check that belongs with the supplier client.
+  if (isFragmentBacked(v)) return STOCK_UNLIMITED;
   if (v.manualDelivery) {
     return v.manualStockLimit !== undefined && v.manualStockLimit >= 0 ? v.manualStockLimit : STOCK_UNLIMITED;
   }
@@ -614,7 +627,8 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
   // stock whenever autoSupplier was on (a product with 5 in local stock but 0
   // at the supplier read as sold out) and ignored manualStockLimit entirely
   // (a sold-out manual item still looked available). Keep the two in sync.
-  const stOf = (v: { id: number; autoSupplier: boolean; supplierStock: number; manualDelivery: boolean; manualStockLimit?: number }) => {
+  const stOf = (v: { id: number; autoSupplier: boolean; supplierStock: number; manualDelivery: boolean; manualStockLimit?: number; fragmentKind?: string }) => {
+    if (isFragmentBacked(v)) return STOCK_UNLIMITED;
     if (v.manualDelivery) {
       return v.manualStockLimit !== undefined && v.manualStockLimit >= 0 ? v.manualStockLimit : STOCK_UNLIMITED;
     }
@@ -740,7 +754,15 @@ async function showProduct(ctx: Context, id: number, back: string) {
   const variants = p.plans.flatMap((pl) => pl.variants);
   // Single-variant product: skip the plan list and open the all-in-one buy card
   // straight away (video + description + qty ± + pay buttons in one message).
-  if (variants.length === 1) return showQtyChooser(ctx, variants[0].id, 1, back, true, true);
+  //
+  // Only when it is actually buyable. Sold out, the buy card renders the
+  // "out of stock" screen whose Back button returns here — and this shortcut
+  // sent the customer straight back to that same screen, so Back looked dead
+  // and just re-posted the message. Out of stock falls through to the normal
+  // product page instead, where Back leads to the catalogue.
+  if (variants.length === 1 && (await availableStock(variants[0])) > 0) {
+    return showQtyChooser(ctx, variants[0].id, 1, back, true, true);
+  }
   const overrides = await priceOverridesFor(user.id, variants.map((v) => v.id));
   const availablePoints = await availableReferralPoints(user);
   const kb = new InlineKeyboard();
@@ -749,7 +771,10 @@ async function showProduct(ctx: Context, id: number, back: string) {
     const ov = overrides.get(v.id);
     const effPrice = ov?.priceUzs ?? v.priceUzs;
     const price = effPrice > 0 ? `${ov ? "💎 " : ""}${money(effPrice, lang)}` : t(lang, "free");
-    const dur = v.durationDays > 0 ? ` · ${v.durationDays}д` : "";
+    // A duration only means something for a subscription. Telegram Stars are a
+    // quantity, not a term, so "250 Stars — 45 000 so'm · 30д" reads as
+    // nonsense — the stars do not expire.
+    const dur = v.durationDays > 0 && v.fragmentKind !== "stars" ? ` · ${v.durationDays}д` : "";
     const vt = await locName(v.titleRu, v.titleUz, lang);
     kb.text(`${vt} — ${price}${dur}`, `b:${v.id}:${back}`).icon("5424972470023104089").row();
     // Referrals-price row: shown only when admin set a pointsCost for this
