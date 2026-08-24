@@ -18,6 +18,11 @@ import { parseBulkPrices, parseBulkBonus, bulkTotal, bonusQty, bulkSaving, descr
 import { checkUsername } from "../lib/domain/telegram-username";
 import { buildCheckoutUrl, sumToTiyin } from "../lib/domain/payme";
 import { buildClickUrl } from "../lib/domain/click";
+// The auto-delivery decision logic (classifyGiftError / decideAfterReconcile)
+// lives in the same module and is unit-tested, but is intentionally NOT wired up
+// yet: PREMIUM_DELIVERY_MODE stays "manual" until the Star-balance experiment
+// confirms the bot can actually pay for giftPremiumSubscription.
+import { premiumStarCost, buildBuyNote, parseBuyNote } from "../lib/domain/premium-delivery";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -156,6 +161,19 @@ const ADMIN_BTN_EMOJI = "6129805886383723340";
 // Flash-sale badge: 🔺 percent, ⏱ countdown.
 const FLASH_PCT_EMOJI = "5289682726775967230";
 const FLASH_TIME_EMOJI = "5382194935057372936";
+
+// Telegram Premium delivery mode.
+//   manual (DEFAULT) — the order becomes a job for the admin, who fulfils it by
+//                      hand. This is the only mode that runs until the owner has
+//                      confirmed, by experiment, that the bot's Star balance can
+//                      actually pay for giftPremiumSubscription.
+//   auto             — the bot calls giftPremiumSubscription itself.
+// Deliberately opt-in: an accidental "auto" with an unverified balance burns
+// 1000-2500 Stars per attempt and a sent gift cannot be undone.
+const PREMIUM_DELIVERY_MODE: "manual" | "auto" =
+  (process.env.PREMIUM_DELIVERY_MODE ?? "manual").trim().toLowerCase() === "auto" ? "auto" : "manual";
+// Warn the admin when the bot's Star balance drops below this. 0 = no warning.
+const PREMIUM_MIN_STAR_BALANCE = Math.max(0, Math.trunc(Number(process.env.PREMIUM_MIN_STAR_BALANCE ?? 0)) || 0);
 // Direct pay = pay the full price straight to a bank (Payme / Click / Stars),
 // no balance. Now on for everyone — the balance model is retired.
 const directPayEnabled = (_ctx?: Context) => true;
@@ -209,6 +227,9 @@ const pending = new Map<
   | { type: "set_banner" }
   | { type: "set_product_video"; productId: number }
   | { type: "promo_price"; variantId: number }
+  // Premium: waiting for a native contact pick (users_shared) for "gift to
+  // someone else". Carries the order so the shared id lands on the right item.
+  | { type: "premium_pick_user"; variantId: number; qty: number }
 >();
 
 const bot = new Bot(token);
@@ -1146,7 +1167,7 @@ async function refundRefPoints(userId: number, points: number | undefined) {
   ).catch((e) => console.error("[bot] refundRefPoints failed:", (e as Error).message));
 }
 
-async function executePurchase(tgId: string, variantId: number, qty: number, refPointsCost?: number, targetUsername?: string, discountCost = 0) {
+async function executePurchase(tgId: string, variantId: number, qty: number, refPointsCost?: number, targetUsername?: string, discountCost = 0, recipientTgId?: string, paymentMethod?: string, paymentId?: string) {
   const isRefGift = refPointsCost !== undefined && refPointsCost > 0;
   // Direct-pay for everyone: the balance is internal plumbing, so the delivery
   // message must never show a "Осталось: … сум" balance line.
@@ -1191,6 +1212,11 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
 
   // --- Manual delivery: charge, then the admin sends the goods by hand ---
   if (v.manualDelivery) {
+    // Fragment goods (Premium / Stars) additionally enter the delivery state
+    // machine. Everything else keeps deliveryState = "" and is untouched by the
+    // Premium pipeline. "Себе" defaults the recipient to the buyer.
+    const isFragmentItem = v.fragmentKind === "premium" || v.fragmentKind === "stars";
+    const recipient = recipientTgId ?? (v.fragmentKind === "premium" ? tgId : null);
     const reserve = await db.$transaction(async (tx) => {
       const u = await tx.botUser.findUnique({ where: { id: user.id } });
       if (!u) return { error: "unavailable" as const };
@@ -1213,7 +1239,17 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
       if (discountCost > 0) {
         await tx.botUser.update({ where: { id: user.id }, data: { spentReferrals: { increment: discountCost } } });
       }
-      const order = await tx.botOrder.create({ data: { userId: user.id, variantId, titleRu: label, priceUsdt: 0, payload: "", source: isRefGift ? "referral" : "manual", status: "awaiting_delivery", targetUsername: targetUsername ?? null } });
+      const order = await tx.botOrder.create({
+        data: {
+          userId: user.id, variantId, titleRu: label, priceUsdt: 0, payload: "",
+          source: isRefGift ? "referral" : "manual", status: "awaiting_delivery",
+          targetUsername: targetUsername ?? null,
+          recipientTgId: isFragmentItem ? recipient : null,
+          deliveryState: isFragmentItem ? "PAID" : "",
+          paymentMethod: paymentMethod ?? null,
+          paymentId: paymentId ?? null,
+        },
+      });
       return { orderId: order.id };
     });
 
@@ -1243,12 +1279,19 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
       // For a Fragment item the recipient is the whole job — put it on its own
       // line, copyable, with the exact quantity to buy, so it can be pasted
       // straight into Fragment without re-reading the order.
-      const fragmentBlock = v.needsUsername
-        ? `\n🎯 <b>ВЫДАТЬ НА FRAGMENT</b>\n` +
-          `Получатель: <code>${esc(targetUsername ?? "—")}</code>\n` +
+      const isFragmentJob = v.needsUsername || v.fragmentKind === "premium" || v.fragmentKind === "stars";
+      const fragmentBlock = isFragmentJob
+        ? `\n🎯 <b>ВЫДАТЬ ${v.fragmentKind === "premium" ? "PREMIUM" : "НА FRAGMENT"}</b>\n` +
+          // Numeric id first: it is the identifier a gift is actually delivered
+          // to, and unlike a username it cannot be mistyped or re-registered.
+          `ID получателя: <code>${esc(recipient ?? "—")}</code>\n` +
+          `Username: <code>${esc(targetUsername ?? "—")}</code>\n` +
           (v.fragmentKind === "stars" ? `Купить: <b>${v.fragmentAmount * finalQty} Stars</b>\n`
-           : v.fragmentKind === "premium" ? `Купить: <b>Premium ${v.fragmentAmount} мес.</b>\n`
-           : "") +
+           : v.fragmentKind === "premium"
+             ? `Купить: <b>Premium ${v.fragmentAmount} мес.</b>` +
+               `${premiumStarCost(v.fragmentAmount) ? ` (${premiumStarCost(v.fragmentAmount)}⭐ через API)` : ""}\n` +
+               `Режим выдачи: <b>${PREMIUM_DELIVERY_MODE}</b>\n`
+             : "") +
           `\nПосле выдачи: <code>/give ${reserve.orderId} выдано</code>\n`
         : `\nВыдать: <code>/give ${reserve.orderId} логин:пароль</code>`;
       await bot.api.sendMessage(
@@ -1514,6 +1557,52 @@ async function askTargetUsername(ctx: Context, v: { id: number; titleRu: string;
   await ctx.reply(t(lang, "uname_ask", { item }), { parse_mode: "HTML" }).catch(() => {});
 }
 
+// Who is this Premium subscription for? Asked BEFORE any money moves, because a
+// gifted subscription cannot be taken back.
+//
+// giftPremiumSubscription accepts a numeric user_id and nothing else, so the two
+// primary paths both yield one: "myself" uses the buyer's own id, "someone else"
+// uses Telegram's native contact picker (request_users → users_shared), which
+// returns the real id. Typing a @username is only a fallback — it resolves to an
+// id only if that person has used this bot before, and an order left without an
+// id can never be auto-delivered, only fulfilled by hand.
+async function askPremiumRecipient(ctx: Context, v: { id: number; titleRu: string; titleUz: string; plan: { product: { titleRu: string; titleEn: string; titleUz: string } } }, qty: number, lang: string) {
+  const pt = await pick3(v.plan.product.titleRu, v.plan.product.titleEn, v.plan.product.titleUz, lang);
+  const vt = await locName(v.titleRu, v.titleUz, lang);
+  const item = `${esc(formatItemTitle(pt, vt))}${qty > 1 ? ` ×${qty}` : ""}`;
+  const kb = new InlineKeyboard()
+    .text("👤 Себе", `premself:${v.id}:${qty}`).row()
+    .text("👥 Другому", `premgift:${v.id}:${qty}`).row()
+    .text(t(lang, "back"), `q:${v.id}:${qty}:0:all`);
+  await ctx.answerCallbackQuery().catch(() => {});
+  const text = `💎 <b>${item}</b>\n\nКому оформить подписку?`;
+  await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(async () => {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+  });
+}
+
+// Native contact picker. request_users hands back the recipient's numeric id —
+// the only identifier a gift can actually be delivered to.
+async function askPremiumSharedUser(ctx: Context, variantId: number, qty: number, lang: string) {
+  pending.set(String(ctx.from?.id), { type: "premium_pick_user", variantId, qty });
+  await ctx.answerCallbackQuery().catch(() => {});
+  await ctx.reply(
+    "👥 Нажмите кнопку ниже и выберите получателя из своих контактов.\n\n" +
+    "Так подписка точно уйдёт нужному человеку.\n\n" +
+    "Если его нет в контактах — пришлите его @username сообщением.",
+    {
+      reply_markup: {
+        keyboard: [[{
+          text: "👥 Выбрать получателя",
+          request_users: { request_id: 1, user_is_bot: false, max_quantity: 1, request_username: true },
+        }]],
+        resize_keyboard: true,
+        one_time_keyboard: true,
+      },
+    },
+  ).catch(() => {});
+}
+
 // Direct-pay bank picker (Payme / Click) — the whole payment price, no balance.
 // Each bank button carries its premium emoji; tapping Payme builds a checkout
 // link for the full price and hands back the pay button.
@@ -1526,10 +1615,12 @@ async function showBankPicker(
   total: number,
   targetUsername?: string,
   disc: { pct: number; cost: number } | null = null,
+  recipientTgId?: string,
 ) {
   const user = await getUser(ctx);
   const suffix = targetUsername ? `:${targetUsername}` : "";
-  const note = `buy:${v.id}:${qty}${suffix}`;
+  // The note is what carries the recipient through the payment round-trip.
+  const note = buildBuyNote(v.id, qty, targetUsername ?? null, recipientTgId ?? null);
   const refSpend = disc?.cost ?? 0;
   const kb = new InlineKeyboard();
 
@@ -1562,7 +1653,7 @@ async function showBankPicker(
   const starLabel = stripLeadEmoji(t(lang, "pay_stars", { n: soumToStars(total) }));
   // Fixed 8-field payload so the referral-spend rides along to delivery even
   // when there's no recipient: topup:<amount>:stars:buy:<vid>:<qty>:<uname>:<refSpend>
-  const starPayload = `topup:${total}:stars:buy:${v.id}:${qty}:${targetUsername ?? ""}:${refSpend}`;
+  const starPayload = `topup:${total}:stars:buy:${v.id}:${qty}:${targetUsername ?? ""}:${refSpend}:${recipientTgId ?? ""}`;
   try {
     const cap = await buyInvoiceCaption(note, lang);
     const starLink = await ctx.api.createInvoiceLink(
@@ -1596,13 +1687,18 @@ async function showBankPicker(
   });
 }
 
-async function doBuy(ctx: Context, variantId: number, qty: number, targetUsername?: string) {
+async function doBuy(ctx: Context, variantId: number, qty: number, targetUsername?: string, recipientTgId?: string) {
   const user = await getUser(ctx);
   const lang = user.lang;
   const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
   if (!v || !v.isActive) return ctx.answerCallbackQuery({ text: t(lang, "plan_unavailable"), show_alert: true });
-  // Stars / Premium need a recipient before anything else happens.
-  if (v.needsUsername && !targetUsername) return askTargetUsername(ctx, v, qty, lang);
+  // Telegram Premium: the recipient is a numeric id, so ask who it's for rather
+  // than demanding a username. needsUsername stays optional for these items.
+  if (v.fragmentKind === "premium" && !recipientTgId && !targetUsername) {
+    return askPremiumRecipient(ctx, v, qty, lang);
+  }
+  // Other goods delivered to an account (Stars) still capture a username.
+  if (v.needsUsername && !targetUsername && !recipientTgId) return askTargetUsername(ctx, v, qty, lang);
   const pt = await pick3(v.plan.product.titleRu, v.plan.product.titleEn, v.plan.product.titleUz, lang);
   const vt = await locName(v.titleRu, v.titleUz, lang);
   const baseTitle = `${pt} — ${vt}`;
@@ -1632,13 +1728,13 @@ async function doBuy(ctx: Context, variantId: number, qty: number, targetUsernam
 
   // Direct-pay flow for everyone: no balance, straight to the bank/Stars picker.
   if (directPayEnabled(ctx)) {
-    return showBankPicker(ctx, lang, v, qty, label, payTotal, targetUsername, disc);
+    return showBankPicker(ctx, lang, v, qty, label, payTotal, targetUsername, disc, recipientTgId);
   }
 
   // Enough balance -> execute purchase immediately
   if (user.balance >= total) {
     await ctx.answerCallbackQuery({ text: t(lang, "paid_toast") }).catch(() => {});
-    await executePurchase(user.tgId, variantId, qty, undefined, targetUsername);
+    await executePurchase(user.tgId, variantId, qty, undefined, targetUsername, 0, recipientTgId);
     return;
   }
 
@@ -2343,11 +2439,11 @@ async function requestTopUp(ctx: Context, lang: string, amount: number, method =
   }
 }
 
-async function creditPaidTopUp(ctx: Context, amount: number, method: string, chargeId: string, variantId?: number, qty?: number, targetUsername?: string, discountCost = 0) {
+async function creditPaidTopUp(ctx: Context, amount: number, method: string, chargeId: string, variantId?: number, qty?: number, targetUsername?: string, discountCost = 0, recipientTgId?: string) {
   const user = await getUser(ctx);
   const lang = user.lang;
 
-  const note = (variantId && qty) ? `buy:${variantId}:${qty}${targetUsername ? `:${targetUsername}` : ""}` : null;
+  const note = (variantId && qty) ? buildBuyNote(variantId, qty, targetUsername ?? null, recipientTgId ?? null) : null;
 
   // Idempotency. Telegram can deliver the same successful_payment more than once
   // (a restart mid-processing replays the long-polling offset), and this path
@@ -2388,7 +2484,7 @@ async function creditPaidTopUp(ctx: Context, amount: number, method: string, cha
   if (ADMIN_ID) await ctx.api.sendMessage(ADMIN_ID, `💰 (${method}) ${money(amount, lang)} — ${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})`).catch(() => {});
 
   if (variantId && qty) {
-    await executePurchase(user.tgId, variantId, qty, undefined, targetUsername, discountCost).catch((err) => {
+    await executePurchase(user.tgId, variantId, qty, undefined, targetUsername, discountCost, recipientTgId, method, chargeId).catch((err) => {
       console.error("[bot] creditPaidTopUp auto-purchase fail:", err.message);
     });
   }
@@ -3872,7 +3968,20 @@ bot.command("give", async (ctx) => {
   if (!orderId || !text) return ctx.reply("Формат: /give <номер заказа> <логин:пароль или ссылка>");
   const order = await db.botOrder.findUnique({ where: { id: orderId }, include: { user: true } });
   if (!order) return ctx.reply(`Заказ #${orderId} не найден`);
-  await db.botOrder.update({ where: { id: orderId }, data: { payload: text, status: "delivered" } });
+  // Refuse to hand out a Premium/Stars order twice. COMPLETED is terminal, so
+  // a second /give on the same order is a mistake worth stopping, not repeating.
+  if (order.deliveryState === "COMPLETED") {
+    return ctx.reply(`⚠️ Заказ #${orderId} уже отмечен как выданный (${order.deliveredAt?.toLocaleString("ru-RU") ?? "—"}).\n\nЕсли нужно выдать повторно осознанно — скажите, сниму отметку.`);
+  }
+  await db.botOrder.update({
+    where: { id: orderId },
+    data: {
+      payload: text, status: "delivered",
+      // Close the delivery state machine for Fragment goods; ordinary orders
+      // keep deliveryState = "" and are unaffected.
+      ...(order.deliveryState ? { deliveryState: "COMPLETED", deliveredAt: new Date() } : {}),
+    },
+  });
   const ulang = order.user.lang;
   // A Stars / Premium order has no credentials to hand over — the goods went
   // to a Telegram account. Showing "Ваш товар: выдано" would read as nonsense,
@@ -3953,6 +4062,60 @@ async function broadcastInBackground(
     if (statusMsg && chatId) await bot.api.editMessageText(chatId, statusMsg.message_id, done, { parse_mode: "HTML" }).catch(() => {});
   })().catch((e) => console.error("[bot] broadcast failed:", (e as Error).message));
 }
+
+// ---------- health check ----------
+// Bot's own Star balance. Official method (getMyStarBalance, Bot API 9.1);
+// returns null if the call fails, so a health check never throws.
+async function botStarBalance(): Promise<number | null> {
+  try {
+    const bal = await bot.api.getMyStarBalance();
+    return bal?.amount ?? null;
+  } catch (e) {
+    console.error("[bot] getMyStarBalance failed:", (e as Error).message);
+    return null;
+  }
+}
+
+bot.command("health", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const dot = (ok: boolean) => (ok ? "🟢" : "🔴");
+
+  let dbOk = true;
+  try { await db.$queryRawUnsafe("SELECT 1"); } catch { dbOk = false; }
+
+  const [pendingOrders, failedOrders, manualReview, stars] = await Promise.all([
+    db.botOrder.count({ where: { deliveryState: { in: ["PAID", "PROCESSING"] } } }).catch(() => -1),
+    db.botOrder.count({ where: { deliveryState: "FAILED" } }).catch(() => -1),
+    db.botOrder.count({ where: { deliveryState: "MANUAL_REVIEW" } }).catch(() => -1),
+    botStarBalance(),
+  ]);
+
+  // How many 3-month gifts the current balance could cover — the number that
+  // actually matters before switching delivery to auto.
+  const cost3 = premiumStarCost(3)!;
+  const starLine = stars === null
+    ? "🔴 Star-баланс: недоступен"
+    : `⭐ Star-баланс: <b>${stars}</b>` +
+      ` (хватит на ~${Math.floor(stars / cost3)} подписок по 3 мес)` +
+      (PREMIUM_MIN_STAR_BALANCE > 0 && stars < PREMIUM_MIN_STAR_BALANCE ? "\n⚠️ <b>Ниже порога!</b>" : "");
+
+  await ctx.reply(
+    `🩺 <b>Состояние системы</b>\n\n` +
+    `${dot(true)} Telegram Bot\n` +
+    `${dot(dbOk)} База данных\n` +
+    `${dot(paymeReady())} Payme\n` +
+    `${dot(clickReady())} Click\n` +
+    `${dot(true)} Telegram Stars (оплата)\n` +
+    `${PREMIUM_DELIVERY_MODE === "auto" ? "🟢" : "🟡"} Выдача Premium: <b>${PREMIUM_DELIVERY_MODE}</b>` +
+    `${PREMIUM_DELIVERY_MODE === "manual" ? " (автовыдача выключена)" : ""}\n` +
+    `🟡 Выдача Stars: <b>manual</b> (только вручную)\n\n` +
+    `${starLine}\n\n` +
+    `📦 Ожидают выдачи: <b>${pendingOrders}</b>\n` +
+    `❌ Ошибок: <b>${failedOrders}</b>\n` +
+    `🔍 Ручная проверка: <b>${manualReview}</b>`,
+    { parse_mode: "HTML" },
+  ).catch(() => {});
+});
 
 // ---------- limited-time promo broadcast ----------
 // Temporarily drops a variant's price, blasts an Uzbek offer with a one-tap buy
@@ -4559,6 +4722,14 @@ bot.on("callback_query:data", async (ctx) => {
       await ctx.answerCallbackQuery().catch(() => {});
       return ctx.reply("Пришлите видео для этого товара одним сообщением.\nЧтобы убрать видео — напишите: убрать").catch(() => {});
     }
+    // Premium recipient: "себе" uses the buyer's own numeric id.
+    if (tag === "premself") {
+      return doBuy(ctx, Number(rest[0]), Number(rest[1]) || 1, undefined, String(ctx.from!.id));
+    }
+    // "другому" → native contact picker, which returns the recipient's real id.
+    if (tag === "premgift") {
+      return askPremiumSharedUser(ctx, Number(rest[0]), Number(rest[1]) || 1, lang);
+    }
     if (tag === "promo_v") {
       if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {});
       pending.set(String(ctx.from?.id), { type: "promo_price", variantId: Number(rest[0]) });
@@ -4597,6 +4768,32 @@ bot.on("message:text", async (ctx) => {
       return ctx.reply("♻️ Видео товара убрано.");
     }
     return ctx.reply("Пришлите видео сообщением, либо напишите: убрать");
+  }
+
+  // Username fallback for "gift Premium to someone else". A username is NOT a
+  // delivery identifier: we resolve it to a numeric id if that person has used
+  // this bot before, otherwise the order still goes through but can only be
+  // fulfilled by hand — never auto-delivered on a username alone.
+  if (state.type === "premium_pick_user") {
+    const picker = await getUser(ctx);
+    const res = checkUsername(ctx.message.text ?? "");
+    if (!res.ok) {
+      pending.set(key, state);
+      return ctx.reply(t(picker.lang, `uname_bad_${res.reason}`), { parse_mode: "HTML" });
+    }
+    pending.delete(key);
+    const known = await db.botUser.findFirst({
+      where: { username: { equals: res.username, mode: "insensitive" } },
+      select: { tgId: true },
+    }).catch(() => null);
+    await ctx.reply(
+      known
+        ? `✅ Получатель: @${res.username}`
+        : `⚠️ @${res.username} ещё не пользовался ботом, поэтому его ID неизвестен.\n\n` +
+          `Заказ оформим, но выдачу подтвердит администратор вручную.`,
+      { reply_markup: { remove_keyboard: true } },
+    ).catch(() => {});
+    return doBuy(ctx, state.variantId, state.qty, res.username, known?.tgId ?? undefined);
   }
 
   if (state.type === "promo_price") {
@@ -4780,6 +4977,25 @@ async function handleAdminMedia(ctx: Context, fileId: string | undefined, isVide
   return false;
 }
 
+// Native contact pick for "gift Premium to someone else". This is the good path:
+// Telegram hands back the recipient's real numeric id, which is the only thing
+// giftPremiumSubscription can deliver to — no typing, no typos, no impersonation.
+bot.on("message:users_shared", async (ctx) => {
+  const key = String(ctx.from?.id);
+  const state = pending.get(key);
+  if (state?.type !== "premium_pick_user") return;
+  pending.delete(key);
+  const picked = ctx.message.users_shared?.users?.[0];
+  const user = await getUser(ctx);
+  const lang = user.lang;
+  // Drop the picker keyboard so the shop's normal keyboard comes back.
+  await ctx.reply("✅ Получатель выбран.", { reply_markup: { remove_keyboard: true } }).catch(() => {});
+  if (!picked?.user_id) {
+    return ctx.reply("Не удалось определить получателя. Попробуйте ещё раз.").catch(() => {});
+  }
+  return doBuy(ctx, state.variantId, state.qty, picked.username ?? undefined, String(picked.user_id));
+});
+
 bot.on("message:photo", async (ctx) => {
   const photos = ctx.message.photo;
   const fileId = photos[photos.length - 1]?.file_id; // largest size
@@ -4900,13 +5116,15 @@ bot.on("message:successful_payment", async (ctx) => {
   const amount = Number(amtStr);
   if (!Number.isFinite(amount) || amount <= 0) return;
 
-  // Payload: topup:<amount>:<method>[:buy:<variantId>:<qty>[:<username>[:<refSpend>]]]
+  // Payload: topup:<amount>:<method>[:buy:<variantId>:<qty>:<username>:<refSpend>:<recipientTgId>]
+  // Trailing segments may be empty; older payloads simply have fewer of them.
   const variantId = parts[3] === "buy" ? Number(parts[4]) : undefined;
   const qty = parts[3] === "buy" ? Number(parts[5]) : undefined;
   const uname = parts[3] === "buy" ? (parts[6] || undefined) : undefined;
   const discountCost = parts[3] === "buy" ? Number(parts[7] || 0) : 0;
+  const recipientTgId = parts[3] === "buy" ? (parts[8] || undefined) : undefined;
 
-  await creditPaidTopUp(ctx, amount, method || "stars", sp.telegram_payment_charge_id, variantId, qty, uname, discountCost);
+  await creditPaidTopUp(ctx, amount, method || "stars", sp.telegram_payment_charge_id, variantId, qty, uname, discountCost, recipientTgId);
 });
 
 bot.catch((err) => console.error("[bot] error:", err.error));
@@ -5128,6 +5346,19 @@ async function ensureSchema() {
     `CREATE UNIQUE INDEX IF NOT EXISTS "StockAlert_tgId_variantId_key" ON "StockAlert"("tgId", "variantId")`,
     `CREATE INDEX IF NOT EXISTS "BotUser_referredBy_verified_idx"
        ON "BotUser"("referredBy") WHERE "channelVerifiedAt" IS NOT NULL`,
+    // Telegram Premium / Stars delivery tracking. All nullable / defaulted, so
+    // existing orders (Gemini, CapCut, Canva …) are unaffected: they keep
+    // deliveryState = "" and are never picked up by the Premium pipeline.
+    `ALTER TABLE "BotOrder" ADD COLUMN IF NOT EXISTS "recipientTgId" TEXT`,
+    `ALTER TABLE "BotOrder" ADD COLUMN IF NOT EXISTS "deliveryState" TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE "BotOrder" ADD COLUMN IF NOT EXISTS "deliveryAttempts" INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE "BotOrder" ADD COLUMN IF NOT EXISTS "deliveryError" TEXT`,
+    `ALTER TABLE "BotOrder" ADD COLUMN IF NOT EXISTS "providerTxnId" TEXT`,
+    `ALTER TABLE "BotOrder" ADD COLUMN IF NOT EXISTS "deliveredAt" TIMESTAMP(3)`,
+    `ALTER TABLE "BotOrder" ADD COLUMN IF NOT EXISTS "paymentMethod" TEXT`,
+    `ALTER TABLE "BotOrder" ADD COLUMN IF NOT EXISTS "paymentId" TEXT`,
+    `CREATE INDEX IF NOT EXISTS "BotOrder_deliveryState_idx"
+       ON "BotOrder"("deliveryState") WHERE "deliveryState" <> ''`,
     // Idempotency for Telegram Stars payments: externalId holds the
     // telegram_payment_charge_id, so the same payment can never be credited
     // twice. Partial (externalId IS NOT NULL) because Payme/Click rows leave it
@@ -5285,11 +5516,13 @@ async function deliverPaidPaymeTopUps() {
       }
       // buy:variantId:qty[:username] → fulfil the purchase from the fresh balance.
       if (isDirectBuy) {
-        const [, varIdStr, qtyStr, uname] = topup.note!.split(":");
-        const variantId = Number(varIdStr);
-        const qty = Number(qtyStr);
-        if (variantId && qty) {
-          await executePurchase(user.tgId, variantId, qty, undefined, uname || undefined, topup.refSpend ?? 0).catch((e) => {
+        const parsed = parseBuyNote(topup.note);
+        if (parsed) {
+          await executePurchase(
+            user.tgId, parsed.variantId, parsed.qty, undefined,
+            parsed.username ?? undefined, topup.refSpend ?? 0, parsed.recipientTgId ?? undefined,
+            (topup as { method?: string }).method ?? "payme", String(topup.id),
+          ).catch((e) => {
             console.error("[bot] payme auto-purchase fail:", (e as Error).message);
           });
         }

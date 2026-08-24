@@ -724,8 +724,25 @@ model BotOrder {
   status    String   @default("delivered")
   // Telegram @username the goods go to (Stars / Premium). Captured and
   // confirmed BEFORE payment, and never editable afterwards — a Fragment
-  // transfer cannot be reversed.
+  // transfer cannot be reversed. Reference only: delivery uses recipientTgId.
   targetUsername String?
+  // --- Telegram Premium / Stars delivery -----------------------------------
+  // Numeric Telegram id of the recipient — the ONLY identifier a gift can be
+  // delivered to (giftPremiumSubscription takes user_id, never a username).
+  recipientTgId    String?
+  // Delivery state machine, kept in its own column so the legacy `status`
+  // (which Gemini/CapCut/Canva and the whole existing shop depend on) is
+  // untouched. "" = not a Premium/Stars order. See domain/premium-delivery.ts.
+  deliveryState    String   @default("")
+  deliveryAttempts Int      @default(0)
+  deliveryError    String?
+  // Real Star-transaction id, found by reconciling against getStarTransactions.
+  // Stays null unless a genuine id was located — never synthesised, and its
+  // absence is never treated as proof that a gift was or wasn't delivered.
+  providerTxnId    String?
+  deliveredAt      DateTime?
+  paymentMethod    String?
+  paymentId        String?
   createdAt DateTime @default(now())
 }
 
