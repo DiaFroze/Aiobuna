@@ -2,7 +2,12 @@ import Link from "next/link";
 import { PageHeader, EmptyState } from "@/components/admin/ui";
 import { botDb, botConfigured } from "@/lib/botDb";
 import { toggleBotProductActiveAction } from "../bot-products/actions";
-import { applyStarsRateAction, updateFragmentPricesAction } from "./actions";
+import {
+  applyStarsRateAction,
+  toggleFragmentKindAction,
+  toggleFragmentVariantAction,
+  updateFragmentPricesAction,
+} from "./actions";
 import {
   STARS_ROUNDING_STEPS,
   decodeStarsRate,
@@ -88,7 +93,27 @@ export default async function BotFragmentPage() {
                   <span className="font-medium">{product.titleRu}</span>
                   <span className="badge bg-surface-2 text-muted text-xs">{variants.length} вар.</span>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  {/* Stars and Premium switch separately: they often share one
+                      product, and turning Premium off must not take Stars down
+                      with it. */}
+                  {(["stars", "premium"] as const).map((kind) => {
+                    const own = variants.filter((v) => v.fragmentKind === kind);
+                    if (own.length === 0) return null;
+                    const on = own.some((v) => v.isActive);
+                    return (
+                      <form action={toggleFragmentKindAction} key={kind}>
+                        <input type="hidden" name="productId" value={product.id} />
+                        <input type="hidden" name="kind" value={kind} />
+                        <button
+                          className={`badge cursor-pointer ${on ? "bg-success/10 text-success" : "bg-danger/10 text-danger"}`}
+                          title={on ? `Выключить все ${kind === "stars" ? "Stars" : "Premium"}` : `Включить все ${kind === "stars" ? "Stars" : "Premium"}`}
+                        >
+                          {kind === "stars" ? "⭐ Stars" : "👑 Premium"}: {on ? "вкл" : "выкл"}
+                        </button>
+                      </form>
+                    );
+                  })}
                   <form action={toggleBotProductActiveAction}>
                     <input type="hidden" name="id" value={product.id} />
                     <button
@@ -155,16 +180,20 @@ export default async function BotFragmentPage() {
                 <input type="hidden" name="productId" value={product.id} />
                 {variants.map((v) => (
                   <div key={v.id} className="grid grid-cols-12 gap-2 items-center">
-                    <div className="col-span-5 md:col-span-4 text-sm">
+                    <div className="col-span-6 md:col-span-4 text-sm">
                       {v.titleRu}
-                      {!v.isActive && <span className="ml-2 badge bg-danger/10 text-danger text-[10px]">выкл</span>}
+                      {v.fragmentKind === "stars" && v.fragmentAmount === 1 && (
+                        <span className="ml-2 badge bg-surface-2 text-muted text-[10px]" title="Задаёт цену одной звезды для «Своё количество». Покупателям в списке не показывается.">
+                          курс
+                        </span>
+                      )}
                     </div>
-                    <div className="col-span-3 md:col-span-2 text-xs text-muted font-mono">
+                    <div className="col-span-6 md:col-span-2 text-xs text-muted font-mono">
                       {v.fragmentKind === "stars"
                         ? `${v.fragmentAmount} ⭐`
                         : `${v.fragmentAmount} мес.`}
                     </div>
-                    <div className="col-span-4 md:col-span-3">
+                    <div className="col-span-7 md:col-span-3">
                       <input
                         name={`price_${v.id}`}
                         type="number"
@@ -174,7 +203,20 @@ export default async function BotFragmentPage() {
                         className="input text-sm font-mono w-full"
                       />
                     </div>
-                    <div className="hidden md:block md:col-span-3 text-xs text-muted">сум</div>
+                    <div className="col-span-5 md:col-span-3">
+                      {/* Same form, different action — so one row can be switched
+                          without leaving the page. Unsaved price edits are not
+                          applied by this button. */}
+                      <button
+                        name="variantId"
+                        value={v.id}
+                        formAction={toggleFragmentVariantAction}
+                        className={`badge cursor-pointer ${v.isActive ? "bg-success/10 text-success" : "bg-danger/10 text-danger"}`}
+                        title={v.isActive ? "Выключить этот вариант в боте (цены не сохранятся)" : "Включить этот вариант в боте (цены не сохранятся)"}
+                      >
+                        {v.isActive ? "✅ вкл" : "🚫 выкл"}
+                      </button>
+                    </div>
                   </div>
                 ))}
                 <div className="pt-2">

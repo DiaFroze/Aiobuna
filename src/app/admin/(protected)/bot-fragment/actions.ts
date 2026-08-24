@@ -142,3 +142,67 @@ export async function applyStarsRateAction(formData: FormData) {
   revalidatePath("/admin/bot-fragment");
   revalidatePath(`/admin/bot-products/${productId}`);
 }
+
+/** One Stars/Premium pack on or off. */
+export async function toggleFragmentVariantAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.PRODUCTS_WRITE);
+  const variantId = Number(formData.get("variantId"));
+  if (!variantId) return;
+
+  const v = await botDb.variant.findUnique({
+    where: { id: variantId },
+    select: { isActive: true, titleRu: true, fragmentKind: true, plan: { select: { productId: true } } },
+  });
+  // Only supplier-backed variants: this screen must not become a way to flip
+  // arbitrary catalogue rows through a tampered form field.
+  if (!v || (v.fragmentKind !== "stars" && v.fragmentKind !== "premium")) return;
+
+  await botDb.variant.update({ where: { id: variantId }, data: { isActive: !v.isActive } });
+  await audit({
+    adminId: admin.id,
+    action: "bot.fragment.variant_active",
+    entityType: "BotVariant",
+    entityId: String(variantId),
+    metadata: { title: v.titleRu, kind: v.fragmentKind, from: v.isActive, to: !v.isActive },
+  });
+
+  revalidatePath("/admin/bot-fragment");
+  revalidatePath(`/admin/bot-products/${v.plan.productId}`);
+}
+
+/**
+ * All of Stars, or all of Premium, in one click.
+ *
+ * The product switch is too blunt when both live under the same product —
+ * turning Premium off should not take Stars down with it. If anything of that
+ * kind is still on, this turns the whole kind off; otherwise it turns it on.
+ */
+export async function toggleFragmentKindAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.PRODUCTS_WRITE);
+  const productId = Number(formData.get("productId"));
+  const kind = String(formData.get("kind") ?? "");
+  if (!productId || (kind !== "stars" && kind !== "premium")) return;
+
+  const variants = await botDb.variant.findMany({
+    where: { fragmentKind: kind, plan: { productId } },
+    select: { id: true, isActive: true },
+  });
+  if (variants.length === 0) return;
+
+  const turnOn = !variants.some((v) => v.isActive);
+  await botDb.variant.updateMany({
+    where: { id: { in: variants.map((v) => v.id) } },
+    data: { isActive: turnOn },
+  });
+
+  await audit({
+    adminId: admin.id,
+    action: "bot.fragment.kind_active",
+    entityType: "BotProduct",
+    entityId: String(productId),
+    metadata: { kind, to: turnOn, variants: variants.length },
+  });
+
+  revalidatePath("/admin/bot-fragment");
+  revalidatePath(`/admin/bot-products/${productId}`);
+}
