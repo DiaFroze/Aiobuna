@@ -23,6 +23,9 @@
   },
   "dependencies": {
     "@prisma/client": "^5.18.0",
+    "@ton/core": "^0.63.1",
+    "@ton/crypto": "^3.3.0",
+    "@ton/ton": "^16.3.0",
     "bcryptjs": "^2.4.3",
     "grammy": "^1.44.0",
     "next": "^14.2.35",

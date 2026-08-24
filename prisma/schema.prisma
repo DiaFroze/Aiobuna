@@ -935,3 +935,48 @@ model MethodPurchase {
   @@unique([methodId, userId])
   @@index([userId])
 }
+
+// Fragment / external supplier purchase record — the single source of truth for
+// idempotent fulfillment. UNIQUE(orderId, supplier) guarantees that one paid
+// order can result in at most one supplier purchase attempt. The state machine
+// tracks the purchase lifecycle from claim through TON signing, broadcast,
+// Fragment confirmation, and reconciliation.
+model SupplierPurchase {
+  id              Int      @id @default(autoincrement())
+  // The BotOrder this purchase fulfills.
+  orderId         Int
+  // Supplier identifier ("fragment").
+  supplier        String
+  // "stars" | "premium"
+  kind            String
+  // Normalized recipient @username (no @).
+  recipient       String
+  // Fragment request/invoice id.
+  fragmentReqId   String?
+  // Dynamic confirm method name from Fragment — never hardcoded.
+  confirmMethod   String?
+  // Serialized confirm params from Fragment (JSON).
+  confirmParams   String?
+  // Quoted TON amount as string to avoid float drift.
+  quotedTon       String?
+  // Actual TON amount spent (filled after broadcast).
+  actualTon       String?
+  // Hash of the signed BOC for deduplication.
+  bocHash         String?
+  // TON blockchain transaction hash (filled after broadcast/reconciliation).
+  tonTxHash       String?
+  // Current state in the Fragment order state machine.
+  state           String   @default("PAID")
+  // Attempt counter — incremented on each retry (only before signing).
+  attempt         Int      @default(0)
+  // Last error message (for diagnostics, never shown to users).
+  lastError       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  // When the purchase was confirmed as delivered by Fragment.
+  confirmedAt     DateTime?
+
+  @@unique([orderId, supplier])
+  @@index([state])
+  @@index([fragmentReqId])
+}

@@ -52,4 +52,43 @@ export const env = {
   // Secret key from the Click merchant cabinet — used to verify the callback
   // signature. Never logged.
   clickSecretKey: () => process.env.CLICK_SECRET_KEY ?? "",
+
+  // --- Fragment Direct Gateway ---
+  // FRAGMENT_ENABLED gates the entire Fragment fulfillment pipeline.
+  // While false the bot shows Fragment items as manual-delivery only.
+  fragmentEnabled: () => process.env.FRAGMENT_ENABLED === "1",
+  // Mode: "off" | "shadow" | "canary" | "live"
+  fragmentMode: (): "off" | "shadow" | "canary" | "live" =>
+    (process.env.FRAGMENT_MODE as "off" | "shadow" | "canary" | "live") ?? "off",
+  // Phone number for the dedicated Fragment Telegram account.
+  fragmentLoginPhone: () => process.env.FRAGMENT_LOGIN_PHONE ?? "",
+  // 32-byte hex key (64 chars) for encrypting Fragment session cookies at rest.
+  fragmentSessionEncKey: () => process.env.FRAGMENT_SESSION_ENCRYPTION_KEY ?? "",
+  // Internal URL of the Wallet Signer service (Railway private network).
+  fragmentSignerUrl: () => process.env.FRAGMENT_SIGNER_URL ?? "",
+  // Shared secret for HMAC auth between Gateway and Signer.
+  fragmentSignerSecret: () => process.env.FRAGMENT_SIGNER_SHARED_SECRET ?? "",
+  // Username allowed for canary purchases — only this user gets real purchases
+  // in canary mode.
+  fragmentCanaryUsername: () => process.env.FRAGMENT_CANARY_USERNAME ?? "",
+
+  // --- TON Wallet Signer ---
+  // Public address of the hot wallet. Used for balance checks and address
+  // verification. Never contains secrets.
+  tonHotWalletAddress: () => process.env.TON_HOT_WALLET_ADDRESS ?? "",
+  // Wallet version override. Auto-detected from mnemonic if not set.
+  tonWalletVersion: () => process.env.TON_WALLET_VERSION ?? "",
+  // TON RPC endpoint — toncenter, tonapi, or custom.
+  tonRpcEndpoint: () =>
+    process.env.TON_RPC_ENDPOINT ?? "https://toncenter.com/api/v2/jsonRPC",
+  // Optional API key for the TON RPC endpoint.
+  tonRpcApiKey: () => process.env.TON_RPC_API_KEY ?? "",
+
+  // Spend limits (TON, as strings — parsed to numbers at runtime).
+  fragmentMinHotWalletBalanceTon: () =>
+    Number(process.env.FRAGMENT_MIN_HOT_WALLET_BALANCE_TON ?? "0.5"),
+  fragmentMaxSinglePurchaseTon: () =>
+    Number(process.env.FRAGMENT_MAX_SINGLE_PURCHASE_TON ?? "50"),
+  fragmentDailySpendLimitTon: () =>
+    Number(process.env.FRAGMENT_DAILY_SPEND_LIMIT_TON ?? "200"),
 };

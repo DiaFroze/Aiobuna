@@ -5430,6 +5430,32 @@ async function ensureSchema() {
     // from keeping them here.
     `CREATE UNIQUE INDEX IF NOT EXISTS "TopUp_externalId_key"
        ON "TopUp"("externalId") WHERE "externalId" IS NOT NULL`,
+    // Fragment / external supplier purchase idempotency record.
+    // UNIQUE(orderId, supplier) guarantees one Fragment purchase per order.
+    `CREATE TABLE IF NOT EXISTS "SupplierPurchase" (
+      "id" SERIAL NOT NULL,
+      "orderId" INTEGER NOT NULL,
+      "supplier" TEXT NOT NULL,
+      "kind" TEXT NOT NULL,
+      "recipient" TEXT NOT NULL,
+      "fragmentReqId" TEXT,
+      "confirmMethod" TEXT,
+      "confirmParams" TEXT,
+      "quotedTon" TEXT,
+      "actualTon" TEXT,
+      "bocHash" TEXT,
+      "tonTxHash" TEXT,
+      "state" TEXT NOT NULL DEFAULT 'PAID',
+      "attempt" INTEGER NOT NULL DEFAULT 0,
+      "lastError" TEXT,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "confirmedAt" TIMESTAMP(3),
+      CONSTRAINT "SupplierPurchase_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "SupplierPurchase_orderId_supplier_key" ON "SupplierPurchase"("orderId", "supplier")`,
+    `CREATE INDEX IF NOT EXISTS "SupplierPurchase_state_idx" ON "SupplierPurchase"("state")`,
+    `CREATE INDEX IF NOT EXISTS "SupplierPurchase_fragmentReqId_idx" ON "SupplierPurchase"("fragmentReqId")`,
   ];
   for (const sql of statements) {
     try {
