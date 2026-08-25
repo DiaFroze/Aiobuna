@@ -25,6 +25,7 @@ import { buildClickUrl } from "../lib/domain/click";
 import { premiumStarCost, buildBuyNote, parseBuyNote, deliversToAccount, closeDeliveryPatch } from "../lib/domain/premium-delivery";
 import { STARS_MIN_QUANTITY, STARS_MAX_QUANTITY, isValidStarsQuantity } from "../lib/fragment/api-types";
 import { STARS_RATE_CARRIER_AMOUNT, minQtyForStars } from "../lib/domain/stars-pricing";
+import { lowStockCount, parseLowStockThreshold } from "../lib/domain/low-stock";
 import { approveTopUp, APPROVABLE_STATUSES } from "../lib/domain/topup-approval";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
@@ -513,6 +514,14 @@ async function stockMap(): Promise<Map<number, number>> {
 // cap (admin fulfils by hand, so supply is effectively unlimited). Never show
 // this number to the buyer as-is — render it via stockDisplay() instead.
 const STOCK_UNLIMITED = 999999;
+// "Осталось 4 шт." is worth saying when it is true and useless when it is not,
+// so it appears only below the admin's threshold and never for goods bought on
+// demand. The number printed is always the measured stock — there is no path
+// here that shrinks it for effect.
+async function lowStockLeft(v: { fragmentKind?: string | null }, stock: number): Promise<number | null> {
+  const threshold = parseLowStockThreshold(await setting("low_stock_threshold", ""));
+  return lowStockCount(stock, threshold, isFragmentBacked(v) || stock >= STOCK_UNLIMITED);
+}
 const stockDisplay = (n: number): string => (n >= STOCK_UNLIMITED ? "♾" : String(n));
 // A variant is only buyable while BOTH it and its product are switched on.
 // Checking the variant alone was not enough: turning a product off in the admin
@@ -1002,6 +1011,7 @@ async function buildQtyChooser(
 
   // Flash sale (from /promo): auto % off + a live countdown, shown as a badge
   // button and in the caption.
+  const left = await lowStockLeft(v, max);
   const promo = await activePromoForVariant(v.id);
   const flashPct = promo && promo.originalPrice > unitPrice ? Math.round((promo.originalPrice - unitPrice) / promo.originalPrice * 100) : 0;
 
@@ -1060,6 +1070,7 @@ async function buildQtyChooser(
     (vipLabel ? `\n💎 <b>${esc(vipLabel)}</b>` : "") +
     `\n${t(lang, "price_each", { v: unitPrice > 0 ? money(unitPrice, lang) : t(lang, "free") })}` +
     `\n${t(lang, "qty", { n: qty })}` +
+    (left !== null ? `\n${t(lang, "low_stock", { n: left })}` : "") +
     (deal.free > 0 ? `\n🎁 <b>+${deal.free} в подарок</b> → получите ${qty + deal.free} шт.` : "") +
     (disc ? `\n🎁 Скидка за рефералов: <b>−${disc.pct}%</b> (спишется ${disc.cost} реф.)` : "") +
     `\n${t(lang, "total", { v: money(payTotal, lang) })}` +
@@ -4124,7 +4135,10 @@ bot.command("health", async (ctx) => {
 type PromoDraft = { variantId: number; name: string; originalPrice: number; price: number; hours: number };
 const promoDraft = new Map<string, PromoDraft>();
 
-function promoMessage(name: string, oldPrice: number, newPrice: number, hours: number, variantId: number): { text: string; kb: InlineKeyboard } {
+// `left` is the real remaining stock, or null when there is plenty (or when the
+// item is bought on demand and has no warehouse at all). It is measured once
+// before the broadcast rather than per recipient — and it is never invented.
+function promoMessage(name: string, oldPrice: number, newPrice: number, hours: number, variantId: number, left: number | null = null): { text: string; kb: InlineKeyboard } {
   const pct = oldPrice > newPrice ? Math.round((oldPrice - newPrice) / oldPrice * 100) : 0;
   // Brand premium emoji (e.g. 🤖 for Gemini) instead of a generic 💎.
   const pe = giftPremiumEmoji(name);
@@ -4134,7 +4148,8 @@ function promoMessage(name: string, oldPrice: number, newPrice: number, hours: n
     `<tg-emoji emoji-id="${FLASH_PCT_EMOJI}">🔺</tg-emoji> <b>FLASH SALE −${pct}%</b>\n\n` +
     `${brand} <b>${esc(name)}</b>\n` +
     `<s>${money(oldPrice, "uz")}</s> → <b>${money(newPrice, "uz")}</b>\n\n` +
-    `<tg-emoji emoji-id="${FLASH_TIME_EMOJI}">⏱</tg-emoji> Chegirma ${hours} soat davom etadi — ulgurib qoling!`;
+    `<tg-emoji emoji-id="${FLASH_TIME_EMOJI}">⏱</tg-emoji> Chegirma ${hours} soat davom etadi — ulgurib qoling!` +
+    (left !== null ? `\n\n${t("uz", "low_stock", { n: left })}` : "");
   return { text, kb };
 }
 
@@ -4175,8 +4190,10 @@ async function sendPromoBroadcast(ctx: Context) {
     return;
   }
   await ctx.editMessageText(`✅ Акция запущена. Цена ${money(draft.price, "ru")} на ${draft.hours} ч, потом вернётся на ${money(draft.originalPrice, "ru")}.`).catch(() => {});
+  const promoVariant = await db.variant.findUnique({ where: { id: draft.variantId } });
+  const promoLeft = promoVariant ? await lowStockLeft(promoVariant, await availableStock(promoVariant)) : null;
   await broadcastInBackground(ctx, async (tgId) => {
-    const { text, kb } = promoMessage(draft.name, draft.originalPrice, draft.price, draft.hours, draft.variantId);
+    const { text, kb } = promoMessage(draft.name, draft.originalPrice, draft.price, draft.hours, draft.variantId, promoLeft);
     await bot.api.sendMessage(tgId, text, { parse_mode: "HTML", reply_markup: kb });
   }, "Акция");
 }
@@ -4854,7 +4871,8 @@ bot.on("message:text", async (ctx) => {
     if (!v) return ctx.reply("❌ Товар не найден.");
     const name = v.plan.product.titleUz || v.plan.product.titleRu;
     promoDraft.set(key, { variantId: v.id, name, originalPrice: v.priceUzs, price, hours });
-    const { text, kb: msgKb } = promoMessage(name, v.priceUzs, price, hours, v.id);
+    const promoLeft = await lowStockLeft(v, await availableStock(v));
+    const { text, kb: msgKb } = promoMessage(name, v.priceUzs, price, hours, v.id, promoLeft);
     await ctx.reply("👇 Так увидят пользователи (на узбекском):").catch(() => {});
     await ctx.reply(text, { parse_mode: "HTML", reply_markup: msgKb }).catch(() => {});
     const ctrlKb = new InlineKeyboard().text("✅ Отправить всем", "promo_send").row().text("❌ Отмена", "promo_cancel");
