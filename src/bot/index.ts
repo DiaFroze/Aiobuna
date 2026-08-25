@@ -177,9 +177,10 @@ const PREMIUM_DELIVERY_MODE: "manual" | "auto" =
   (process.env.PREMIUM_DELIVERY_MODE ?? "manual").trim().toLowerCase() === "auto" ? "auto" : "manual";
 // Warn the admin when the bot's Star balance drops below this. 0 = no warning.
 const PREMIUM_MIN_STAR_BALANCE = Math.max(0, Math.trunc(Number(process.env.PREMIUM_MIN_STAR_BALANCE ?? 0)) || 0);
-// Direct pay = pay the full price straight to a bank (Payme / Click / Stars),
-// no balance. Now on for everyone — the balance model is retired.
-const directPayEnabled = (_ctx?: Context) => true;
+// There is no customer balance any more. Every purchase is paid in full at the
+// moment of buying — to a bank (Payme / Click) or in Telegram Stars. The
+// `balance` column still exists for historical orders and for top-ups an admin
+// approves by hand, but nothing in the bot shows it, offers it or spends it.
 
 // Referral discount: invite N verified friends → % off eligible products. The
 // discount is a coupon — a purchase SPENDS `min` referrals (the threshold), and
@@ -404,7 +405,6 @@ let buttonEmoji = "";
 // API 9.4 `icon_custom_emoji_id` field. Button labels are plain text, so a
 // `<tg-emoji>` tag would be printed literally there — only `.icon()` works.
 // Overridable via the `wallet_button_emoji` / `profile_button_emoji` settings.
-const PREMIUM_EMOJI_WALLET = "5224257782013769471";
 const PREMIUM_EMOJI_PROFILE = "5258011929993026890";
 const PREMIUM_EMOJI_ORDERS = "5967412305338568701";
 const PREMIUM_EMOJI_BACK = "5416113713428057601";
@@ -412,7 +412,6 @@ const PREMIUM_EMOJI_SUPPORT = "4970126766132691795";
 const PREMIUM_EMOJI_REFER = "6048721430730773527";
 const PREMIUM_EMOJI_GIFTS = "5203996991054432397";
 const PREMIUM_EMOJI_SHOP = "5859297284029681680";
-let walletButtonEmoji = PREMIUM_EMOJI_WALLET;
 let profileButtonEmoji = PREMIUM_EMOJI_PROFILE;
 let ordersButtonEmoji = PREMIUM_EMOJI_ORDERS;
 let backButtonEmoji = PREMIUM_EMOJI_BACK;
@@ -429,7 +428,6 @@ const BACK_TEXTS = new Set(LANGS.flatMap((l) => BACK_KEYS.map((k) => t(l, k))));
 const SUPPORT_TEXTS = new Set(LANGS.map((l) => t(l, "btn_support")));
 const REFER_TEXTS = new Set(LANGS.map((l) => t(l, "btn_refer")));
 const GIFTS_TEXTS = new Set(LANGS.map((l) => t(l, "btn_freebies")));
-const WALLET_TEXTS = new Set(LANGS.map((l) => t(l, "btn_wallet")));
 const PROFILE_TEXTS = new Set(LANGS.map((l) => t(l, "btn_profile")));
 const ORDERS_TEXTS = new Set(LANGS.map((l) => t(l, "btn_orders")));
 const SHOP_TEXTS = new Set(LANGS.map((l) => t(l, "btn_shop")));
@@ -442,20 +440,16 @@ function premiumIconFor(text: string): string | undefined {
   if (SUPPORT_TEXTS.has(text)) return supportButtonEmoji;
   if (REFER_TEXTS.has(text)) return referButtonEmoji;
   if (GIFTS_TEXTS.has(text)) return giftsButtonEmoji;
-  if (WALLET_TEXTS.has(text)) return walletButtonEmoji;
   if (PROFILE_TEXTS.has(text)) return profileButtonEmoji;
   if (ORDERS_TEXTS.has(text)) return ordersButtonEmoji;
   if (SHOP_TEXTS.has(text)) return shopButtonEmoji;
   return undefined;
 }
 
-// hideWallet: in the direct-pay flow there is no balance, so the "Баланс"
-// button is dropped (admin only for now).
-function mainKeyboard(lang: string, hideWallet = false) {
+function mainKeyboard(lang: string) {
   const kb = new Keyboard().text(t(lang, "btn_shop")).row();
   // Подарки retired (GIFTS_ENABLED=false) — referral rewards are now a discount
   // applied at checkout, not a free-item shop.
-  if (!hideWallet) kb.text(t(lang, "btn_wallet")).row();
   if (GIFTS_ENABLED) kb.text(t(lang, "btn_freebies")).row();
   kb.text(t(lang, "btn_profile")).text(t(lang, "btn_instructions")).row();
   return kb.resized().persistent();
@@ -623,7 +617,7 @@ async function buildHeader(): Promise<{ text: string; entities: MessageEntity[] 
 }
 
 // ---------- storefront ----------
-async function buildMenu(lang: string, balance: number, page: number, sort: Sort, userId: number, freebies = false, hideWallet = false) {
+async function buildMenu(lang: string, page: number, sort: Sort, userId: number, freebies = false) {
   const [products, stock, overrides] = await Promise.all([
     db.product.findMany({
       where: { isActive: true },
@@ -700,15 +694,9 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
     }
   }
   if (!freebies && items.length > 0) {
-    if (hideWallet) {
-      // Orders + Profile share one row.
-      kb.text(stripLeadEmoji(t(lang, "btn_orders")), "ord").icon(ordersButtonEmoji)
-        .text(stripLeadEmoji(t(lang, "btn_profile")), "profile_show").icon(profileButtonEmoji).row();
-    } else {
-      kb.text(stripLeadEmoji(t(lang, "btn_wallet")), "bal").icon(walletButtonEmoji)
-        .text(stripLeadEmoji(t(lang, "btn_orders")), "ord").icon(ordersButtonEmoji).row();
-      kb.text(stripLeadEmoji(t(lang, "btn_profile")), "profile_show").icon(profileButtonEmoji).row();
-    }
+    // Orders and Profile share one row.
+    kb.text(stripLeadEmoji(t(lang, "btn_orders")), "ord").icon(ordersButtonEmoji)
+      .text(stripLeadEmoji(t(lang, "btn_profile")), "profile_show").icon(profileButtonEmoji).row();
   }
 
   const head = freebies ? t(lang, "promo_title") : t(lang, "products_available");
@@ -726,7 +714,7 @@ async function buildMenu(lang: string, balance: number, page: number, sort: Sort
 async function showMenu(ctx: Context, page: number, sort: Sort, edit: boolean, freebies = false) {
   try {
     const user = await getUser(ctx);
-    const { text, kb } = await buildMenu(user.lang, user.balance, page, sort, user.id, freebies, directPayEnabled(ctx));
+    const { text, kb } = await buildMenu(user.lang, page, sort, user.id, freebies);
     // The main catalog page (not the freebies view) leads with the shop
     // banner as one combined photo+caption+buttons message. sendOrEdit
     // handles the media-vs-text edit correctness for callback navigation.
@@ -1244,9 +1232,6 @@ async function refundRefPoints(userId: number, points: number | undefined) {
 
 async function executePurchase(tgId: string, variantId: number, qty: number, refPointsCost?: number, targetUsername?: string, discountCost = 0, recipientTgId?: string, paymentMethod?: string, paymentId?: string) {
   const isRefGift = refPointsCost !== undefined && refPointsCost > 0;
-  // Direct-pay for everyone: the balance is internal plumbing, so the delivery
-  // message must never show a "Осталось: … сум" balance line.
-  const hideBalance = true;
   const user = await db.botUser.findUnique({ where: { tgId } });
   if (!user) return;
   const lang = user.lang;
@@ -1562,7 +1547,6 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
       const confirmText =
         `${t(lang, "order_paid", { id: reserve.orderId })}\n\n` +
         `${esc(label)}\n${chargeLine}\n` +
-        (hideBalance ? "" : `${t(lang, "remaining", { v: money(u?.balance ?? 0, lang) })}\n`) +
         `\n✅ <b>Файл со ссылками отправляется...</b>`;
       if (activateVideo) {
         if (procMsg) await bot.api.deleteMessage(tgId, procMsg.message_id).catch(() => {});
@@ -1582,7 +1566,6 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
       const confirmText =
         `${t(lang, "order_paid", { id: reserve.orderId })}\n\n` +
         `${esc(label)}\n${chargeLine}\n` +
-        (hideBalance ? "" : `${t(lang, "remaining", { v: money(u?.balance ?? 0, lang) })}\n`) +
         `\n${t(lang, "your_goods")}\n<code>${esc(finalPayload)}</code>`;
       if (activateVideo) {
         if (procMsg) await bot.api.deleteMessage(tgId, procMsg.message_id).catch(() => {});
@@ -1821,60 +1804,8 @@ async function doBuy(ctx: Context, variantId: number, qty: number, targetUsernam
   }
   const payTotal = disc ? Math.round(total * (100 - disc.pct) / 100) : total;
 
-  // Direct-pay flow for everyone: no balance, straight to the bank/Stars picker.
-  if (directPayEnabled(ctx)) {
-    return showBankPicker(ctx, lang, v, qty, label, payTotal, targetUsername, disc, recipientTgId);
-  }
-
-  // Enough balance -> execute purchase immediately
-  if (user.balance >= total) {
-    await ctx.answerCallbackQuery({ text: t(lang, "paid_toast") }).catch(() => {});
-    await executePurchase(user.tgId, variantId, qty, undefined, targetUsername, 0, recipientTgId);
-    return;
-  }
-
-  // Insufficient balance -> only ask for the SHORTFALL (total minus what's
-  // already on the balance), not the full price again. Existing balance
-  // stays working capital instead of sitting unused after a full top-up.
-  const shortfall = total - user.balance;
-  const stars = soumToStars(shortfall);
-  const adminUsername = (await setting("support_username", "")).replace(/^@/, "");
-
-  // The recipient rides along in the payment note so it survives the top-up
-  // round-trip and is still attached when the admin approves the receipt.
-  // Usernames can't contain ":", so the colon-separated note stays parseable.
-  const suffix = targetUsername ? `:${targetUsername}` : "";
-  const kb = new InlineKeyboard()
-    .text(t(lang, "pay_receipt"), `tcheck_buy:${shortfall}:${variantId}:${qty}${suffix}`).row()
-    .text(t(lang, "pay_stars", { n: stars }), `tstar_buy:${shortfall}:${variantId}:${qty}${suffix}`).row();
-  if (paymeReady(ctx)) kb.text(t(lang, "pay_payme"), `tpayme_buy:${shortfall}:${variantId}:${qty}${suffix}`).row();
-  if (adminUsername) {
-    kb.url(t(lang, "admin_topup"), `https://t.me/${adminUsername}`).row();
-  } else {
-    kb.text(t(lang, "via_admin"), `tman_buy:${shortfall}:${variantId}:${qty}${suffix}`).row();
-  }
-  kb.text(t(lang, "back"), `q:${v.id}:${qty}:0:all`);
-
-  const promptText = `👛 <b>Недостаточно средств.</b>\n\n` +
-    `Цена <b>${esc(label)}</b>: <b>${money(total, lang)}</b>.\n\n` +
-    (targetUsername ? `${t(lang, "uname_for")}: <b>@${esc(targetUsername)}</b>\n\n` : "") +
-    `У вас на балансе: <b>${money(user.balance, lang)}</b>.\n` +
-    `Осталось доплатить: <b>${money(shortfall, lang)}</b>.\n\n` +
-    `Пожалуйста, выберите способ оплаты — после зачисления покупка оформится автоматически:`;
-
-  await ctx.answerCallbackQuery().catch(() => {});
-  // One message: the how-to-pay video with the price/payment-options text as
-  // its caption (a text message can't gain a video via edit, so replace the
-  // qty-chooser screen with this instead of stacking a separate video on top).
-  const payVideo = howToPayFile();
-  if (payVideo) {
-    await ctx.deleteMessage().catch(() => {});
-    await ctx.replyWithVideo(payVideo, { caption: promptText, parse_mode: "HTML", reply_markup: kb }).catch(async () => {
-      await ctx.reply(promptText, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
-    });
-  } else {
-    await ctx.editMessageText(promptText, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
-  }
+  // Always straight to the bank / Stars picker for the full price.
+  return showBankPicker(ctx, lang, v, qty, label, payTotal, targetUsername, disc, recipientTgId);
 }
 
 // Purchase paid in referral points (not сум). Reuses executePurchase's
@@ -1990,53 +1921,15 @@ async function buyForReferrals(ctx: Context, variantId: number) {
 }
 
 // ---------- views ----------
-function balanceView(lang: string, balance: number) {
-  const kb = new InlineKeyboard();
-  for (const a of TOPUP_PRESETS) kb.text(`+${money(a, lang)}`, `top:${a}`);
-  kb.row().text(t(lang, "other_amount"), "topin").row();
-  kb.text(t(lang, "promo_btn"), "promo").row();
-  kb.text(t(lang, "to_shop"), "m:0:all");
-  return { text: `${t(lang, "wallet_title", { v: money(balance, lang) })}\n\n${t(lang, "wallet_hint", { min: money(MIN_TOPUP, lang) })}`, kb };
-}
 
 // Redeem a promo code → credit its fixed сум amount to the user's balance.
 // Validates active/expiry/total-uses/per-user limits atomically in a transaction.
-async function redeemPromo(ctx: Context, user: Awaited<ReturnType<typeof getUser>>, input: string) {
-  const lang = user.lang;
-  const code = (input ?? "").trim().toUpperCase();
-  const backKb = new InlineKeyboard().text(t(lang, "btn_wallet"), "bal").row().text(t(lang, "to_shop"), "m:0:all");
-  const fail = (msgKey: string) => ctx.reply(t(lang, msgKey), { parse_mode: "HTML", reply_markup: backKb });
-
-  if (!code) return fail("promo_bad");
-  let promo;
-  try {
-    promo = await db.promoCode.findUnique({ where: { code } });
-  } catch (e) {
-    console.error("[bot] promo lookup failed:", (e as Error).message);
-    return fail("promo_bad");
-  }
-  if (!promo || !promo.isActive) return fail("promo_bad");
-  if (promo.expiresAt && promo.expiresAt.getTime() < Date.now()) return fail("promo_expired");
-  if (promo.maxUses > 0 && promo.usedCount >= promo.maxUses) return fail("promo_used");
-
-  const result = await db.$transaction(async (tx) => {
-    const p = await tx.promoCode.findUnique({ where: { id: promo.id } });
-    if (!p || !p.isActive) return { error: "promo_bad" as const };
-    if (p.expiresAt && p.expiresAt.getTime() < Date.now()) return { error: "promo_expired" as const };
-    if (p.maxUses > 0 && p.usedCount >= p.maxUses) return { error: "promo_used" as const };
-    const mine = await tx.promoRedemption.count({ where: { promoId: p.id, userId: user.id } });
-    if (p.perUserLimit > 0 && mine >= p.perUserLimit) return { error: "promo_limit" as const };
-    await tx.promoRedemption.create({ data: { promoId: p.id, userId: user.id, amountUzs: p.amountUzs } });
-    await tx.promoCode.update({ where: { id: p.id }, data: { usedCount: { increment: 1 } } });
-    const u = await tx.botUser.update({ where: { id: user.id }, data: { balance: { increment: p.amountUzs } } });
-    return { amount: p.amountUzs, balance: u.balance };
-  });
-
-  if ("error" in result && result.error) return fail(result.error);
-  return ctx.reply(
-    t(lang, "promo_ok", { v: money(result.amount, lang), balance: money(result.balance, lang) }),
-    { parse_mode: "HTML", reply_markup: backKb },
-  );
+// Promo codes credited the balance, and there is no balance any more. Rather
+// than tell someone "20 000 сум зачислено" for money they can never spend, the
+// codes are paused — the redemption logic is gone with the balance it fed.
+async function redeemPromo(ctx: Context, user: Awaited<ReturnType<typeof getUser>>, _input: string) {
+  const kb = new InlineKeyboard().text(t(user.lang, "to_shop"), "m:0:all");
+  return ctx.reply(t(user.lang, "promo_retired"), { parse_mode: "HTML", reply_markup: kb });
 }
 async function ordersView(lang: string, userId: number) {
   // Only real purchases — delivered or awaiting manual delivery. Failed/refunded hidden.
@@ -2068,9 +1961,7 @@ async function ordersView(lang: string, userId: number) {
     : t(lang, "no_orders");
   return { text: `${t(lang, "orders_title")}\n\n${body}`, kb };
 }
-// hideBalance: in the direct-pay flow there is no balance, so the profile hides
-// both the balance line and the "Баланс" button (admin only for now).
-async function profileView(user: Awaited<ReturnType<typeof getUser>>, hideBalance = false) {
+async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
   const lang = user.lang;
   const [ordersCount, realRefs] = await Promise.all([
     db.botOrder.count({ where: { userId: user.id } }),
@@ -2086,7 +1977,6 @@ async function profileView(user: Awaited<ReturnType<typeof getUser>>, hideBalanc
 
   // Professional profile layout with all actions
   const kb = new InlineKeyboard();
-  if (!hideBalance) kb.text(stripLeadEmoji(t(lang, "btn_wallet")), "bal").icon(walletButtonEmoji);
   kb.text(t(lang, "btn_refer"), "ref").row()
     .text(stripLeadEmoji(t(lang, "p_orders")), "ord").icon(ordersButtonEmoji)
     .text(t(lang, "btn_support"), "support_show").row()
@@ -2097,7 +1987,6 @@ async function profileView(user: Awaited<ReturnType<typeof getUser>>, hideBalanc
     `${t(lang, "profile_title")}\n\n` +
     `${t(lang, "p_name")}: ${esc(user.firstName ?? "—")}\n` +
     `ID: <code>${user.tgId}</code>\n` +
-    (hideBalance ? "" : `${emojiIcon("💰", walletButtonEmoji)} ${t(lang, "your_balance", { v: money(user.balance, lang) })}\n`) +
     `${emojiIcon("🧾", ordersButtonEmoji)} ${t(lang, "p_orders")}: ${ordersCount}\n` +
     `${emojiIcon("🤝", referButtonEmoji)} ${t(lang, "p_invited")}: ${refCount}` +
     (spentRefs > 0 ? `\n➖ ${t(lang, "p_ref_spent")}: ${spentRefs}` : "") +
@@ -2400,7 +2289,7 @@ async function buildTopupMethods(lang: string, amount: number, ctx?: Context) {
   } else {
     kb.text(t(lang, "via_admin"), `tman:${amount}`).row();
   }
-  kb.text(t(lang, "back"), "bal");
+  kb.text(t(lang, "back"), "m:0:all");
   return { text: `${t(lang, "topup_of", { v: money(amount, lang) })}\n\n${t(lang, "choose_method")}`, kb };
 }
 
@@ -2450,7 +2339,7 @@ async function startReceiptPayment(ctx: Context, lang: string, amount: number, n
   await db.topUp.create({ data: { userId: user.id, amount, method: "receipt", status: "awaiting_receipt", expiresAt, note } });
   await ctx.reply(
     t(lang, "receipt_pay", { amount: money(amount, lang), card, holder, min: RECEIPT_WINDOW_MIN }),
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(t(lang, "back"), "bal") },
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(t(lang, "back"), "m:0:all") },
   ).catch(() => {});
 }
 
@@ -2765,12 +2654,12 @@ async function showLangPicker(ctx: Context, edit: boolean) {
 }
 async function sendHome(ctx: Context, user: Awaited<ReturnType<typeof getUser>>) {
   const { text, entities } = await buildHeader();
-  await ctx.reply(text, { entities, reply_markup: mainKeyboard(user.lang, directPayEnabled(ctx)) });
+  await ctx.reply(text, { entities, reply_markup: mainKeyboard(user.lang) });
   // Shop banner + catalog text + product buttons all as ONE photo message.
   // Product/qty callbacks now use sendOrEdit(), which correctly handles
   // media-source messages via delete+resend when a plain text edit isn't
   // possible — so the buttons work even though they live on a photo.
-  const menu = await buildMenu(user.lang, user.balance, 0, "all", user.id, false, directPayEnabled(ctx));
+  const menu = await buildMenu(user.lang, 0, "all", user.id, false);
   const banner = await shopBanner();
   if (banner) {
     const send = banner.isVideo
@@ -4503,9 +4392,8 @@ bot.command("code", async (ctx) => {
 // Slash commands mirroring every menu button (also shown in the "/" command menu).
 bot.command("shop", (ctx) => showMenu(ctx, 0, "all", false));
 bot.command(["freebies", "deals", "aksiya", "gifts"], (ctx) => showGifts(ctx));
-bot.command(["balance", "wallet", "balans"], async (ctx) => { const u = await getUser(ctx); const { text, kb } = balanceView(u.lang, u.balance); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
 bot.command(["orders", "buyurtmalar"], async (ctx) => { const u = await getUser(ctx); const { text, kb } = await ordersView(u.lang, u.id); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => ctx.reply(stripTags(text), { reply_markup: kb }).catch(() => {})); });
-bot.command(["profile", "profil"], async (ctx) => { const u = await getUser(ctx); const { text, kb } = await profileView(u, directPayEnabled(ctx)); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
+bot.command(["profile", "profil"], async (ctx) => { const u = await getUser(ctx); const { text, kb } = await profileView(u); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
 bot.command(["referral", "invite", "taklif"], async (ctx) => { const u = await getUser(ctx); const { text, kb } = referView(ctx, u); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
 bot.command(["support", "yordam"], async (ctx) => { const u = await getUser(ctx); const { text, kb } = await supportView(u.lang); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } }); });
 bot.command(["language", "lang", "til"], (ctx) => showLangPicker(ctx, false));
@@ -4651,9 +4539,8 @@ async function buyMethod(ctx: Context, id: number) {
 bot.hears(btnVariants("btn_methods"), (ctx) => showMethods(ctx));
 bot.hears(btnVariants("btn_shop"), (ctx) => showMenu(ctx, 0, "all", false));
 bot.hears(btnVariants("btn_freebies"), (ctx) => showGifts(ctx));
-bot.hears(btnVariants("btn_wallet"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = balanceView(u.lang, u.balance); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
 bot.hears(btnVariants("btn_orders"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = await ordersView(u.lang, u.id); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => ctx.reply(stripTags(text), { reply_markup: kb }).catch(() => {})); });
-bot.hears(btnVariants("btn_profile"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = await profileView(u, directPayEnabled(ctx)); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
+bot.hears(btnVariants("btn_profile"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = await profileView(u); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
 bot.hears(btnVariants("btn_instructions"), showInstructions);
 bot.hears(btnVariants("btn_refer"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = referView(ctx, u); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
 bot.hears(btnVariants("btn_support"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = await supportView(u.lang); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } }); });
@@ -4781,16 +4668,15 @@ bot.on("callback_query:data", async (ctx) => {
     }
     const user = await getUser(ctx);
     const lang = user.lang;
-    if (data === "bal") { const { text, kb } = balanceView(lang, user.balance); await sendOrEdit(ctx, text, { reply_markup: kb }); return ctx.answerCallbackQuery().catch(() => {}); }
     if (data === "ord") { const { text, kb } = await ordersView(lang, user.id); await sendOrEdit(ctx, text, { reply_markup: kb }); return ctx.answerCallbackQuery().catch(() => {}); }
     if (data === "ref") { const { text, kb } = referView(ctx, user); await sendOrEdit(ctx, text, { reply_markup: kb }); return ctx.answerCallbackQuery().catch(() => {}); }
-    if (data === "topin") { pending.set(String(ctx.from?.id), { type: "topup" }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "enter_amount", { min: money(MIN_TOPUP, lang) })); }
+    if (data === "topin") return ctx.answerCallbackQuery({ text: t(lang, "topup_retired"), show_alert: true }).catch(() => {});
     if (data === "promo") { pending.set(String(ctx.from?.id), { type: "promo" }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "promo_enter")); }
     if (data === "methods_show") { await ctx.answerCallbackQuery().catch(() => {}); return showMethods(ctx); }
     if (data === "gifts_show") { await ctx.answerCallbackQuery().catch(() => {}); return showGifts(ctx, true, false); }
     if (data === "support_show") { const { text, kb } = await supportView(lang); await sendOrEdit(ctx, text, { reply_markup: kb }); return ctx.answerCallbackQuery().catch(() => {}); }
     if (data === "lang_pick") { await ctx.answerCallbackQuery().catch(() => {}); return showLangPicker(ctx, true); }
-    if (data === "profile_show") { const { text, kb } = await profileView(user, directPayEnabled(ctx)); await sendOrEdit(ctx, text, { reply_markup: kb }); return ctx.answerCallbackQuery().catch(() => {}); }
+    if (data === "profile_show") { const { text, kb } = await profileView(user); await sendOrEdit(ctx, text, { reply_markup: kb }); return ctx.answerCallbackQuery().catch(() => {}); }
 
     const [tag, ...rest] = data.split(":");
     if (tag === "m") { const page = Number(rest[0]) || 0; const sort = (SORTS.includes(rest[1] as Sort) ? rest[1] : "all") as Sort; await ctx.answerCallbackQuery().catch(() => {}); return showMenu(ctx, page, sort, true); }
@@ -4830,8 +4716,11 @@ bot.on("callback_query:data", async (ctx) => {
     if (tag === "gi") return showGiftItem(ctx, Number(rest[0]));
     if (tag === "meth") return viewMethod(ctx, Number(rest[0]));
     if (tag === "mbuy") return buyMethod(ctx, Number(rest[0]));
-    if (tag === "top") { await ctx.answerCallbackQuery().catch(() => {}); const b = await buildTopupMethods(lang, Number(rest[0]), ctx); await sendOrEdit(ctx, b.text, { reply_markup: b.kb }); return; }
-    if (tag === "tpayme") return startPaymePayment(ctx, lang, Number(rest[0]));
+    // Balance top-ups are retired. Only the *_buy variants below survive: those
+    // pay for one specific purchase and fulfil it, they do not credit anything.
+    if (["top", "tpayme", "tstar", "tcheck", "tcard", "tman"].includes(tag)) {
+      return ctx.answerCallbackQuery({ text: t(lang, "topup_retired"), show_alert: true }).catch(() => {});
+    }
     if (tag === "tpayme_buy") return startPaymePayment(ctx, lang, Number(rest[0]), `buy:${rest[1]}:${rest[2]}${rest[3] ? `:${rest[3]}` : ""}`);
     if (tag === "tclick_buy") {
       // Click isn't integrated yet — show the button, but explain until approved.
@@ -4841,10 +4730,6 @@ bot.on("callback_query:data", async (ctx) => {
       // TODO(click): build the Click payment URL once merchant creds are set.
       return ctx.answerCallbackQuery({ text: "Click скоро.", show_alert: true }).catch(() => {});
     }
-    if (tag === "tstar") return starsInvoice(ctx, lang, Number(rest[0]));
-    if (tag === "tcheck") return startReceiptPayment(ctx, lang, Number(rest[0]));
-    if (tag === "tcard") return cardInvoice(ctx, lang, Number(rest[0]));
-    if (tag === "tman") { await ctx.answerCallbackQuery().catch(() => {}); return requestTopUp(ctx, lang, Number(rest[0]), "manual"); }
     // rest[3], when present, is the Stars/Premium recipient chosen before payment.
     if (tag === "tcheck_buy") return startReceiptPayment(ctx, lang, Number(rest[0]), `buy:${rest[1]}:${rest[2]}${rest[3] ? `:${rest[3]}` : ""}`);
     // rest[3] = username (may be empty), rest[4] = numeric recipient id. Built
@@ -5104,9 +4989,7 @@ bot.on("message:text", async (ctx) => {
     if (!Number.isFinite(n) || n < 1) return ctx.reply(t(lang, "enter_number"));
     return showQtyChooser(ctx, state.variantId, n, state.back, false);
   }
-  if (!Number.isFinite(n) || n < MIN_TOPUP) return ctx.reply(t(lang, "min_amount", { min: money(MIN_TOPUP, lang) }));
-  const b = await buildTopupMethods(lang, n, ctx);
-  return ctx.reply(b.text, { parse_mode: "HTML", reply_markup: b.kb });
+  return ctx.reply(t(lang, "topup_retired"));
 });
 
 // ---------- receipt photo (card payment verification) ----------
@@ -5241,7 +5124,7 @@ bot.on("chat_member", async (ctx) => {
   }
 
   // Returning user: open shop directly.
-  const menu = await buildMenu(lang, user.balance, 0, "all", user.id, false, directPayEnabled(ctx));
+  const menu = await buildMenu(lang, 0, "all", user.id, false);
   const banner = await shopBanner();
   if (banner) {
     const send = banner.isVideo
@@ -5746,7 +5629,6 @@ async function bootstrap() {
     ],
     onStart: async (me) => {
       buttonEmoji = await setting("button_emoji", "");
-      walletButtonEmoji = (await setting("wallet_button_emoji", "")).trim() || PREMIUM_EMOJI_WALLET;
       profileButtonEmoji = (await setting("profile_button_emoji", "")).trim() || PREMIUM_EMOJI_PROFILE;
       ordersButtonEmoji = (await setting("orders_button_emoji", "")).trim() || PREMIUM_EMOJI_ORDERS;
       backButtonEmoji = (await setting("back_button_emoji", "")).trim() || PREMIUM_EMOJI_BACK;
@@ -5757,7 +5639,6 @@ async function bootstrap() {
       await bot.api.setMyCommands([
         { command: "start", description: "🛍 Магазин / Menu" },
         { command: "shop", description: "🛍 Магазин" },
-        { command: "balance", description: "👛 Баланс" },
         { command: "freebies", description: "🎁 Акции" },
         { command: "orders", description: "🧾 Заказы" },
         { command: "profile", description: "👤 Профиль" },
