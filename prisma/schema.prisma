@@ -980,3 +980,14 @@ model SupplierPurchase {
   @@index([state])
   @@index([fragmentReqId])
 }
+
+// Tracks messages sent during a /promo broadcast so they can be deleted from all
+// user chats once the promo ends (or when stopped early by admin).
+model PromoBroadcastMessage {
+  id        Int      @id @default(autoincrement())
+  tgId      String
+  messageId Int
+  createdAt DateTime @default(now())
+
+  @@index([tgId])
+}

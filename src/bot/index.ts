@@ -4153,8 +4153,7 @@ function promoMessage(name: string, oldPrice: number, newPrice: number, hours: n
   return { text, kb };
 }
 
-bot.command("promo", async (ctx) => {
-  if (!isAdmin(ctx)) return;
+async function showPromoVariantPicker(ctx: Context) {
   const variants = await db.variant.findMany({
     where: { isActive: true, plan: { product: { isActive: true } } },
     include: { plan: { include: { product: true } } },
@@ -4164,6 +4163,41 @@ bot.command("promo", async (ctx) => {
   const kb = new InlineKeyboard();
   for (const v of variants) kb.text(`${v.plan.product.titleRu} — ${v.titleRu} (${money(v.priceUzs, "ru")})`, `promo_v:${v.id}`).row();
   await ctx.reply("🔥 Выберите товар для акции:", { reply_markup: kb }).catch(() => {});
+}
+
+bot.command("promo", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const raw = (await setting("promo_active", "")).trim();
+  if (raw) {
+    try {
+      const p = JSON.parse(raw) as { variantId: number; originalPrice: number; expiresAt: number };
+      if (Date.now() < p.expiresAt) {
+        const v = await db.variant.findUnique({
+          where: { id: p.variantId },
+          include: { plan: { include: { product: true } } },
+        });
+        const kb = new InlineKeyboard()
+          .text("🛑 Выключить акцию сейчас", "promo_stop").row()
+          .text("➕ Запустить другую акцию", "promo_new").row()
+          .text("❌ Закрыть", "promo_close");
+        const title = v ? `${v.plan.product.titleRu} — ${v.titleRu}` : `Товар #${p.variantId}`;
+        return ctx.reply(
+          `🔥 <b>Сейчас идёт акция!</b>\n\n` +
+          `📦 <b>Товар:</b> ${title}\n` +
+          `💰 <b>Цена со скидкой:</b> <s>${money(p.originalPrice, "ru")}</s> → <b>${money(v?.priceUzs ?? 0, "ru")}</b>\n` +
+          `⏱ <b>Осталось:</b> ${formatCountdown(p.expiresAt - Date.now())}\n\n` +
+          `Вы можете выключить акцию досрочно — цена вернётся на исходную, а сообщение с акцией автоматически удалится у всех пользователей.`,
+          { parse_mode: "HTML", reply_markup: kb },
+        ).catch(() => {});
+      }
+    } catch { /* malformed marker */ }
+  }
+  return showPromoVariantPicker(ctx);
+});
+
+bot.command("promostop", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  await stopPromo(true, String(ctx.from?.id));
 });
 
 async function sendPromoBroadcast(ctx: Context) {
@@ -4172,11 +4206,10 @@ async function sendPromoBroadcast(ctx: Context) {
   if (!draft) return ctx.answerCallbackQuery({ text: "Черновик не найден. Начните заново: /promo", show_alert: true }).catch(() => {});
   promoDraft.delete(key);
   await ctx.answerCallbackQuery().catch(() => {});
-  // Write the revert marker FIRST, and only then cut the price. The marker is
-  // the only thing that ever restores the original price, so doing it the other
-  // way round (and swallowing the failure, as this did) could discount a product
-  // permanently: the price was already live, the broadcast still went out, and
-  // nothing remembered what to put back.
+
+  // Clean up any previously stored promo broadcast message references before starting a new broadcast
+  await db.promoBroadcastMessage.deleteMany().catch(() => {});
+
   const payload = JSON.stringify({ variantId: draft.variantId, originalPrice: draft.originalPrice, expiresAt: Date.now() + draft.hours * 3600_000 });
   try {
     await db.setting.upsert({ where: { key: "promo_active" }, create: { key: "promo_active", valueRu: payload }, update: { valueRu: payload } });
@@ -4189,36 +4222,146 @@ async function sendPromoBroadcast(ctx: Context) {
     await ctx.editMessageText("❌ Не удалось запустить акцию — цена не изменена, рассылка отменена.").catch(() => {});
     return;
   }
-  await ctx.editMessageText(`✅ Акция запущена. Цена ${money(draft.price, "ru")} на ${draft.hours} ч, потом вернётся на ${money(draft.originalPrice, "ru")}.`).catch(() => {});
+  await ctx.editMessageText(
+    `✅ <b>Акция запущена!</b>\n\n` +
+    `💰 Цена: <b>${money(draft.price, "ru")}</b> (было ${money(draft.originalPrice, "ru")})\n` +
+    `⏱ Длительность: <b>${draft.hours} ч.</b>\n\n` +
+    `📢 Рассылаю пользователям… По окончании акции все сообщения будут автоматически удалены.`,
+    { parse_mode: "HTML" },
+  ).catch(() => {});
   const promoVariant = await db.variant.findUnique({ where: { id: draft.variantId } });
   const promoLeft = promoVariant ? await lowStockLeft(promoVariant, await availableStock(promoVariant)) : null;
+
   await broadcastInBackground(ctx, async (tgId) => {
     const { text, kb } = promoMessage(draft.name, draft.originalPrice, draft.price, draft.hours, draft.variantId, promoLeft);
-    await bot.api.sendMessage(tgId, text, { parse_mode: "HTML", reply_markup: kb });
+    const sent = await bot.api.sendMessage(tgId, text, { parse_mode: "HTML", reply_markup: kb });
+    if (sent?.message_id) {
+      await db.promoBroadcastMessage.create({
+        data: { tgId: String(tgId), messageId: sent.message_id },
+      }).catch(() => {});
+    }
   }, "Акция");
 }
 
-// Restore the promo price once the timer runs out (called on the delivery tick).
+let promoCleanupInProgress = false;
+
+function cleanupPromoMessages(notifyChatId?: string) {
+  if (promoCleanupInProgress) return;
+  promoCleanupInProgress = true;
+
+  (async () => {
+    try {
+      const messages = await db.promoBroadcastMessage.findMany();
+      if (!messages.length) return;
+
+      let deleted = 0;
+      let failed = 0;
+      const BATCH = 20;
+
+      for (let i = 0; i < messages.length; i += BATCH) {
+        const chunk = messages.slice(i, i + BATCH);
+        await Promise.all(
+          chunk.map(async (m) => {
+            try {
+              await bot.api.deleteMessage(m.tgId, m.messageId);
+              deleted++;
+            } catch {
+              failed++;
+            }
+          }),
+        );
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+
+      await db.promoBroadcastMessage.deleteMany().catch(() => {});
+
+      if (notifyChatId) {
+        await bot.api.sendMessage(
+          notifyChatId,
+          `✅ <b>Очистка промо-сообщений завершена!</b>\n\n` +
+          `🗑 Удалено сообщений: <b>${deleted}</b>` +
+          (failed > 0 ? `\n⚠️ Не требовалось удалять / недоступно: <b>${failed}</b>` : "") +
+          `\nВсего было в рассылке: <b>${messages.length}</b>`,
+          { parse_mode: "HTML" },
+        ).catch(() => {});
+      }
+    } catch (err) {
+      console.error("[bot] cleanupPromoMessages error:", (err as Error).message);
+    } finally {
+      promoCleanupInProgress = false;
+    }
+  })().catch(() => {
+    promoCleanupInProgress = false;
+  });
+}
+
+// Stop the active promo (either manually by admin or when timer expires).
+// Restores original price, clears marker, and deletes all sent promo messages.
+async function stopPromo(triggeredByAdmin = false, adminTgId?: string) {
+  const raw = (await setting("promo_active", "")).trim();
+  if (!raw) {
+    const orphanCount = await db.promoBroadcastMessage.count().catch(() => 0);
+    if (orphanCount > 0) {
+      cleanupPromoMessages(adminTgId || ADMIN_ID);
+      if (adminTgId) {
+        await bot.api.sendMessage(adminTgId, `🧹 Найдено ${orphanCount} старых промо-сообщений. Удаляю у пользователей…`).catch(() => {});
+      }
+      return;
+    }
+    if (triggeredByAdmin && adminTgId) {
+      await bot.api.sendMessage(adminTgId, "ℹ️ Сейчас нет активной акции.").catch(() => {});
+    }
+    return;
+  }
+
+  let p: { variantId: number; originalPrice: number; expiresAt: number } | null = null;
+  try {
+    p = JSON.parse(raw);
+  } catch {
+    await db.setting.update({ where: { key: "promo_active" }, data: { valueRu: "" } }).catch(() => {});
+    cleanupPromoMessages(adminTgId || ADMIN_ID);
+    return;
+  }
+
+  if (!p) return;
+
+  // Restore the price first and clear the marker only if that succeeded.
+  try {
+    await db.variant.update({ where: { id: p.variantId }, data: { priceUzs: p.originalPrice } });
+  } catch (e) {
+    console.error(`[bot] promo stop price restore failed, will retry: variant=${p.variantId} ${(e as Error).message}`);
+    return;
+  }
+
+  await db.setting.update({ where: { key: "promo_active" }, data: { valueRu: "" } }).catch(() => {});
+
+  const notifyChatId = adminTgId || ADMIN_ID;
+  const reasonText = triggeredByAdmin ? "🛑 <b>Акция выключена досрочно</b>" : "⏱ <b>Время акции истекло</b>";
+
+  if (notifyChatId) {
+    await bot.api.sendMessage(
+      notifyChatId,
+      `${reasonText}\n\n` +
+      `Цена товара возвращена на <b>${money(p.originalPrice, "ru")}</b>.\n` +
+      `🧹 Удаляю промо-сообщения у всех пользователей…`,
+      { parse_mode: "HTML" },
+    ).catch(() => {});
+  }
+
+  cleanupPromoMessages(notifyChatId);
+}
+
+// Restore the promo price and delete messages once the timer runs out (called on the delivery tick).
 async function checkPromoExpiry() {
   const raw = (await setting("promo_active", "")).trim();
   if (!raw) return;
   try {
     const p = JSON.parse(raw) as { variantId: number; originalPrice: number; expiresAt: number };
     if (Date.now() < p.expiresAt) return;
-    // Restore the price first and clear the marker only if that succeeded.
-    // Swallowing a failed restore and clearing anyway (as this did) left the
-    // product discounted forever with nothing left to remember the old price.
-    // Leaving the marker in place instead just means the next tick retries.
-    try {
-      await db.variant.update({ where: { id: p.variantId }, data: { priceUzs: p.originalPrice } });
-    } catch (e) {
-      console.error(`[bot] promo expiry restore failed, will retry: variant=${p.variantId} ${(e as Error).message}`);
-      return;
-    }
-    await db.setting.update({ where: { key: "promo_active" }, data: { valueRu: "" } }).catch(() => {});
-    if (ADMIN_ID) await bot.api.sendMessage(ADMIN_ID, `⏱ Акция завершена — цена возвращена на ${money(p.originalPrice, "ru")}.`).catch(() => {});
+    await stopPromo(false);
   } catch { /* malformed marker — ignore */ }
 }
+
 
 // ---------- review request to buyers only ----------
 // One-off broadcast of the review ask, targeted to users who have at least one
@@ -4791,6 +4934,21 @@ bot.on("callback_query:data", async (ctx) => {
       promoDraft.delete(String(ctx.from?.id));
       await ctx.answerCallbackQuery({ text: "Отменено" }).catch(() => {});
       return ctx.editMessageText("❌ Акция отменена.").catch(() => {});
+    }
+    if (tag === "promo_stop") {
+      if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {});
+      await ctx.answerCallbackQuery({ text: "Выключаю акцию..." }).catch(() => {});
+      await ctx.editMessageText("🛑 Выключаю акцию и запускаю удаление сообщений…").catch(() => {});
+      return stopPromo(true, String(ctx.from?.id));
+    }
+    if (tag === "promo_new") {
+      if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {});
+      await ctx.answerCallbackQuery().catch(() => {});
+      return showPromoVariantPicker(ctx);
+    }
+    if (tag === "promo_close") {
+      await ctx.answerCallbackQuery().catch(() => {});
+      return ctx.deleteMessage().catch(() => {});
     }
     if (tag === "askrev_send") { if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {}); return sendReviewToBuyers(ctx); }
     if (tag === "askrev_cancel") { await ctx.answerCallbackQuery({ text: "Отменено" }).catch(() => {}); return ctx.editMessageText("❌ Отменено.").catch(() => {}); }
@@ -5467,6 +5625,14 @@ async function ensureSchema() {
     `CREATE UNIQUE INDEX IF NOT EXISTS "SupplierPurchase_orderId_supplier_key" ON "SupplierPurchase"("orderId", "supplier")`,
     `CREATE INDEX IF NOT EXISTS "SupplierPurchase_state_idx" ON "SupplierPurchase"("state")`,
     `CREATE INDEX IF NOT EXISTS "SupplierPurchase_fragmentReqId_idx" ON "SupplierPurchase"("fragmentReqId")`,
+    `CREATE TABLE IF NOT EXISTS "PromoBroadcastMessage" (
+      "id" SERIAL NOT NULL,
+      "tgId" TEXT NOT NULL,
+      "messageId" INTEGER NOT NULL,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "PromoBroadcastMessage_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE INDEX IF NOT EXISTS "PromoBroadcastMessage_tgId_idx" ON "PromoBroadcastMessage"("tgId")`,
   ];
   for (const sql of statements) {
     try {
