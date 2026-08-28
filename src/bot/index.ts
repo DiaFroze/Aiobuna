@@ -315,22 +315,24 @@ const clamp = (n: number, lo: number, hi: number) => Math.min(Math.max(lo, n), h
 
 // Partially hide a buyer's identity for the public sales feed: keep the first
 // and last visible chars, mask the middle. "Jahongir" → "Ja••••••ir".
+// Uses Array.from to safely handle multi-byte Unicode emojis without splitting
+// surrogate pairs, which would cause Telegram UTF-8 400 errors.
 function maskName(s: string): string {
-  const v = (s ?? "").trim();
-  if (!v) return "•••";
-  if (v.length <= 2) return v[0] + "•";
-  if (v.length <= 4) return v[0] + "••" + v.slice(-1);
-  const keep = Math.min(2, v.length - 2);
-  return v.slice(0, keep) + "•".repeat(Math.max(3, v.length - keep - 1)) + v.slice(-1);
+  const chars = Array.from((s ?? "").trim());
+  if (!chars.length) return "•••";
+  if (chars.length <= 2) return chars[0] + "•";
+  if (chars.length <= 4) return chars[0] + "••" + chars[chars.length - 1];
+  const keep = Math.min(2, chars.length - 2);
+  return chars.slice(0, keep).join("") + "•".repeat(Math.max(3, chars.length - keep - 1)) + chars[chars.length - 1];
 }
 
 // Same idea for the numeric id: enough for the buyer to recognise their own
 // purchase in the feed, not enough for anyone else to look them up.
 // "7141343261" → "714•••••61".
 function maskId(s: string): string {
-  const v = (s ?? "").trim();
-  if (v.length <= 4) return "•".repeat(Math.max(3, v.length));
-  return v.slice(0, 3) + "•".repeat(Math.max(3, v.length - 5)) + v.slice(-2);
+  const chars = Array.from((s ?? "").trim());
+  if (chars.length <= 4) return "•".repeat(Math.max(3, chars.length));
+  return chars.slice(0, 3).join("") + "•".repeat(Math.max(3, chars.length - 5)) + chars.slice(-2).join("");
 }
 
 // Per-user custom prices. Returns Map<variantId, { priceUzs, label }> for the
@@ -2820,7 +2822,7 @@ const isUserAction = (ctx: Context) => Boolean(ctx.message || ctx.callbackQuery)
 // Why a brand-new user opened the bot, carried across the language/terms
 // onboarding so the final screen matches the link they clicked. In memory only:
 // losing it on a restart just means they land in the shop instead of gifts.
-const pendingIntent = new Map<string, "gifts">();
+const pendingIntent = new Map<string, string>();
 
 // ---------- private chat only ----------
 // The bot is a member of the public sales-feed group, and every handler below
@@ -3002,16 +3004,27 @@ bot.command("start", async (ctx) => {
     await markChannelVerified(tgId);
   }
 
-  // Deep link from the channel promo post: t.me/<bot>?start=gifts opens the
-  // gifts tab directly instead of the general catalogue.
+  // Deep links:
+  // - start=gifts → opens gifts
+  // - start=buy_<variantId> → opens buy card for specific discounted variant
+  // - start=p_<productId> → opens specific product
+  // - start=promo → opens shop with flash sale
   if (!existing) {
     // A first-time visitor still has to pick a language and accept the terms.
-    // Remember why they came so the last onboarding step lands on gifts rather
-    // than dropping them in the shop, which is what the post promised.
-    if (payload === "gifts") pendingIntent.set(tgId, "gifts");
+    // Remember why they came so the last onboarding step lands on their intent.
+    if (payload) pendingIntent.set(tgId, payload);
     return showLangPicker(ctx, false);
   }
   if (payload === "gifts") return showGifts(ctx, false);
+  if (payload.startsWith("buy_")) {
+    const vid = Number(payload.slice(4));
+    if (vid > 0) return showQtyChooser(ctx, vid, 1, "0:all", false);
+  }
+  if (payload.startsWith("p_")) {
+    const pid = Number(payload.slice(2));
+    if (pid > 0) return showProduct(ctx, pid, "0:all");
+  }
+  if (payload === "promo") return showMenu(ctx, 0, "all", false);
   await enterShop(ctx, user);
 });
 bot.command("menu", (ctx) => showMenu(ctx, 0, "all", false));
@@ -4132,8 +4145,47 @@ bot.command("health", async (ctx) => {
 // Temporarily drops a variant's price, blasts an Uzbek offer with a one-tap buy
 // button, and auto-restores the price after N hours (checkPromoExpiry, on the
 // delivery interval). The buy button is `bc:` — straight to the pay screen.
-type PromoDraft = { variantId: number; name: string; originalPrice: number; price: number; hours: number };
+type PromoDraft = {
+  variantId: number;
+  name: string;
+  originalPrice: number;
+  price: number;
+  hours: number;
+  sendBroadcast: boolean;
+  publishChannel: boolean;
+};
 const promoDraft = new Map<string, PromoDraft>();
+
+async function getPromoChannel(): Promise<string> {
+  const custom = (await setting("promo_post_channel", "")).trim();
+  if (custom) return custom;
+  const req = await db.requiredChannel.findFirst({ where: { isActive: true } });
+  return req?.chatId?.trim() ?? "";
+}
+
+async function buildPromoSetupView(draft: PromoDraft) {
+  const pct = draft.originalPrice > draft.price ? Math.round(((draft.originalPrice - draft.price) / draft.originalPrice) * 100) : 0;
+  const channel = await getPromoChannel();
+  const channelDisplay = channel ? channel : "— не задан —";
+
+  const text =
+    `⚙️ <b>Настройка параметров акции</b>\n\n` +
+    `📦 <b>Товар:</b> ${esc(draft.name)}\n` +
+    `💰 <b>Цена со скидкой:</b> <s>${money(draft.originalPrice, "ru")}</s> → <b>${money(draft.price, "ru")}</b> (−${pct}%)\n` +
+    `⏱ <b>Длительность:</b> <b>${draft.hours} ч.</b>\n\n` +
+    `<b>Параметры отправки:</b>\n` +
+    `• 📢 <b>Пост в канал:</b> ${draft.publishChannel ? `✅ <b>ВКЛ</b> (<code>${esc(channelDisplay)}</code>)` : "❌ <b>ВЫКЛ</b>"}\n` +
+    `• 👥 <b>Рассылка всем в ЛС:</b> ${draft.sendBroadcast ? "✅ <b>ВКЛ</b> (каждый получит в ЛС)" : "❌ <b>ВЫКЛ</b> (только скидка в магазине)"}\n\n` +
+    `<i>Нажимайте кнопки ниже, чтобы включить/выключить отправку:</i>`;
+
+  const kb = new InlineKeyboard()
+    .text(`📢 Канал: ${draft.publishChannel ? "✅ ВКЛ" : "❌ ВЫКЛ"}`, "promo_tgl_chan").row()
+    .text(`👥 Рассылка в ЛС: ${draft.sendBroadcast ? "✅ ВКЛ" : "❌ ВЫКЛ"}`, "promo_tgl_bc").row()
+    .text("🚀 Запустить акцию", "promo_send").row()
+    .text("❌ Отмена", "promo_cancel");
+
+  return { text, kb };
+}
 
 // `left` is the real remaining stock, or null when there is plenty (or when the
 // item is bought on demand and has no warehouse at all). It is measured once
@@ -4186,7 +4238,7 @@ bot.command("promo", async (ctx) => {
           `📦 <b>Товар:</b> ${title}\n` +
           `💰 <b>Цена со скидкой:</b> <s>${money(p.originalPrice, "ru")}</s> → <b>${money(v?.priceUzs ?? 0, "ru")}</b>\n` +
           `⏱ <b>Осталось:</b> ${formatCountdown(p.expiresAt - Date.now())}\n\n` +
-          `Вы можете выключить акцию досрочно — цена вернётся на исходную, а сообщение с акцией автоматически удалится у всех пользователей.`,
+          `Вы можете выключить акцию досрочно — цена вернётся на исходную, а сообщение с акцией автоматически удалится у всех пользователей и из канала.`,
           { parse_mode: "HTML", reply_markup: kb },
         ).catch(() => {});
       }
@@ -4219,28 +4271,78 @@ async function sendPromoBroadcast(ctx: Context) {
     // Best effort: put the price back, so a half-applied promo can't linger.
     await db.variant.update({ where: { id: draft.variantId }, data: { priceUzs: draft.originalPrice } }).catch(() => {});
     await db.setting.update({ where: { key: "promo_active" }, data: { valueRu: "" } }).catch(() => {});
-    await ctx.editMessageText("❌ Не удалось запустить акцию — цена не изменена, рассылка отменена.").catch(() => {});
+    await ctx.editMessageText("❌ Не удалось запустить акцию — цена не изменена, запуск отменен.").catch(() => {});
     return;
   }
-  await ctx.editMessageText(
-    `✅ <b>Акция запущена!</b>\n\n` +
-    `💰 Цена: <b>${money(draft.price, "ru")}</b> (было ${money(draft.originalPrice, "ru")})\n` +
-    `⏱ Длительность: <b>${draft.hours} ч.</b>\n\n` +
-    `📢 Рассылаю пользователям… По окончании акции все сообщения будут автоматически удалены.`,
-    { parse_mode: "HTML" },
-  ).catch(() => {});
+
   const promoVariant = await db.variant.findUnique({ where: { id: draft.variantId } });
   const promoLeft = promoVariant ? await lowStockLeft(promoVariant, await availableStock(promoVariant)) : null;
+  const pct = draft.originalPrice > draft.price ? Math.round(((draft.originalPrice - draft.price) / draft.originalPrice) * 100) : 0;
 
-  await broadcastInBackground(ctx, async (tgId) => {
-    const { text, kb } = promoMessage(draft.name, draft.originalPrice, draft.price, draft.hours, draft.variantId, promoLeft);
-    const sent = await bot.api.sendMessage(tgId, text, { parse_mode: "HTML", reply_markup: kb });
-    if (sent?.message_id) {
-      await db.promoBroadcastMessage.create({
-        data: { tgId: String(tgId), messageId: sent.message_id },
-      }).catch(() => {});
+  let channelSentOk = false;
+  let channelError = "";
+
+  // 1. Publish to Telegram Channel if enabled
+  if (draft.publishChannel) {
+    const channel = await getPromoChannel();
+    if (channel) {
+      try {
+        const botUsername = ctx.me?.username || (await bot.api.getMe()).username;
+        const channelKb = new InlineKeyboard().url(`🛒 Ulgurib qoling −${pct}%`, `https://t.me/${botUsername}?start=buy_${draft.variantId}`);
+        const { text: chText } = promoMessage(draft.name, draft.originalPrice, draft.price, draft.hours, draft.variantId, promoLeft);
+        const sent = await bot.api.sendMessage(channel, chText, {
+          parse_mode: "HTML",
+          reply_markup: channelKb,
+          link_preview_options: { is_disabled: true },
+        });
+        if (sent?.message_id) {
+          await db.promoBroadcastMessage.create({
+            data: { tgId: String(channel), messageId: sent.message_id },
+          }).catch(() => {});
+          channelSentOk = true;
+        }
+      } catch (err) {
+        channelError = (err as Error).message;
+        console.error("[bot] failed to post promo to channel:", channelError);
+      }
     }
-  }, "Акция");
+  }
+
+  // 2. Broadcast in DMs to all users if enabled
+  if (draft.sendBroadcast) {
+    await ctx.editMessageText(
+      `✅ <b>Акция запущена!</b>\n\n` +
+      `💰 Цена: <b>${money(draft.price, "ru")}</b> (было ${money(draft.originalPrice, "ru")})\n` +
+      `⏱ Длительность: <b>${draft.hours} ч.</b>\n` +
+      (draft.publishChannel ? (channelSentOk ? `📢 Пост в канал отправлен.\n` : `⚠️ Ошибка отправки в канал: <code>${esc(channelError.slice(0, 100))}</code>\n`) : "") +
+      `\n👥 Рассылаю пользователям… По окончании акции все сообщения будут автоматически удалены.`,
+      { parse_mode: "HTML" },
+    ).catch(() => {});
+
+    await broadcastInBackground(ctx, async (tgId) => {
+      const { text, kb } = promoMessage(draft.name, draft.originalPrice, draft.price, draft.hours, draft.variantId, promoLeft);
+      const sent = await bot.api.sendMessage(tgId, text, { parse_mode: "HTML", reply_markup: kb });
+      if (sent?.message_id) {
+        await db.promoBroadcastMessage.create({
+          data: { tgId: String(tgId), messageId: sent.message_id },
+        }).catch(() => {});
+      }
+    }, "Акция");
+  } else {
+    // Silent promo (discount in catalog only + optional channel post)
+    await ctx.editMessageText(
+      `✅ <b>Акция запущена без рассылки в ЛС!</b>\n\n` +
+      `💰 Скидка активирована в магазине: <b>${money(draft.price, "ru")}</b> (было ${money(draft.originalPrice, "ru")})\n` +
+      `⏱ Длительность: <b>${draft.hours} ч.</b>\n` +
+      (draft.publishChannel
+        ? (channelSentOk
+            ? `📢 <b>Пост опубликован в канал</b> (будет автоматически удалён по окончании).\n`
+            : `⚠️ Не удалось отправить в канал: <code>${esc(channelError.slice(0, 100))}</code>\n`)
+        : `📢 Пост в канал: выключен.\n`) +
+      `\n🛍 Пользователи увидят скидку при открытии магазина. По окончании акции цена вернётся автоматически.`,
+      { parse_mode: "HTML" },
+    ).catch(() => {});
+  }
 }
 
 let promoCleanupInProgress = false;
@@ -4819,10 +4921,21 @@ bot.on("callback_query:data", async (ctx) => {
       await ctx.answerCallbackQuery({ text: t(user.lang, "terms_accepted_toast") }).catch(() => {});
       await ctx.editMessageReplyMarkup().catch(() => {});
       await sendHome(ctx, user);
-      // Onboarding is done — deliver what the channel post actually promised.
-      if (pendingIntent.get(user.tgId) === "gifts") {
+      // Onboarding is done — deliver what the deep link promised.
+      const intent = pendingIntent.get(user.tgId);
+      if (intent) {
         pendingIntent.delete(user.tgId);
-        await showGifts(ctx, false).catch(() => {});
+        if (intent === "gifts") {
+          await showGifts(ctx, false).catch(() => {});
+        } else if (intent.startsWith("buy_")) {
+          const vid = Number(intent.slice(4));
+          if (vid > 0) await showQtyChooser(ctx, vid, 1, "0:all", false).catch(() => {});
+        } else if (intent.startsWith("p_")) {
+          const pid = Number(intent.slice(2));
+          if (pid > 0) await showProduct(ctx, pid, "0:all").catch(() => {});
+        } else if (intent === "promo") {
+          await showMenu(ctx, 0, "all", false).catch(() => {});
+        }
       }
       return;
     }
@@ -4935,6 +5048,35 @@ bot.on("callback_query:data", async (ctx) => {
       await ctx.answerCallbackQuery({ text: "Отменено" }).catch(() => {});
       return ctx.editMessageText("❌ Акция отменена.").catch(() => {});
     }
+    if (tag === "promo_tgl_chan") {
+      if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {});
+      const key = String(ctx.from?.id);
+      const draft = promoDraft.get(key);
+      if (!draft) return ctx.answerCallbackQuery({ text: "Черновик не найден. Начните заново: /promo", show_alert: true }).catch(() => {});
+      const channel = await getPromoChannel();
+      if (!draft.publishChannel && !channel) {
+        return ctx.answerCallbackQuery({
+          text: "Канал не задан! Укажите его командой: /promopost channel @имя_канала",
+          show_alert: true,
+        }).catch(() => {});
+      }
+      draft.publishChannel = !draft.publishChannel;
+      promoDraft.set(key, draft);
+      await ctx.answerCallbackQuery().catch(() => {});
+      const setup = await buildPromoSetupView(draft);
+      return ctx.editMessageText(setup.text, { parse_mode: "HTML", reply_markup: setup.kb }).catch(() => {});
+    }
+    if (tag === "promo_tgl_bc") {
+      if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {});
+      const key = String(ctx.from?.id);
+      const draft = promoDraft.get(key);
+      if (!draft) return ctx.answerCallbackQuery({ text: "Черновик не найден. Начните заново: /promo", show_alert: true }).catch(() => {});
+      draft.sendBroadcast = !draft.sendBroadcast;
+      promoDraft.set(key, draft);
+      await ctx.answerCallbackQuery().catch(() => {});
+      const setup = await buildPromoSetupView(draft);
+      return ctx.editMessageText(setup.text, { parse_mode: "HTML", reply_markup: setup.kb }).catch(() => {});
+    }
     if (tag === "promo_stop") {
       if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {});
       await ctx.answerCallbackQuery({ text: "Выключаю акцию..." }).catch(() => {});
@@ -5028,13 +5170,25 @@ bot.on("message:text", async (ctx) => {
     const v = await db.variant.findUnique({ where: { id: state.variantId }, include: { plan: { include: { product: true } } } });
     if (!v) return ctx.reply("❌ Товар не найден.");
     const name = v.plan.product.titleUz || v.plan.product.titleRu;
-    promoDraft.set(key, { variantId: v.id, name, originalPrice: v.priceUzs, price, hours });
+    const defaultChannel = await getPromoChannel();
+    const draft: PromoDraft = {
+      variantId: v.id,
+      name,
+      originalPrice: v.priceUzs,
+      price,
+      hours,
+      sendBroadcast: true,
+      publishChannel: Boolean(defaultChannel),
+    };
+    promoDraft.set(key, draft);
+
     const promoLeft = await lowStockLeft(v, await availableStock(v));
     const { text, kb: msgKb } = promoMessage(name, v.priceUzs, price, hours, v.id, promoLeft);
-    await ctx.reply("👇 Так увидят пользователи (на узбекском):").catch(() => {});
+    await ctx.reply("👇 Так будет выглядеть текст предложения (на узбекском):").catch(() => {});
     await ctx.reply(text, { parse_mode: "HTML", reply_markup: msgKb }).catch(() => {});
-    const ctrlKb = new InlineKeyboard().text("✅ Отправить всем", "promo_send").row().text("❌ Отмена", "promo_cancel");
-    return ctx.reply(`Цена станет <b>${money(price, "ru")}</b> на <b>${hours} ч</b> (потом вернётся на ${money(v.priceUzs, "ru")}). Отправить всем?`, { parse_mode: "HTML", reply_markup: ctrlKb });
+
+    const setup = await buildPromoSetupView(draft);
+    return ctx.reply(setup.text, { parse_mode: "HTML", reply_markup: setup.kb });
   }
 
   if (state.type === "reject_custom_reason") {
