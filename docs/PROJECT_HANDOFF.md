@@ -114,7 +114,7 @@ CapCut, Telegram Stars, Telegram Premium и т.п.) для рынка Узбек
   - Prepare: `md5(click_trans_id + service_id + KEY + merchant_trans_id + amount + action + sign_time)`
   - Complete: + `merchant_prepare_id` после `merchant_trans_id`.
 - Коды: 0 ок, −1 подпись, −2 сумма, −4 уже оплачено, −5 заказ не найден, −6 txn не найдена, −9 отмена.
-- Env: `CLICK_ENABLED=1`, `CLICK_SERVICE_ID` (110470 — сервис «AI OBUNA SAVDO»),
+- Env: `CLICK_ENABLED=1`, `CLICK_SERVICE_ID` (ID сервиса из кабинета Click),
   `CLICK_MERCHANT_ID`, `CLICK_SECRET_KEY` (секрет).
 - **Осталось на стороне владельца:** в кабинете merchant.click.uz прописать
   callback-адрес `https://aiobuna-production.up.railway.app/api/click` в ОБА поля

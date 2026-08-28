@@ -13,7 +13,7 @@
 
 | Переменная | Значение |
 |---|---|
-| `SOMADETH_API_URL` | origin без пути, напр. `http://15.235.133.206:55033` |
+| `SOMADETH_API_URL` | origin без пути, напр. `http://api.supplier.example.com:55033` |
 | `SOMADETH_API_KEY` | ключ `sk_live_…` из Telegram-бота поставщика |
 
 Код читает имя переменной терпимо к регистру — подойдёт и `SoMaDeth_API_URL` /

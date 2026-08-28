@@ -8,10 +8,10 @@ import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
-const ADMIN_CHAT_ID = "7797972248";
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN!;
+const ADMIN_CHAT_ID = process.env.TELEGRAM_ADMIN_CHAT_ID || "";
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 
-const USERNAMES = ["wasd006", "KhayrulloyevAzizbek", "evgeniy1009", "Kamolbek_uz"];
+const USERNAMES = process.argv.slice(2);
 
 async function sendTg(text: string) {
   await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
