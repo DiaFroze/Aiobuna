@@ -1,8 +1,9 @@
-# Vex Reseller API — обнаруженный контракт (реализован в `vex-adapter.ts`)
+# Vexoran Reseller API (ранее Vex)
 
-Base URL: `https://<project>.supabase.co/functions/v1/reseller-api`
-Auth: `Authorization: Bearer <vex_sk_...>` (ключ хранится зашифрованным в БД).
-Действия — через query-параметр `?action=`.
+- **Official Base URL:** `https://api.vexoran.app` (старый `supabase.co/...` также поддерживается).
+- **Документация и тест-консоль:** `https://docs.vexoran.app`
+- **Auth:** `Authorization: Bearer <vex_sk_...>`
+- **Действия:** через query-параметр `?action=` (`products`, `balance`, `order`, `stock`, `orders`).
 
 | Action | Метод | Параметры | Ответ (сокр.) | Статус |
 | --- | --- | --- | --- | --- |
@@ -10,13 +11,13 @@ Auth: `Authorization: Bearer <vex_sk_...>` (ключ хранится зашиф
 | `stock` | GET | `product_id` | `{ ...product, quantity }` | ✅ (используем `products`) |
 | `balance` | GET | — | `{ balance: <number> }` | ✅ реализовано |
 | `orders` | GET | `limit`, `offset` | `{ orders: [], limit, offset }` | ✅ (история) |
-| `order` | POST | `{ product_id, quantity }` | заказ (списывает баланс) | ⚠️ маппинг выдачи защитный, требует проверки на 1-м реальном заказе |
+| `order` | POST | `{ product_id, quantity }` | заказ (списывает баланс) | ⚠️ авто-выдача |
 
 ## Поля товара (`products[]`)
 
 `id, name, description, delivery_instructions, price, base_price, custom_price,
-category, stock, available, manual_delivery, requires_stock`, плюс блок скидок
-(`offer, flash_sale, campaign, bulk_discounts, price_locked, discount_ends_at`).
+category, stock, available, manual_delivery, requires_stock, warranty_type ("none"|"full")`,
+плюс блок скидок (`offer, flash_sale, campaign, bulk_discounts, price_locked, discount_ends_at`).
 
 Маппинг в `SupplierProductDTO`:
 

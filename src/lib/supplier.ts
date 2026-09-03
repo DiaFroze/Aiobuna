@@ -21,6 +21,7 @@ export interface SupplierProduct {
   manualDelivery: boolean;
   descriptionClean: string;
   premiumEmojiCode: string | null;
+  warrantyType?: "none" | "full" | string | null;
 }
 
 export interface SupplierOrderResult {
@@ -121,6 +122,7 @@ export async function sourceProducts(src: Source): Promise<SupplierProduct[]> {
       manualDelivery: Boolean(p.manual_delivery),
       descriptionClean: replaceCeTokensForPublic(p.description),
       premiumEmojiCode: primaryCeCode(p.description)?.code ?? null,
+      warrantyType: p.warranty_type ?? null,
     }))
     .filter((p) => p.id && p.name);
 }

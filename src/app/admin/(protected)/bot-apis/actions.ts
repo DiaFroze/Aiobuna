@@ -45,6 +45,16 @@ export async function saveApiSourceAction(formData: FormData) {
   revalidatePath("/admin/bot-import");
 }
 
+export async function toggleApiSourceAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
+  const id = Number(formData.get("id"));
+  const active = formData.get("active") === "1";
+  await botDb.apiSource.update({ where: { id }, data: { isActive: active } });
+  await audit({ adminId: admin.id, action: "bot.apisource.toggle", entityType: "ApiSource", entityId: String(id) });
+  revalidatePath("/admin/bot-apis");
+  revalidatePath("/admin/bot-import");
+}
+
 export async function deleteApiSourceAction(formData: FormData) {
   const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
   const id = Number(formData.get("id"));

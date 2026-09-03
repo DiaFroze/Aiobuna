@@ -1,6 +1,6 @@
 import { botDb, botConfigured } from "@/lib/botDb";
 import { PageHeader, EmptyState } from "@/components/admin/ui";
-import { saveApiSourceAction, deleteApiSourceAction } from "./actions";
+import { saveApiSourceAction, deleteApiSourceAction, toggleApiSourceAction } from "./actions";
 
 export const dynamic = "force-dynamic";
 
@@ -16,11 +16,11 @@ export default async function BotApisPage() {
     );
   }
 
-  // Auto-provision the built-in Vex source from .env on first visit.
+  // Auto-provision the built-in Vexoran source from .env on first visit.
   const hasVex = await botDb.apiSource.findUnique({ where: { slug: "vex" } });
   if (!hasVex && process.env.VEX_API_URL && process.env.VEX_API_KEY) {
     await botDb.apiSource.create({
-      data: { slug: "vex", name: "Vex Reseller", baseUrl: process.env.VEX_API_URL, apiKey: process.env.VEX_API_KEY, format: "vex", isActive: true },
+      data: { slug: "vex", name: "Vexoran Reseller", baseUrl: process.env.VEX_API_URL, apiKey: process.env.VEX_API_KEY, format: "vex", isActive: true },
     });
   }
 
@@ -29,53 +29,45 @@ export default async function BotApisPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="API-источники"
-        subtitle="Поставщики товаров через API. Добавляйте новые источники — импорт и автовыдача работают с любым из них."
+        title="API-источники товаров"
+        subtitle="Подключение внешних поставщиков для авто-выдачи и импорта товаров (Vexoran, SoMaDeth и др.)."
       />
 
-      <div className="card p-3 text-sm text-muted">
-        Формат <code>vex</code> — контракт как у Vex (<code>?action=products/balance/order</code>, ключ в заголовке
-        <code> Authorization: Bearer</code>). Если ваш новый API устроен иначе — пришлите его документацию, добавлю формат.
-      </div>
-
-      {sources.map((s) => (
-        <form key={s.id} action={saveApiSourceAction} className="card p-5 space-y-3">
-          <input type="hidden" name="id" value={s.id} />
-          <div className="flex items-center justify-between gap-3">
-            <div className="font-semibold">
-              {s.name} <span className="font-mono text-xs text-muted">({s.slug})</span>
+      {/* Existing sources */}
+      {sources.length > 0 && (
+        <div className="space-y-3">
+          {sources.map((s) => (
+            <div key={s.id} className="card p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold text-foreground">{s.name}</span>
+                  <span className="badge font-mono text-xs">{s.slug}</span>
+                  <span className="badge font-mono text-xs">формат: {s.format}</span>
+                  {s.isActive ? (
+                    <span className="badge badge-success">активен</span>
+                  ) : (
+                    <span className="badge badge-warning">отключён</span>
+                  )}
+                </div>
+                <div className="text-xs text-muted font-mono mt-1 break-all">{s.baseUrl}</div>
+              </div>
+              <div className="flex items-center gap-2">
+                <form action={toggleApiSourceAction}>
+                  <input type="hidden" name="id" value={s.id} />
+                  <input type="hidden" name="active" value={s.isActive ? "0" : "1"} />
+                  <button className="btn-secondary text-xs">
+                    {s.isActive ? "Отключить" : "Включить"}
+                  </button>
+                </form>
+                <form action={deleteApiSourceAction}>
+                  <input type="hidden" name="id" value={s.id} />
+                  <button className="btn-danger text-xs">Удалить</button>
+                </form>
+              </div>
             </div>
-            <span className={`badge ${s.isActive ? "bg-success/10 text-success" : "bg-danger/10 text-danger"}`}>
-              {s.isActive ? "активен" : "выключен"}
-            </span>
-          </div>
-          <div className="grid md:grid-cols-2 gap-3">
-            <div>
-              <label className="text-sm text-muted">Название</label>
-              <input name="name" defaultValue={s.name} className="input mt-1" />
-            </div>
-            <div>
-              <label className="text-sm text-muted">Формат</label>
-              <input name="format" defaultValue={s.format} className="input mt-1" placeholder="vex" />
-            </div>
-          </div>
-          <div>
-            <label className="text-sm text-muted">Base URL</label>
-            <input name="baseUrl" defaultValue={s.baseUrl} className="input mt-1 font-mono text-xs" />
-          </div>
-          <div>
-            <label className="text-sm text-muted">API ключ (сейчас: {mask(s.apiKey)}) — впишите новый, чтобы заменить</label>
-            <input name="apiKey" className="input mt-1 font-mono text-xs" placeholder="оставьте пустым, чтобы не менять" />
-          </div>
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" name="isActive" defaultChecked={s.isActive} /> Активен
-          </label>
-          <div className="flex gap-2">
-            <button className="btn-primary text-sm">Сохранить</button>
-            <button formAction={deleteApiSourceAction} className="btn-danger text-sm">Удалить</button>
-          </div>
-        </form>
-      ))}
+          ))}
+        </div>
+      )}
 
       {/* Add a new source */}
       <details className="card p-5">
@@ -84,7 +76,7 @@ export default async function BotApisPage() {
           <div className="grid md:grid-cols-2 gap-3">
             <div>
               <label className="text-sm text-muted">Название</label>
-              <input name="name" required className="input mt-1" placeholder="напр. Reseller X" />
+              <input name="name" required className="input mt-1" placeholder="напр. Vexoran Reseller" />
             </div>
             <div>
               <label className="text-sm text-muted">Формат</label>
@@ -93,7 +85,7 @@ export default async function BotApisPage() {
           </div>
           <div>
             <label className="text-sm text-muted">Base URL</label>
-            <input name="baseUrl" required className="input mt-1 font-mono text-xs" placeholder="https://.../reseller-api" />
+            <input name="baseUrl" required className="input mt-1 font-mono text-xs" placeholder="https://api.vexoran.app" />
           </div>
           <div>
             <label className="text-sm text-muted">API ключ</label>
