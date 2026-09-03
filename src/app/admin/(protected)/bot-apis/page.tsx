@@ -1,6 +1,6 @@
 import { botDb, botConfigured } from "@/lib/botDb";
 import { PageHeader, EmptyState } from "@/components/admin/ui";
-import { saveApiSourceAction, deleteApiSourceAction, toggleApiSourceAction } from "./actions";
+import { saveApiSourceAction, deleteApiSourceAction, toggleApiSourceAction, migrateSourceAction } from "./actions";
 
 export const dynamic = "force-dynamic";
 
@@ -26,52 +26,124 @@ export default async function BotApisPage() {
 
   const sources = await botDb.apiSource.findMany({ orderBy: { id: "asc" } });
 
+  // Count linked variants per slug for migration display
+  const variantCounts = await botDb.variant.groupBy({
+    by: ["supplierKey"],
+    where: { supplierKey: { not: null } },
+    _count: { supplierKey: true },
+  });
+  const countBySlug: Record<string, number> = {};
+  for (const row of variantCounts) {
+    if (row.supplierKey) countBySlug[row.supplierKey] = row._count.supplierKey;
+  }
+
   return (
     <div className="space-y-6">
       <PageHeader
         title="API-источники товаров"
-        subtitle="Подключение внешних поставщиков для авто-выдачи и импорта товаров (Vexoran, SoMaDeth и др.)."
+        subtitle="Управление поставщиками. Обновите ключ прямо здесь — все товары продолжат работать автоматически."
       />
 
-      {/* Existing sources */}
-      {sources.length > 0 && (
-        <div className="space-y-3">
-          {sources.map((s) => (
-            <div key={s.id} className="card p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="font-semibold text-foreground">{s.name}</span>
-                  <span className="badge font-mono text-xs">{s.slug}</span>
-                  <span className="badge font-mono text-xs">формат: {s.format}</span>
-                  {s.isActive ? (
-                    <span className="badge badge-success">активен</span>
-                  ) : (
-                    <span className="badge badge-warning">отключён</span>
-                  )}
-                </div>
-                <div className="text-xs text-muted font-mono mt-1 break-all">{s.baseUrl}</div>
-              </div>
-              <div className="flex items-center gap-2">
-                <form action={toggleApiSourceAction}>
+      {sources.length === 0 && <EmptyState>Источников пока нет. Добавьте первый ниже.</EmptyState>}
+
+      {/* Existing sources — edit in place */}
+      <div className="space-y-4">
+        {sources.map((s) => {
+          const linkedCount = countBySlug[s.slug] ?? 0;
+          const otherSources = sources.filter((x) => x.slug !== s.slug);
+          return (
+            <details key={s.id} className="card p-5">
+              <summary className="cursor-pointer flex items-center gap-3 select-none">
+                <span className="font-semibold text-foreground flex-1">{s.name}</span>
+                <span className="badge font-mono text-xs">{s.slug}</span>
+                <span className="badge font-mono text-xs">формат: {s.format}</span>
+                {s.isActive ? (
+                  <span className="badge badge-success">активен</span>
+                ) : (
+                  <span className="badge badge-warning">отключён</span>
+                )}
+                {linkedCount > 0 && (
+                  <span className="badge bg-brand/10 text-brand text-xs">{linkedCount} товар(ов)</span>
+                )}
+              </summary>
+
+              <div className="mt-4 space-y-4 border-t pt-4">
+                {/* Current URL */}
+                <div className="text-xs text-muted font-mono break-all">{s.baseUrl}</div>
+
+                {/* Edit key/url form */}
+                <form action={saveApiSourceAction} className="space-y-3">
                   <input type="hidden" name="id" value={s.id} />
-                  <input type="hidden" name="active" value={s.isActive ? "0" : "1"} />
-                  <button className="btn-secondary text-xs">
-                    {s.isActive ? "Отключить" : "Включить"}
-                  </button>
+                  <input type="hidden" name="name" value={s.name} />
+                  <input type="hidden" name="format" value={s.format} />
+                  <input type="hidden" name="isActive" value={s.isActive ? "on" : ""} />
+                  <div className="grid md:grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-sm text-muted">Новый Base URL (оставьте пустым чтобы не менять)</label>
+                      <input
+                        name="baseUrl"
+                        defaultValue={s.baseUrl}
+                        className="input mt-1 font-mono text-xs"
+                        placeholder="https://api.vexoran.app"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-sm text-muted">Новый API ключ (сейчас: {mask(s.apiKey)})</label>
+                      <input
+                        name="apiKey"
+                        className="input mt-1 font-mono text-xs"
+                        placeholder="vex_sk_... или vxr_... — оставьте пустым чтобы не менять"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button className="btn-primary text-sm">💾 Сохранить ключ / URL</button>
+                    <form action={toggleApiSourceAction} className="inline">
+                      <input type="hidden" name="id" value={s.id} />
+                      <input type="hidden" name="active" value={s.isActive ? "0" : "1"} />
+                      <button className="btn-secondary text-sm">
+                        {s.isActive ? "⏸ Отключить" : "▶ Включить"}
+                      </button>
+                    </form>
+                    <form action={deleteApiSourceAction} className="inline">
+                      <input type="hidden" name="id" value={s.id} />
+                      <button className="btn-danger text-sm">🗑 Удалить источник</button>
+                    </form>
+                  </div>
                 </form>
-                <form action={deleteApiSourceAction}>
-                  <input type="hidden" name="id" value={s.id} />
-                  <button className="btn-danger text-xs">Удалить</button>
-                </form>
+
+                {/* Migrate products to another source */}
+                {otherSources.length > 0 && linkedCount > 0 && (
+                  <div className="border-t pt-3 space-y-2">
+                    <div className="text-sm font-medium">
+                      🔄 Перенести {linkedCount} товар(ов) в другой источник
+                    </div>
+                    <p className="text-xs text-muted">
+                      Все товары, цены и настройки сохранятся — меняется только привязка к API-источнику.
+                      Используйте это, если вы добавили новый ключ как отдельный источник.
+                    </p>
+                    <form action={migrateSourceAction} className="flex flex-wrap items-center gap-2">
+                      <input type="hidden" name="fromSlug" value={s.slug} />
+                      <select name="toSlug" className="input text-sm w-auto">
+                        {otherSources.map((o) => (
+                          <option key={o.slug} value={o.slug}>
+                            {o.name} ({o.slug})
+                          </option>
+                        ))}
+                      </select>
+                      <button className="btn-primary text-sm">🔄 Перенести все товары</button>
+                    </form>
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
-        </div>
-      )}
+            </details>
+          );
+        })}
+      </div>
 
       {/* Add a new source */}
       <details className="card p-5">
-        <summary className="cursor-pointer font-semibold">＋ Добавить API-источник</summary>
+        <summary className="cursor-pointer font-semibold">＋ Добавить новый API-источник</summary>
         <form action={saveApiSourceAction} className="mt-4 space-y-3">
           <div className="grid md:grid-cols-2 gap-3">
             <div>
@@ -89,13 +161,11 @@ export default async function BotApisPage() {
           </div>
           <div>
             <label className="text-sm text-muted">API ключ</label>
-            <input name="apiKey" className="input mt-1 font-mono text-xs" placeholder="sk_..." />
+            <input name="apiKey" className="input mt-1 font-mono text-xs" placeholder="vex_sk_..." />
           </div>
           <button className="btn-primary">Добавить</button>
         </form>
       </details>
-
-      {sources.length === 0 && <EmptyState>Источников пока нет. Добавьте первый.</EmptyState>}
     </div>
   );
 }

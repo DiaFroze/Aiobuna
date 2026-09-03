@@ -63,3 +63,38 @@ export async function deleteApiSourceAction(formData: FormData) {
   revalidatePath("/admin/bot-apis");
   revalidatePath("/admin/bot-import");
 }
+
+/**
+ * Migrate all products/variants that point to fromSlug → toSlug.
+ * This lets you swap API keys without re-importing everything:
+ * 1. Add new source (new key)
+ * 2. Click "Мигрировать товары" on the old source → pick the new one
+ * 3. Delete the old source (optional)
+ * All existing products keep their prices, settings, and sold stats.
+ */
+export async function migrateSourceAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
+  const fromSlug = str(formData.get("fromSlug"));
+  const toSlug = str(formData.get("toSlug"));
+  if (!fromSlug || !toSlug || fromSlug === toSlug) return;
+
+  // Verify target exists
+  const target = await botDb.apiSource.findUnique({ where: { slug: toSlug } });
+  if (!target) return;
+
+  const { count } = await botDb.variant.updateMany({
+    where: { supplierKey: fromSlug },
+    data: { supplierKey: toSlug },
+  });
+
+  await audit({
+    adminId: admin.id,
+    action: "bot.apisource.migrate",
+    entityType: "ApiSource",
+    entityId: `${fromSlug}→${toSlug}`,
+    metadata: { count },
+  });
+  revalidatePath("/admin/bot-apis");
+  revalidatePath("/admin/bot-import");
+  revalidatePath("/admin/bot-products");
+}
