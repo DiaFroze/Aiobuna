@@ -5,37 +5,62 @@ import { requirePermission } from "@/lib/auth/session";
 import { PERMISSIONS } from "@/lib/security/rbac";
 import { botDb } from "@/lib/botDb";
 import { audit } from "@/lib/security/audit";
+import { parseStockPayload, serializeStockPayload } from "@/lib/domain/stock-payload";
 
-/** Bulk-import links as stock items for a given variant. */
+/** Bulk-import links, accounts, or codes as stock items for a given variant. */
 export async function importStockAction(formData: FormData) {
   const admin = await requirePermission(PERMISSIONS.PRODUCTS_WRITE);
   const variantId = Number(formData.get("variantId"));
-  const raw = String(formData.get("links") ?? "").trim();
-  if (!variantId || !raw) return;
+  if (!variantId) return;
 
-  // How many stock items to create per link. One invite link can carry many
-  // seats, so the same URL may legitimately be sold N times. Asking for more
-  // than one copy means duplicates are intended, so skip the dedup filter.
+  let items: string[] = [];
+
+  // 1. Structured JSON from the new StockUploader component
+  const itemsJsonStr = String(formData.get("itemsJson") ?? "").trim();
+  if (itemsJsonStr) {
+    try {
+      const parsed = JSON.parse(itemsJsonStr);
+      if (Array.isArray(parsed)) {
+        items = parsed
+          .map((it) => (typeof it === "string" ? it : serializeStockPayload(it)))
+          .filter((s) => s.trim().length > 0);
+      }
+    } catch {
+      // Fall through
+    }
+  }
+
+  // 2. Fallback to raw lines from textarea / legacy form
+  if (items.length === 0) {
+    const raw = String(formData.get("links") ?? formData.get("raw") ?? "").trim();
+    if (raw) {
+      items = raw
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0)
+        .map((line) => {
+          const parsed = parseStockPayload(line);
+          return serializeStockPayload(parsed);
+        });
+    }
+  }
+
+  if (items.length === 0) return;
+
+  // How many stock items to create per item.
   const copies = Math.min(Math.max(Math.trunc(Number(formData.get("copies")) || 1), 1), 5000);
   const allowDuplicates = formData.get("allowDuplicates") === "on" || copies > 1;
 
-  const links = raw
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
-
-  if (links.length === 0) return;
-
-  let toInsert = links;
+  let toInsert = items;
   let duplicates = 0;
   if (!allowDuplicates) {
     const existing = await botDb.stockItem.findMany({
-      where: { variantId, payload: { in: links } },
+      where: { variantId, payload: { in: items } },
       select: { payload: true },
     });
     const existingSet = new Set(existing.map((e) => e.payload));
-    toInsert = links.filter((l) => !existingSet.has(l));
-    duplicates = links.length - toInsert.length;
+    toInsert = items.filter((l) => !existingSet.has(l));
+    duplicates = items.length - toInsert.length;
   }
 
   const rows = toInsert.flatMap((payload) =>
@@ -52,7 +77,7 @@ export async function importStockAction(formData: FormData) {
     adminId: admin.id,
     action: "stock.import",
     entityType: "StockItem",
-    metadata: { variantId, links: links.length, copies, created: rows.length, duplicates },
+    metadata: { variantId, items: items.length, copies, created: rows.length, duplicates },
   });
 
   // Notify users who requested "notify me when back in stock" for this variant.

@@ -1,8 +1,25 @@
 import { botDb, botConfigured } from "@/lib/botDb";
 import { PageHeader, EmptyState } from "@/components/admin/ui";
-import { importStockAction, deleteStockItemAction, clearVariantStockAction } from "./actions";
+import { deleteStockItemAction, clearVariantStockAction } from "./actions";
+import { StockUploader } from "./stock-uploader";
+import { detectStockPayloadType, formatStockPayloadForFile } from "@/lib/domain/stock-payload";
 
 export const dynamic = "force-dynamic";
+
+function FormatBadge({ type }: { type: string }) {
+  switch (type) {
+    case "account":
+      return <span className="badge bg-purple-500/10 text-purple-400 border border-purple-500/20 text-[11px]">👤🔑 Аккаунт</span>;
+    case "link_promo":
+      return <span className="badge bg-sky-500/10 text-sky-400 border border-sky-500/20 text-[11px]">🔗🎟 Ссылка+Код</span>;
+    case "link":
+      return <span className="badge bg-blue-500/10 text-blue-400 border border-blue-500/20 text-[11px]">🔗 Ссылка</span>;
+    case "code":
+      return <span className="badge bg-amber-500/10 text-amber-400 border border-amber-500/20 text-[11px]">🎟 Код / Ключ</span>;
+    default:
+      return <span className="badge bg-neutral-500/10 text-neutral-400 border border-neutral-500/20 text-[11px]">📝 Текст</span>;
+  }
+}
 
 export default async function BotStockPage() {
   if (!botConfigured()) {
@@ -32,7 +49,7 @@ export default async function BotStockPage() {
     }))
   );
 
-  // Recent stock items (last 20 unsold per variant, limited)
+  // Recent stock items (last 50 unsold per variant, limited)
   const recentItems = await botDb.stockItem.findMany({
     where: { isSold: false },
     orderBy: { id: "desc" },
@@ -40,11 +57,16 @@ export default async function BotStockPage() {
     include: { variant: { include: { plan: { include: { product: true } } } } },
   });
 
+  const variantOptions = variants.map((v) => ({
+    id: v.id,
+    label: `${v.plan.product.titleRu} — ${v.titleRu}`,
+  }));
+
   return (
     <div className="space-y-6">
       <PageHeader
         title="📦 Склад"
-        subtitle="Загрузите ссылки на товары. Локальный склад продаётся первым, затем API."
+        subtitle="Загрузка и управление товарами: раздельные поля для email и ссылок, двойной моно (тап для копирования), промокоды и живое превью."
       />
 
       {/* Stock overview */}
@@ -82,102 +104,59 @@ export default async function BotStockPage() {
         ))}
       </div>
 
-      {/* Import form */}
-      <div className="card p-5 space-y-4">
-        <h3 className="font-semibold text-lg">📥 Загрузить ссылки на склад</h3>
-        <form action={importStockAction} className="space-y-4">
-          <div>
-            <label className="text-sm text-muted">Вариант товара</label>
-            <select name="variantId" required className="input mt-1">
-              {variants.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.plan.product.titleRu} — {v.titleRu}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="text-sm text-muted">
-              Ссылки (каждая на новой строке)
-            </label>
-            <textarea
-              name="links"
-              required
-              rows={10}
-              className="input mt-1 font-mono text-xs"
-              placeholder={"https://serviceactivation.google.com/...\nhttps://serviceactivation.google.com/...\nhttps://serviceactivation.google.com/..."}
-            />
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div>
-              <label className="text-sm text-muted">Копий каждой ссылки</label>
-              <input
-                type="number"
-                name="copies"
-                min={1}
-                max={5000}
-                defaultValue={1}
-                className="input mt-1"
-              />
-              <p className="text-xs text-muted mt-1">
-                Если одна ссылка рассчитана на несколько активаций — укажите, сколько
-                раз добавить её на склад (например, 400).
-              </p>
-            </div>
-            <div className="flex items-start gap-2 sm:pt-7">
-              <input
-                type="checkbox"
-                name="allowDuplicates"
-                id="allowDuplicates"
-                className="mt-1"
-              />
-              <label htmlFor="allowDuplicates" className="text-sm">
-                Разрешить дубликаты
-                <span className="block text-xs text-muted">
-                  Добавить ссылку, даже если она уже есть на складе. При количестве
-                  копий больше 1 включается автоматически.
-                </span>
-              </label>
-            </div>
-          </div>
-          <button type="submit" className="btn btn-success">
-            ✅ Импортировать на склад
-          </button>
-        </form>
-      </div>
+      {/* Smart Stock Uploader with Live Preview */}
+      <StockUploader variants={variantOptions} />
 
       {/* Recent stock items */}
       {recentItems.length > 0 && (
         <div className="card p-5 space-y-4">
-          <h3 className="font-semibold text-lg">📋 Последние товары на складе (непроданные)</h3>
+          <div className="flex items-center justify-between">
+            <h3 className="font-semibold text-lg">📋 Последние товары на складе (непроданные)</h3>
+            <span className="text-xs text-muted">Показано: {recentItems.length}</span>
+          </div>
           <div className="overflow-x-auto">
             <table className="table w-full text-sm">
               <thead>
                 <tr>
-                  <th className="text-left">ID</th>
+                  <th className="text-left w-16">ID</th>
                   <th className="text-left">Товар</th>
-                  <th className="text-left">Ссылка</th>
-                  <th></th>
+                  <th className="text-left w-32">Формат</th>
+                  <th className="text-left">Содержимое для выдачи</th>
+                  <th className="w-12"></th>
                 </tr>
               </thead>
               <tbody>
-                {recentItems.map((item) => (
-                  <tr key={item.id}>
-                    <td className="font-mono text-muted">{item.id}</td>
-                    <td>{item.variant.plan.product.titleRu}</td>
-                    <td className="font-mono text-xs max-w-xs truncate" title={item.payload}>
-                      {item.payload.length > 60 ? item.payload.slice(0, 60) + "…" : item.payload}
-                    </td>
-                    <td>
-                      <form action={deleteStockItemAction}>
-                        <input type="hidden" name="id" value={item.id} />
-                        <button type="submit" className="text-danger hover:underline text-xs">
-                          ✕
-                        </button>
-                      </form>
-                    </td>
-                  </tr>
-                ))}
+                {recentItems.map((item) => {
+                  const formatType = detectStockPayloadType(item.payload);
+                  const previewText = formatStockPayloadForFile(item.payload);
+                  return (
+                    <tr key={item.id}>
+                      <td className="font-mono text-muted text-xs">{item.id}</td>
+                      <td className="font-medium text-xs whitespace-nowrap">
+                        {item.variant.plan.product.titleRu}
+                        <span className="text-muted block text-[11px] font-normal">{item.variant.titleRu}</span>
+                      </td>
+                      <td>
+                        <FormatBadge type={formatType} />
+                      </td>
+                      <td className="font-mono text-xs max-w-md truncate" title={previewText}>
+                        {previewText.length > 70 ? previewText.slice(0, 70) + "…" : previewText}
+                      </td>
+                      <td className="text-right">
+                        <form action={deleteStockItemAction}>
+                          <input type="hidden" name="id" value={item.id} />
+                          <button
+                            type="submit"
+                            className="text-danger hover:underline text-xs p-1"
+                            title="Удалить позицию"
+                          >
+                            ✕
+                          </button>
+                        </form>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

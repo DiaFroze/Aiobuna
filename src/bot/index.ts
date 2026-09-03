@@ -27,6 +27,7 @@ import { STARS_MIN_QUANTITY, STARS_MAX_QUANTITY, isValidStarsQuantity } from "..
 import { STARS_RATE_CARRIER_AMOUNT, minQtyForStars } from "../lib/domain/stars-pricing";
 import { lowStockCount, parseLowStockThreshold } from "../lib/domain/low-stock";
 import { approveTopUp, APPROVABLE_STATUSES } from "../lib/domain/topup-approval";
+import { renderDeliveryGoods, formatStockPayloadForFile } from "../lib/domain/stock-payload";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -1127,7 +1128,7 @@ async function deliverOrder(ctx: Context, lang: string, title: string, orderId: 
     `${t(lang, "order_paid", { id: orderId })}\n\n` +
       `${esc(title)}\n${t(lang, "charged", { v: money(price, lang) })}\n` +
       `${t(lang, "remaining", { v: money(balance, lang) })}\n\n` +
-      `${t(lang, "your_goods")}\n<code>${esc(payload)}</code>`,
+      renderDeliveryGoods(payload, lang),
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all") },
   ).catch(() => {});
 }
@@ -1503,14 +1504,14 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
       } else {
         // Deliver the part we did get, then a follow-up with the code for the rest.
         if (deliveredQty > 5) {
-          const fileContent = Buffer.from(finalPayload, "utf-8");
+          const fileContent = Buffer.from(formatStockPayloadForFile(finalPayload), "utf-8");
           await bot.api.sendDocument(tgId, new InputFile(fileContent, `order_${reserve.orderId}.txt`), {
             caption: `📄 ${esc(label)} (${deliveredQty}/${finalQty})`,
           }).catch(() => {});
         } else if (procMsg) {
           await bot.api.editMessageText(
             tgId, procMsg.message_id,
-            `${t(lang, "your_goods")}\n<code>${esc(finalPayload)}</code>`,
+            renderDeliveryGoods(finalPayload, lang),
             { parse_mode: "HTML" },
           ).catch(() => {});
         }
@@ -1575,16 +1576,16 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
         await bot.api.editMessageText(tgId, procMsg.message_id, confirmText, { parse_mode: "HTML", reply_markup: deliveredKb }).catch(() => {});
       }
       const filename = `order_${reserve.orderId}.txt`;
-      const fileContent = Buffer.from(finalPayload, "utf-8");
+      const fileContent = Buffer.from(formatStockPayloadForFile(finalPayload), "utf-8");
       await bot.api.sendDocument(tgId, new InputFile(fileContent, filename), {
-        caption: `📄 ${esc(label)} (${deliveredQty} ссылок)`,
+        caption: `📄 ${esc(label)} (${deliveredQty} шт.)`,
       }).catch(() => {});
     } else {
       // Small order: the delivered goods themselves are the caption.
       const confirmText =
         `${t(lang, "order_paid", { id: reserve.orderId })}\n\n` +
-        `${esc(label)}\n${chargeLine}\n` +
-        `\n${t(lang, "your_goods")}\n<code>${esc(finalPayload)}</code>`;
+        `${esc(label)}\n${chargeLine}\n\n` +
+        renderDeliveryGoods(finalPayload, lang);
       if (activateVideo) {
         if (procMsg) await bot.api.deleteMessage(tgId, procMsg.message_id).catch(() => {});
         await bot.api.sendVideo(tgId, activateVideo, { caption: confirmText, parse_mode: "HTML", reply_markup: deliveredKb }).catch(async () => {
@@ -1973,7 +1974,7 @@ async function ordersView(lang: string, userId: number) {
         .map((o) =>
           o.status === "awaiting_delivery"
             ? `#${o.id} · ${esc(clip(o.titleRu, 80))} — ${money(o.priceUsdt, lang)}\n⏳ ${t(lang, "order_pending")}`
-            : `#${o.id} · ${esc(clip(o.titleRu, 80))} — ${money(o.priceUsdt, lang)}\n<code>${esc(clip(o.payload, 500))}</code>`,
+            : `#${o.id} · ${esc(clip(o.titleRu, 80))} — ${money(o.priceUsdt, lang)}\n<code>${esc(clip(formatStockPayloadForFile(o.payload), 500))}</code>`,
         )
         .join("\n\n")
     : t(lang, "no_orders");
@@ -4017,7 +4018,7 @@ bot.command("give", async (ctx) => {
   // so confirm the destination instead.
   const body = order.targetUsername
     ? `✅ <b>${esc(order.titleRu)}</b>\n\n${t(ulang, "uname_for")}: <b>@${esc(order.targetUsername)}</b>\n\nПроверьте свой аккаунт 🎉`
-    : `🎁 ${t(ulang, "your_goods")}\n<code>${esc(text)}</code>\n\n${esc(order.titleRu)}`;
+    : `${renderDeliveryGoods(text, ulang)}\n\n${esc(order.titleRu)}`;
   await bot.api.sendMessage(
     order.user.tgId,
     body,
