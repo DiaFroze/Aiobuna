@@ -19,6 +19,7 @@ export interface SupplierProduct {
   available: boolean;
   category: string | null;
   manualDelivery: boolean;
+  apiOrderable: boolean;      // !manual_delivery && api is able to fulfill
   descriptionClean: string;
   premiumEmojiCode: string | null;
   warrantyType?: "none" | "full" | string | null;
@@ -27,6 +28,7 @@ export interface SupplierProduct {
 export interface SupplierOrderResult {
   payload: string;
   status: string;
+  idempotentReplay?: boolean; // true when Vexoran returned the same order again
   raw: unknown;
 }
 
@@ -102,6 +104,7 @@ export async function sourceProducts(src: Source): Promise<SupplierProduct[]> {
           available,
           category: p.category ?? null,
           manualDelivery: Boolean(p.manual_delivery),
+          apiOrderable: !p.manual_delivery,
           descriptionClean: replaceCeTokensForPublic(p.description ?? ""),
           premiumEmojiCode: primaryCeCode(p.description ?? "")?.code ?? null,
         };
@@ -120,6 +123,8 @@ export async function sourceProducts(src: Source): Promise<SupplierProduct[]> {
       available: Boolean(p.available),
       category: p.category ?? null,
       manualDelivery: Boolean(p.manual_delivery),
+      // api_orderable is the canonical Vexoran field; fall back to !manual_delivery
+      apiOrderable: p.api_orderable !== undefined ? Boolean(p.api_orderable) : !p.manual_delivery,
       descriptionClean: replaceCeTokensForPublic(p.description),
       premiumEmojiCode: primaryCeCode(p.description)?.code ?? null,
       warrantyType: p.warranty_type ?? null,
@@ -127,17 +132,35 @@ export async function sourceProducts(src: Source): Promise<SupplierProduct[]> {
     .filter((p) => p.id && p.name);
 }
 
-export async function sourceOrder(src: Source, productId: string, quantity = 1): Promise<SupplierOrderResult> {
+export async function sourceOrder(
+  src: Source,
+  productId: string,
+  quantity = 1,
+  externalOrderId?: string | number,
+): Promise<SupplierOrderResult> {
   if (src.format === "somadeth") {
     // Buyer API buys per-call with {product_id, qty}. A 400 (insufficient wallet
     // balance / validation) is thrown by buyerCall and handled upstream — the
     // order falls back to manual delivery, so the customer never loses money.
-    const j = await buyerCall(src, "/api/telegram-buyer/purchase", { method: "POST", body: { product_id: Number(productId), qty: quantity } });
+    const j = await buyerCall(src, "/api/telegram-buyer/purchase", {
+      method: "POST",
+      body: { product_id: Number(productId), qty: quantity },
+    });
     return { payload: extractDelivery(j), status: String(j?.status ?? "ok"), raw: j };
   }
   assertVex(src);
-  const j = await vexCall(src, "order", { method: "POST", body: { product_id: productId, quantity } });
-  return { payload: extractDelivery(j), status: String(j?.status ?? "unknown"), raw: j };
+  // Pass external_order_id so Vexoran can de-duplicate retries:
+  // a second call with the same ID returns the original order (idempotent_replay: true)
+  // and never double-charges or double-delivers.
+  const body: Record<string, unknown> = { product_id: productId, quantity };
+  if (externalOrderId !== undefined) body.external_order_id = String(externalOrderId);
+  const j = await vexCall(src, "order", { method: "POST", body });
+  return {
+    payload: extractDelivery(j),
+    status: String(j?.status ?? "unknown"),
+    idempotentReplay: Boolean(j?.idempotent_replay),
+    raw: j,
+  };
 }
 
 function extractDelivery(j: any): string {

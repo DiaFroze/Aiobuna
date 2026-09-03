@@ -93,33 +93,48 @@ export default async function BotImportPage({ searchParams }: { searchParams: { 
       {products.length === 0 ? (
         <EmptyState>Список товаров пуст.</EmptyState>
       ) : (
-        <Table head={["Товар", "Категория", "Закупка", "Сток", "Наличие", "Наценка %", ""]}>
+        <Table head={["Товар", "Категория", "Закупка", "Сток", "Наличие", "Статус", "Наценка %", ""]}>
           {products.map((p) => {
             const done = imported.has(p.id);
+            const canOrder = p.apiOrderable;
             return (
               <tr key={p.id} className="border-b last:border-0 align-top">
                 <td className="px-4 py-3">
                   <div className="font-medium">{p.name}</div>
                   {p.premiumEmojiCode && <div className="font-mono text-[10px] text-muted">ce:{p.premiumEmojiCode}</div>}
+                  {p.warrantyType === "full" && (
+                    <span className="badge bg-success/10 text-success text-[10px] mt-1">🛡 Гарантия</span>
+                  )}
                 </td>
                 <td className="px-4 py-3 text-xs text-muted">{p.category ?? "—"}</td>
                 <td className="px-4 py-3">{p.price.toFixed(2)} USDT</td>
-                <td className="px-4 py-3">{p.stock}</td>
+                <td className="px-4 py-3">{p.stock ?? "∞"}</td>
                 <td className="px-4 py-3">
                   <span className={`badge ${p.available ? "bg-success/10 text-success" : "bg-danger/10 text-danger"}`}>
                     {p.available ? "да" : "нет"}
                   </span>
                 </td>
                 <td className="px-4 py-3">
+                  {canOrder ? (
+                    <span className="badge bg-success/10 text-success text-xs">API ✓</span>
+                  ) : (
+                    <span className="badge bg-warning/10 text-warning text-xs" title="manual_delivery: заказывается только через Telegram-бот поставщика">
+                      Ручная выдача
+                    </span>
+                  )}
+                </td>
+                <td className="px-4 py-3">
                   {done ? (
                     <span className="badge bg-brand/10 text-brand">импортировано</span>
-                  ) : (
+                  ) : canOrder ? (
                     <form action={importSourceProductAction} className="flex items-center gap-2">
                       <input type="hidden" name="slug" value={current.slug} />
                       <input type="hidden" name="extId" value={p.id} />
                       <input name="markup" type="number" step="1" min="0" defaultValue={20} className="input w-20 text-sm" />
                       <button className="btn-primary text-xs whitespace-nowrap">На продажу</button>
                     </form>
+                  ) : (
+                    <span className="text-xs text-muted italic">Только ручная выдача</span>
                   )}
                 </td>
                 <td className="px-4 py-3">

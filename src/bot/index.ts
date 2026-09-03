@@ -1462,7 +1462,12 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
       const src = await resolveSource(v.supplierKey);
       if (src) {
         try {
-          const delivered = await sourceOrder(src, v.supplierExternalId, supplierQty);
+          // Pass our order ID as external_order_id — Vexoran will de-duplicate
+          // retries: same ID → same order returned, never double-charged.
+          const delivered = await sourceOrder(src, v.supplierExternalId, supplierQty, reserve.orderId);
+          if (delivered.idempotentReplay) {
+            console.log(`[bot] supplier idempotent replay for order #${reserve.orderId}`);
+          }
           if (delivered.payload) {
             payloads.push(delivered.payload);
             supplierOk = true;
