@@ -8,7 +8,7 @@ try {
 }
 
 import { Bot, InlineKeyboard, Keyboard, InputFile, type Context } from "grammy";
-import type { MessageEntity } from "grammy/types";
+import type { MessageEntity, UserFromGetMe } from "grammy/types";
 import { db } from "./db";
 import { sourceOrder, envVexSource, envBuyerSource, type Source } from "../lib/supplier";
 import { geminiTranslate } from "../lib/gemini";
@@ -5965,13 +5965,13 @@ async function bootstrap() {
   await maybeResetAdmins();         // one-time admin reset (guarded)
   // Poll for Payme top-ups the webhook credited, to notify + fulfil them.
   setInterval(() => { deliverPaidPaymeTopUps().catch(() => {}); checkPromoExpiry().catch(() => {}); }, 12_000);
-  await bot.start({
+  const pollingOptions = {
     drop_pending_updates: false,
     allowed_updates: [
       "message", "callback_query", "chat_member", "chat_join_request",
       "pre_checkout_query",
     ],
-    onStart: async (me) => {
+    onStart: async (me: UserFromGetMe) => {
       buttonEmoji = await setting("button_emoji", "");
       profileButtonEmoji = (await setting("profile_button_emoji", "")).trim() || PREMIUM_EMOJI_PROFILE;
       ordersButtonEmoji = (await setting("orders_button_emoji", "")).trim() || PREMIUM_EMOJI_ORDERS;
@@ -5993,7 +5993,25 @@ async function bootstrap() {
       prewarmTranslations().catch(() => {}); // pre-cache EN/UZ product titles
       console.info(`[bot] started as @${me.username} (long-polling)`);
     },
-  });
+  } as const;
+
+  // Railway briefly overlaps the old and new containers during a rolling
+  // deploy. Telegram permits only one getUpdates consumer, so the newcomer can
+  // receive 409 until the old container is stopped. Wait for that hand-off
+  // instead of crashing the whole service and leaving the old release active.
+  const conflictDeadline = Date.now() + 2 * 60_000;
+  for (;;) {
+    try {
+      await bot.start(pollingOptions);
+      return;
+    } catch (error) {
+      const apiError = error as { error_code?: number; method?: string; description?: string };
+      const rolloutConflict = apiError.error_code === 409 && apiError.method === "getUpdates";
+      if (!rolloutConflict || Date.now() >= conflictDeadline) throw error;
+      console.warn("[bot] another rollout instance still owns getUpdates; retrying in 5s");
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+    }
+  }
 }
 
 bootstrap().catch((e) => {
