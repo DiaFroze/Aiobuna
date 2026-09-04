@@ -242,6 +242,27 @@ const pending = new Map<
 
 const bot = new Bot(token);
 
+// Telegram Bot API requires icon_custom_emoji_id as a JSON number,
+// but these are 19-digit IDs that exceed JS Number precision.
+// We patch the raw fetch body to convert "icon_custom_emoji_id":"123" → "icon_custom_emoji_id":123
+// without going through JS number parsing (which would lose precision).
+const _origFetch = globalThis.fetch;
+globalThis.fetch = async function patchedFetch(input: RequestInfo | URL, init?: RequestInit) {
+  if (
+    typeof input === "string" &&
+    input.includes("api.telegram.org") &&
+    init?.body &&
+    typeof init.body === "string" &&
+    init.body.includes("icon_custom_emoji_id")
+  ) {
+    init = {
+      ...init,
+      body: init.body.replace(/"icon_custom_emoji_id":"(\d+)"/g, '"icon_custom_emoji_id":$1'),
+    };
+  }
+  return _origFetch(input as RequestInfo, init);
+} as typeof fetch;
+
 // ---------- helpers ----------
 const money = (n: number, lang: string | null | undefined) =>
   `${Math.round(n).toLocaleString("ru-RU")} ${CUR[normalizeLang(lang)]}`;
@@ -419,7 +440,6 @@ const SHOP_TEXTS = new Set(LANGS.map((l) => t(l, "btn_shop")));
 // Bot API 9.4 supports `icon_custom_emoji_id` on BOTH inline and reply-keyboard
 // buttons, so this is applied to either kind in the API middleware below.
 function premiumIconFor(text: string): string | undefined {
-  if (buttonEmoji && ICON_TEXTS.has(text)) return buttonEmoji;
   if (BACK_TEXTS.has(text)) return backButtonEmoji;
   if (SUPPORT_TEXTS.has(text)) return supportButtonEmoji;
   if (REFER_TEXTS.has(text)) return referButtonEmoji;
@@ -5530,13 +5550,6 @@ function stripPremiumDecorations(payload: any): boolean {
   return changed;
 }
 
-function isPremiumDecorationError(error: unknown): boolean {
-  const description = error && typeof error === "object" && "description" in error
-    ? String((error as { description?: unknown }).description ?? "")
-    : error instanceof Error ? error.message : String(error ?? "");
-  return /custom[_ ]emoji|icon_custom_emoji|button_type_invalid/i.test(description);
-}
-
 // Auto-color every button (Bot API 9.4 `style`) + premium nav icons, with a
 // safety net: if the send is rejected and the payload carried premium emoji,
 // retry once without them so one bad emoji can't blank a whole screen.
@@ -5574,7 +5587,7 @@ bot.api.config.use(async (prev, method, payload, signal) => {
   try {
     return await prev(method, payload, signal);
   } catch (e) {
-    if (isPremiumDecorationError(e) && stripPremiumDecorations(payload)) {
+    if (stripPremiumDecorations(payload)) {
       console.error(`[bot] ${method} rejected with premium emoji, retrying plain:`, (e as { description?: string })?.description ?? (e as Error).message);
       return await prev(method, payload, signal);
     }
