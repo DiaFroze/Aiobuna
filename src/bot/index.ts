@@ -242,6 +242,27 @@ const pending = new Map<
 
 const bot = new Bot(token);
 
+// Telegram Bot API requires icon_custom_emoji_id as a JSON number,
+// but these are 19-digit IDs that exceed JS Number precision.
+// We patch the raw fetch body to convert "icon_custom_emoji_id":"123" → "icon_custom_emoji_id":123
+// without going through JS number parsing (which would lose precision).
+const _origFetch = globalThis.fetch;
+globalThis.fetch = async function patchedFetch(input: RequestInfo | URL, init?: RequestInit) {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : (input && typeof input === "object" && "url" in input) ? String((input as any).url) : "";
+  if (
+    url.includes("api.telegram.org") &&
+    init?.body &&
+    typeof init.body === "string" &&
+    init.body.includes("icon_custom_emoji_id")
+  ) {
+    init = {
+      ...init,
+      body: init.body.replace(/"icon_custom_emoji_id"\s*:\s*"(\d+)"/g, '"icon_custom_emoji_id":$1'),
+    };
+  }
+  return _origFetch(input as RequestInfo, init);
+} as typeof fetch;
+
 // ---------- helpers ----------
 const money = (n: number, lang: string | null | undefined) =>
   `${Math.round(n).toLocaleString("ru-RU")} ${CUR[normalizeLang(lang)]}`;
