@@ -167,6 +167,11 @@ const CLICK_SERVICE_ID = process.env.CLICK_SERVICE_ID ?? "";
 const CLICK_MERCHANT_ID = process.env.CLICK_MERCHANT_ID ?? "";
 const clickReady = (_ctx?: Context) =>
   CLICK_ENABLED && CLICK_SERVICE_ID !== "" && CLICK_MERCHANT_ID !== "";
+const COURSE_PRODUCT_CODE = "ai_darslik";
+const COURSE_PRICE_UZS = 200_000;
+const COURSE_CHANNEL_SETTING = "course_channel_id";
+const COURSE_VARIANT_SETTING = "course_variant_id";
+const COURSE_BONUS_VARIANT_SETTING = "course_bonus_variant_id";
 // Premium-emoji ids for the bank buttons (same ones used in the poll).
 const PAYME_BTN_EMOJI = "5204128408463744787";
 const CLICK_BTN_EMOJI = "5350345287246311562";
@@ -245,6 +250,7 @@ const pending = new Map<
   | { type: "target_username"; variantId: number; qty: number }
   | { type: "set_banner" }
   | { type: "set_product_video"; productId: number }
+  | { type: "course_channel" }
   | { type: "promo_price"; variantId: number }
   // Premium: waiting for a native contact pick (users_shared) for "gift to
   // someone else". Carries the order so the shared id lands on the right item.
@@ -580,6 +586,315 @@ async function availableStock(v: { id: number; autoSupplier: boolean; supplierSt
   const local = await db.stockItem.count({ where: { variantId: v.id, isSold: false } });
   // Local stock + API stock (both available; local is used first in doBuy)
   return local + (v.autoSupplier ? v.supplierStock : 0);
+}
+
+function isCourseProduct(v: { plan: { product: { code: string } } }): boolean {
+  return v.plan.product.code === COURSE_PRODUCT_CODE;
+}
+
+async function configuredCourseChannel(): Promise<string> {
+  return (process.env.COURSE_CHANNEL_ID ?? await setting(COURSE_CHANNEL_SETTING, "")).trim();
+}
+
+/** Create the course catalog entry once and keep its contractual price/order stable. */
+async function ensureCourseCatalog(activate = false) {
+  let product = await db.product.findUnique({
+    where: { code: COURSE_PRODUCT_CODE },
+    include: { plans: { include: { variants: true }, orderBy: { sortOrder: "asc" } } },
+  });
+
+  if (!product) {
+    product = await db.product.create({
+      data: {
+        code: COURSE_PRODUCT_CODE,
+        titleRu: "AI Darslik — создание видео с ИИ",
+        titleUz: "AI Darslik — sun'iy intellekt bilan video yaratish",
+        titleEn: "AI Darslik — AI Video Creation",
+        emoji: "🎓",
+        descRu: "Закрытый практический курс по созданию видео с помощью искусственного интеллекта. После оплаты вы получите персональную ссылку в канал и Gemini AI Pro на 18 месяцев в подарок.",
+        descUz: "Sun'iy intellekt yordamida video yaratish bo'yicha yopiq amaliy kurs. To'lovdan so'ng kanalga shaxsiy havola va sovg'a sifatida 18 oylik Gemini AI Pro olasiz.",
+        descEn: "A private practical course on creating videos with AI. Payment includes a personal channel invite and 18 months of Gemini AI Pro as a bonus.",
+        sortOrder: -100_000,
+        isActive: activate,
+        refDiscount: false,
+        plans: {
+          create: {
+            titleRu: "Доступ к курсу",
+            titleUz: "Kursga kirish",
+            emoji: "🎓",
+            sortOrder: 0,
+            isActive: true,
+            variants: {
+              create: {
+                titleRu: "Полный курс + Gemini AI Pro 18 месяцев",
+                titleUz: "To'liq kurs + 18 oylik Gemini AI Pro",
+                durationDays: 0,
+                priceUzs: COURSE_PRICE_UZS,
+                sortOrder: 0,
+                isActive: true,
+                manualDelivery: true,
+                manualStockLimit: -1,
+              },
+            },
+          },
+        },
+      },
+      include: { plans: { include: { variants: true }, orderBy: { sortOrder: "asc" } } },
+    });
+  } else {
+    product = await db.product.update({
+      where: { id: product.id },
+      data: { sortOrder: -100_000, ...(activate ? { isActive: true } : {}) },
+      include: { plans: { include: { variants: true }, orderBy: { sortOrder: "asc" } } },
+    });
+  }
+
+  let plan = product.plans[0];
+  if (!plan) {
+    plan = await db.plan.create({
+      data: { productId: product.id, titleRu: "Доступ к курсу", titleUz: "Kursga kirish", emoji: "🎓", isActive: true },
+      include: { variants: true },
+    });
+  }
+  let variant = plan.variants[0];
+  if (!variant) {
+    variant = await db.variant.create({
+      data: {
+        planId: plan.id,
+        titleRu: "Полный курс + Gemini AI Pro 18 месяцев",
+        titleUz: "To'liq kurs + 18 oylik Gemini AI Pro",
+        durationDays: 0,
+        priceUzs: COURSE_PRICE_UZS,
+        isActive: true,
+        manualDelivery: true,
+        manualStockLimit: -1,
+      },
+    });
+  } else {
+    variant = await db.variant.update({
+      where: { id: variant.id },
+      data: { priceUzs: COURSE_PRICE_UZS, sortOrder: 0, isActive: true, manualDelivery: true, manualStockLimit: -1 },
+    });
+  }
+  await db.setting.upsert({
+    where: { key: COURSE_VARIANT_SETTING },
+    create: { key: COURSE_VARIANT_SETTING, valueRu: String(variant.id), type: "text" },
+    update: { valueRu: String(variant.id) },
+  });
+  return { product, variant };
+}
+
+async function findCourseBonusVariant() {
+  const configured = Number(await setting(COURSE_BONUS_VARIANT_SETTING, ""));
+  if (Number.isInteger(configured) && configured > 0) {
+    const exact = await db.variant.findUnique({
+      where: { id: configured },
+      include: { plan: { include: { product: true } } },
+    });
+    if (exact && isVariantBuyable(exact)) return exact;
+  }
+
+  const candidates = await db.variant.findMany({
+    where: { isActive: true, plan: { isActive: true, product: { isActive: true } } },
+    include: { plan: { include: { product: true } } },
+  });
+  const found = candidates.find((v) => {
+    const text = `${v.plan.product.titleRu} ${v.plan.product.titleUz} ${v.plan.product.titleEn} ${v.titleRu} ${v.titleUz}`;
+    return /gemini/i.test(text) && /(?:^|\D)18\s*(?:m|oy|мес|month)/i.test(text);
+  }) ?? null;
+  if (found) {
+    await db.setting.upsert({
+      where: { key: COURSE_BONUS_VARIANT_SETTING },
+      create: { key: COURSE_BONUS_VARIANT_SETTING, valueRu: String(found.id), type: "text" },
+      update: { valueRu: String(found.id) },
+    });
+  }
+  return found;
+}
+
+async function deliverCourseBonus(courseOrderId: number): Promise<void> {
+  const main = await db.botOrder.findUnique({ where: { id: courseOrderId }, include: { user: true } });
+  if (!main || main.source !== "course") return;
+
+  let bonus = await db.botOrder.findFirst({
+    where: { paymentMethod: "course_bonus", paymentId: String(courseOrderId) },
+  });
+  if (bonus?.status === "delivered") return;
+  if (bonus?.status === "awaiting_delivery") return;
+
+  const variant = await findCourseBonusVariant();
+  const title = "🎁 Gemini AI Pro — 18 месяцев (бонус к AI Darslik)";
+  if (!bonus) {
+    try {
+      bonus = await db.botOrder.create({
+        data: {
+          userId: main.userId,
+          variantId: variant?.id ?? null,
+          titleRu: title,
+          priceUsdt: 0,
+          payload: "",
+          source: "course_bonus",
+          status: "processing",
+          paymentMethod: "course_bonus",
+          paymentId: String(courseOrderId),
+        },
+      });
+    } catch {
+      bonus = await db.botOrder.findFirst({ where: { paymentMethod: "course_bonus", paymentId: String(courseOrderId) } });
+    }
+  }
+  if (!bonus || bonus.status === "delivered") return;
+
+  let payload = bonus.payload.trim();
+  if (!payload) {
+    const alreadyClaimed = await db.stockItem.findFirst({ where: { orderId: bonus.id } });
+    if (alreadyClaimed) payload = alreadyClaimed.payload;
+  }
+  if (!payload && variant) {
+    const stock = await db.stockItem.findFirst({ where: { variantId: variant.id, isSold: false }, orderBy: { id: "asc" } });
+    if (stock) {
+      const claimed = await db.stockItem.updateMany({
+        where: { id: stock.id, isSold: false },
+        data: { isSold: true, soldAt: new Date(), orderId: bonus.id },
+      });
+      if (claimed.count === 1) payload = stock.payload;
+    }
+  }
+  if (!payload && variant?.autoSupplier && variant.supplierKey && variant.supplierExternalId) {
+    try {
+      const src = await resolveSource(variant.supplierKey);
+      if (src) payload = (await sourceOrder(src, variant.supplierExternalId, 1, bonus.id)).payload;
+    } catch (e) {
+      console.error("[bot] course bonus supplier failed:", (e as Error).message);
+    }
+  }
+
+  if (payload) {
+    await db.botOrder.update({ where: { id: bonus.id }, data: { payload, status: "delivered", deliveredAt: new Date() } });
+    await bot.api.sendMessage(
+      main.user.tgId,
+      `🎁 <b>Бонус к курсу: Gemini AI Pro на 18 месяцев</b>\n\n${renderDeliveryGoods(payload, main.user.lang)}`,
+      { parse_mode: "HTML" },
+    ).catch(() => {});
+    return;
+  }
+
+  await db.botOrder.update({ where: { id: bonus.id }, data: { status: "awaiting_delivery" } });
+  await bot.api.sendMessage(
+    main.user.tgId,
+    "🎁 Бонус Gemini AI Pro на 18 месяцев закреплён за вашим заказом. Мы отправим данные отдельным сообщением.",
+  ).catch(() => {});
+  if (ADMIN_ID) {
+    await bot.api.sendMessage(
+      ADMIN_ID,
+      `⚠️ <b>Нужна выдача бонуса Gemini</b>\nКурс-заказ: #${courseOrderId}\nБонус-заказ: #${bonus.id}\nПокупатель: <code>${main.user.tgId}</code>\n\nПосле выдачи: <code>/give ${bonus.id} данные</code>`,
+      { parse_mode: "HTML" },
+    ).catch(() => {});
+  }
+}
+
+async function fulfillCourseOrder(orderId: number): Promise<void> {
+  let order = await db.botOrder.findUnique({ where: { id: orderId }, include: { user: true } });
+  if (!order || order.source !== "course" || order.status === "delivered") return;
+  const channelId = await configuredCourseChannel();
+  if (!channelId) {
+    await db.botOrder.update({ where: { id: order.id }, data: { status: "awaiting_course_config" } });
+    if (order.status !== "awaiting_course_config" && ADMIN_ID) {
+      await bot.api.sendMessage(ADMIN_ID, `⚠️ Курс оплачен (#${order.id}), но канал не настроен. Выполните /course_setup.`).catch(() => {});
+    }
+    return;
+  }
+
+  let invite = order.payload.trim();
+  if (!invite) {
+    const created = await bot.api.createChatInviteLink(channelId, {
+      name: `AI Darslik · заказ ${order.id}`.slice(0, 32),
+      member_limit: 1,
+    });
+    invite = created.invite_link;
+    await db.botOrder.update({ where: { id: order.id }, data: { payload: invite, status: "course_ready" } });
+    order = { ...order, payload: invite, status: "course_ready" };
+  }
+
+  const lang = normalizeLang(order.user.lang);
+  const text = lang === "uz"
+    ? `✅ <b>AI Darslik kursi uchun to'lov tasdiqlandi!</b>\n\nQuyidagi shaxsiy havola kanalga faqat <b>bir marta</b> kirish imkonini beradi. Uni boshqa odamlarga yubormang.\n\n🎁 18 oylik Gemini AI Pro bonusi alohida xabar bilan yuboriladi.`
+    : lang === "en"
+      ? "✅ <b>Your AI Darslik payment is confirmed!</b>\n\nThe personal link below can be used to join the channel only <b>once</b>. Do not share it.\n\n🎁 Your 18-month Gemini AI Pro bonus will arrive in a separate message."
+      : "✅ <b>Оплата курса AI Darslik подтверждена!</b>\n\nПерсональная ссылка ниже позволяет вступить в канал только <b>один раз</b>. Не передавайте её другим.\n\n🎁 Бонус Gemini AI Pro на 18 месяцев придёт отдельным сообщением.";
+  await bot.api.sendMessage(order.user.tgId, text, {
+    parse_mode: "HTML",
+    reply_markup: new InlineKeyboard().url(lang === "uz" ? "🎓 Kursga kirish" : lang === "en" ? "🎓 Join the course" : "🎓 Вступить в курс", invite),
+  });
+  await db.botOrder.update({ where: { id: order.id }, data: { status: "delivered", deliveredAt: new Date() } });
+  await deliverCourseBonus(order.id);
+}
+
+async function executeCoursePurchase(
+  user: { id: number; tgId: string; lang: string },
+  variantId: number,
+  label: string,
+  total: number,
+  paymentMethod?: string,
+  paymentId?: string,
+) {
+  if (!paymentMethod || !paymentId || !["payme", "click"].includes(paymentMethod)) {
+    await bot.api.sendMessage(user.tgId, "Этот курс оплачивается через Payme или Click.").catch(() => {});
+    return;
+  }
+
+  let order = await db.botOrder.findFirst({ where: { paymentMethod, paymentId, source: "course" } });
+  if (!order) {
+    try {
+      order = await db.$transaction(async (tx) => {
+        const freshUser = await tx.botUser.findUnique({ where: { id: user.id } });
+        const freshVariant = await tx.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
+        if (!freshUser || !freshVariant || !isVariantBuyable(freshVariant) || !isCourseProduct(freshVariant)) throw new Error("COURSE_UNAVAILABLE");
+        if (freshUser.balance < total) throw new Error("COURSE_BALANCE");
+        if (total > 0) await tx.botUser.update({ where: { id: user.id }, data: { balance: { decrement: total } } });
+        return tx.botOrder.create({
+          data: {
+            userId: user.id,
+            variantId,
+            titleRu: label,
+            priceUsdt: 0,
+            payload: "",
+            source: "course",
+            status: "awaiting_course_link",
+            paymentMethod,
+            paymentId,
+          },
+        });
+      });
+    } catch (e) {
+      order = await db.botOrder.findFirst({ where: { paymentMethod, paymentId, source: "course" } });
+      if (!order) {
+        const key = (e as Error).message === "COURSE_BALANCE" ? "not_enough_funds" : "plan_unavailable";
+        await bot.api.sendMessage(user.tgId, t(user.lang, key), { parse_mode: "HTML" }).catch(() => {});
+        return;
+      }
+    }
+  }
+  await fulfillCourseOrder(order.id);
+}
+
+async function retryPendingCourseOrders(): Promise<void> {
+  const rows = await db.botOrder.findMany({
+    where: { source: "course", status: { in: ["awaiting_course_link", "awaiting_course_config", "course_ready"] } },
+    orderBy: { id: "asc" },
+    take: 10,
+  });
+  for (const row of rows) await fulfillCourseOrder(row.id).catch((e) => console.error("[bot] course retry failed:", (e as Error).message));
+
+  // If the process stopped after sending the invite but before creating the
+  // bonus order, recover it here. Existing delivered/awaiting bonus orders are
+  // cheap no-ops and cannot be duplicated because of the unique payment key.
+  const recentlyDelivered = await db.botOrder.findMany({
+    where: { source: "course", status: "delivered" },
+    orderBy: { id: "desc" },
+    take: 20,
+  });
+  for (const row of recentlyDelivered) await deliverCourseBonus(row.id).catch((e) => console.error("[bot] course bonus retry failed:", (e as Error).message));
 }
 // Resolve a supplier API source by slug (Variant.supplierKey). Falls back to env Vex.
 async function resolveSource(slug: string | null | undefined): Promise<Source | null> {
@@ -986,7 +1301,7 @@ async function activePromoForVariant(variantId: number): Promise<{ originalPrice
 // buttons (a pending top-up is pre-created for the exact price); Stars is a
 // callback (an invoice message, to avoid a slow API call on every ± re-render);
 // admin opens a chat with the product pre-filled.
-async function appendCardPayButtons(kb: InlineKeyboard, userId: number, variantId: number, qty: number, label: string, total: number, refSpend: number, lang: string) {
+async function appendCardPayButtons(kb: InlineKeyboard, userId: number, variantId: number, qty: number, label: string, total: number, refSpend: number, lang: string, bankOnly = false) {
   const note = `buy:${variantId}:${qty}`;
   const amt = money(total, lang);
   if (paymeReady()) {
@@ -999,13 +1314,15 @@ async function appendCardPayButtons(kb: InlineKeyboard, userId: number, variantI
   } else {
     kb.text(`Click · ${amt}`, `tclick_buy:${total}:${variantId}:${qty}`).icon(CLICK_BTN_EMOJI).row();
   }
-  kb.text(stripLeadEmoji(t(lang, "pay_stars", { n: soumToStars(total) })), `tstar_buy:${total}:${variantId}:${qty}`).icon(STARS_BTN_EMOJI).row();
-  const adminUser = (await setting("support_username", "Aiobuna_support")).replace(/^@/, "");
-  kb.url(stripLeadEmoji(t(lang, "admin_topup")), `https://t.me/${adminUser}?text=${encodeURIComponent(`${label} — ${money(total, lang)}`)}`).icon(ADMIN_BTN_EMOJI).row();
+  if (!bankOnly) {
+    kb.text(stripLeadEmoji(t(lang, "pay_stars", { n: soumToStars(total) })), `tstar_buy:${total}:${variantId}:${qty}`).icon(STARS_BTN_EMOJI).row();
+    const adminUser = (await setting("support_username", "Aiobuna_support")).replace(/^@/, "");
+    kb.url(stripLeadEmoji(t(lang, "admin_topup")), `https://t.me/${adminUser}?text=${encodeURIComponent(`${label} — ${money(total, lang)}`)}`).icon(ADMIN_BTN_EMOJI).row();
+  }
 }
 
 async function buildQtyChooser(
-  v: { id: number; priceUzs: number; autoSupplier: boolean; supplierStock: number; titleRu: string; titleUz: string; durationDays: number; needsUsername?: boolean; fragmentKind?: string; fragmentAmount?: number; bulkPrices?: string | null; bulkBonus?: string | null; plan: { product: { id: number; titleRu: string; titleEn: string; titleUz: string; descRu?: string; descEn?: string; descUz?: string; refDiscount?: boolean; videoFileId?: string | null } } },
+  v: { id: number; priceUzs: number; autoSupplier: boolean; supplierStock: number; titleRu: string; titleUz: string; durationDays: number; needsUsername?: boolean; fragmentKind?: string; fragmentAmount?: number; bulkPrices?: string | null; bulkBonus?: string | null; plan: { product: { id: number; code: string; titleRu: string; titleEn: string; titleUz: string; descRu?: string; descEn?: string; descUz?: string; refDiscount?: boolean; videoFileId?: string | null } } },
   lang: string,
   user: { id: number; tgId: string; bonusReferrals?: number | null; spentReferrals?: number | null },
   qty: number,
@@ -1013,6 +1330,7 @@ async function buildQtyChooser(
   unitPrice: number,
   vipLabel: string | null,
 ) {
+  const course = isCourseProduct(v);
   const pt = await pick3(v.plan.product.titleRu, v.plan.product.titleEn, v.plan.product.titleUz, lang);
   const vt = await locName(v.titleRu, v.titleUz, lang);
   // formatItemTitle drops the duplicate when product and variant names repeat
@@ -1030,7 +1348,7 @@ async function buildQtyChooser(
   // Stepping one star at a time from 50 to 500 would be 450 taps, so the
   // one-star variant gets coarse steps. Packs still move one pack at a time.
   const starStep = starsPerUnit === STARS_RATE_CARRIER_AMOUNT;
-  qty = clamp(Math.floor(qty) || minQty, minQty, max);
+  qty = course ? 1 : clamp(Math.floor(qty) || minQty, minQty, max);
   const deal = quantityDeal(v, unitPrice, qty);
   const total = deal.total;
   // Referral discount (same rule as doBuy): eligible product + enough referrals.
@@ -1045,7 +1363,9 @@ async function buildQtyChooser(
   const flashPct = promo && promo.originalPrice > unitPrice ? Math.round((promo.originalPrice - unitPrice) / promo.originalPrice * 100) : 0;
 
   const kb = new InlineKeyboard();
-  if (starStep) {
+  if (course) {
+    // Course access is sold per person and always creates exactly one link.
+  } else if (starStep) {
     kb.text("−50", `q:${v.id}:${qty - 50}:${back}`)
       .text("−10", `q:${v.id}:${qty - 10}:${back}`)
       .text(`${qty} ⭐`, "noop")
@@ -1073,7 +1393,7 @@ async function buildQtyChooser(
   if (deliversToAccount(v)) {
     kb.text(t(lang, "buy_for", { v: money(payTotal, lang) }), `bc:${v.id}:${qty}`).row();
   } else {
-    await appendCardPayButtons(kb, user.id, v.id, qty, label, payTotal, disc?.cost ?? 0, lang);
+    await appendCardPayButtons(kb, user.id, v.id, qty, label, payTotal, disc?.cost ?? 0, lang, course);
   }
   // Back goes to the plan list only when there IS one; a single-variant product
   // opens this card directly (showProduct skips its page), so "back" there must
@@ -1097,9 +1417,9 @@ async function buildQtyChooser(
     (desc ? `\n${esc(desc)}\n` : "") +
     (flashBlock ? `\n${flashBlock}` : "") +
     (vipLabel ? `\n💎 <b>${esc(vipLabel)}</b>` : "") +
-    `\n${t(lang, "price_each", { v: unitPrice > 0 ? money(unitPrice, lang) : t(lang, "free") })}` +
-    `\n${t(lang, "qty", { n: qty })}` +
-    (left !== null ? `\n${t(lang, "low_stock", { n: left })}` : "") +
+    (course ? "" : `\n${t(lang, "price_each", { v: unitPrice > 0 ? money(unitPrice, lang) : t(lang, "free") })}`) +
+    (course ? "" : `\n${t(lang, "qty", { n: qty })}`) +
+    (!course && left !== null ? `\n${t(lang, "low_stock", { n: left })}` : "") +
     (deal.free > 0 ? `\n🎁 <b>+${deal.free} в подарок</b> → получите ${qty + deal.free} шт.` : "") +
     (disc ? `\n🎁 Скидка за рефералов: <b>−${disc.pct}%</b> (спишется ${disc.cost} реф.)` : "") +
     `\n${t(lang, "total", { v: money(payTotal, lang) })}` +
@@ -1293,7 +1613,7 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
   // typed-amount flow, and an order below the floor cannot be filled at all.
   const starsUnit = v.fragmentKind === "stars" ? v.fragmentAmount : 0;
   const minQty = starsUnit > 0 ? minQtyForStars(starsUnit, STARS_MIN_QUANTITY) : 1;
-  const paidQty = clamp(Math.floor(qty) || minQty, minQty, max);
+  const paidQty = isCourseProduct(v) ? 1 : clamp(Math.floor(qty) || minQty, minQty, max);
   const eff = await effPriceFor(user.id, variantId, v.priceUzs);
 
   // Quantity rules: the bundle price is what we charge, and the bonus items are
@@ -1314,6 +1634,10 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
     freeQty > 0 ? `${baseTitle} ×${paidQty} +${freeQty} 🎁`
     : paidQty > 1 ? `${baseTitle} ×${paidQty}`
     : baseTitle;
+
+  if (isCourseProduct(v)) {
+    return executeCoursePurchase(user, variantId, label, total, paymentMethod, paymentId);
+  }
 
   // --- Manual delivery: charge, then the admin sends the goods by hand ---
   //
@@ -1732,6 +2056,7 @@ async function showBankPicker(
   targetUsername?: string,
   disc: { pct: number; cost: number } | null = null,
   recipientTgId?: string,
+  bankOnly = false,
 ) {
   const user = await getUser(ctx);
   // Callback-data suffix for the fallback pay buttons. Mirrors the note layout
@@ -1770,29 +2095,31 @@ async function showBankPicker(
   // URL button, so tapping opens the Stars payment sheet directly (no second
   // message). The product name is the invoice title. Falls back to a callback
   // invoice if the link can't be created.
-  const starLabel = stripLeadEmoji(t(lang, "pay_stars", { n: soumToStars(total) }));
-  // Fixed 8-field payload so the referral-spend rides along to delivery even
-  // when there's no recipient: topup:<amount>:stars:buy:<vid>:<qty>:<uname>:<refSpend>
-  const starPayload = `topup:${total}:stars:buy:${v.id}:${qty}:${targetUsername ?? ""}:${refSpend}:${recipientTgId ?? ""}`;
-  try {
-    const cap = await buyInvoiceCaption(note, lang);
-    const starLink = await ctx.api.createInvoiceLink(
-      cap?.title ?? label.slice(0, 32),
-      cap?.desc ?? label.slice(0, 255),
-      starPayload,
-      "", "XTR",
-      [{ label: money(total, lang), amount: soumToStars(total) }],
-    );
-    kb.url(starLabel, starLink).icon(STARS_BTN_EMOJI).row();
-  } catch (e) {
-    console.error("[bot] stars link:", (e as Error).message);
-    kb.text(starLabel, `tstar_buy:${total}:${v.id}:${qty}${suffix}`).icon(STARS_BTN_EMOJI).row();
+  if (!bankOnly) {
+    const starLabel = stripLeadEmoji(t(lang, "pay_stars", { n: soumToStars(total) }));
+    // Fixed 8-field payload so the referral-spend rides along to delivery even
+    // when there's no recipient: topup:<amount>:stars:buy:<vid>:<qty>:<uname>:<refSpend>
+    const starPayload = `topup:${total}:stars:buy:${v.id}:${qty}:${targetUsername ?? ""}:${refSpend}:${recipientTgId ?? ""}`;
+    try {
+      const cap = await buyInvoiceCaption(note, lang);
+      const starLink = await ctx.api.createInvoiceLink(
+        cap?.title ?? label.slice(0, 32),
+        cap?.desc ?? label.slice(0, 255),
+        starPayload,
+        "", "XTR",
+        [{ label: money(total, lang), amount: soumToStars(total) }],
+      );
+      kb.url(starLabel, starLink).icon(STARS_BTN_EMOJI).row();
+    } catch (e) {
+      console.error("[bot] stars link:", (e as Error).message);
+      kb.text(starLabel, `tstar_buy:${total}:${v.id}:${qty}${suffix}`).icon(STARS_BTN_EMOJI).row();
+    }
+    // Contact admin: a URL button that opens the admin's personal chat with the
+    // product name pre-filled, so the customer only has to hit send.
+    const adminUser = (await setting("support_username", "Aiobuna_support")).replace(/^@/, "");
+    const adminText = `${label} — ${money(total, lang)}${targetUsername ? ` (@${targetUsername})` : ""}`;
+    kb.url(stripLeadEmoji(t(lang, "admin_topup")), `https://t.me/${adminUser}?text=${encodeURIComponent(adminText)}`).icon(ADMIN_BTN_EMOJI).row();
   }
-  // Contact admin: a URL button that opens the admin's personal chat with the
-  // product name pre-filled, so the customer only has to hit send.
-  const adminUser = (await setting("support_username", "Aiobuna_support")).replace(/^@/, "");
-  const adminText = `${label} — ${money(total, lang)}${targetUsername ? ` (@${targetUsername})` : ""}`;
-  kb.url(stripLeadEmoji(t(lang, "admin_topup")), `https://t.me/${adminUser}?text=${encodeURIComponent(adminText)}`).icon(ADMIN_BTN_EMOJI).row();
   kb.text(t(lang, "back"), `q:${v.id}:${qty}:0:all`);
 
   const text =
@@ -1827,7 +2154,7 @@ async function doBuy(ctx: Context, variantId: number, qty: number, targetUsernam
   const baseTitle = `${pt} — ${vt}`;
   const max = await availableStock(v);
   if (max <= 0) return ctx.answerCallbackQuery({ text: t(lang, "out_of_stock"), show_alert: true });
-  qty = clamp(Math.floor(qty) || 1, 1, max);
+  qty = isCourseProduct(v) ? 1 : clamp(Math.floor(qty) || 1, 1, max);
   const eff = await effPriceFor(user.id, variantId, v.priceUzs);
   // Must use the SAME bundle price executePurchase() will charge. Multiplying
   // the unit price here would quote a higher figure than the actual debit and
@@ -1850,7 +2177,7 @@ async function doBuy(ctx: Context, variantId: number, qty: number, targetUsernam
   const payTotal = disc ? Math.round(total * (100 - disc.pct) / 100) : total;
 
   // Always straight to the bank / Stars picker for the full price.
-  return showBankPicker(ctx, lang, v, qty, label, payTotal, targetUsername, disc, recipientTgId);
+  return showBankPicker(ctx, lang, v, qty, label, payTotal, targetUsername, disc, recipientTgId, isCourseProduct(v));
 }
 
 // Purchase paid in referral points (not сум). Reuses executePurchase's
@@ -3800,6 +4127,60 @@ bot.command("reftest", async (ctx) => {
   );
 });
 
+async function saveCourseChannel(ctx: Context, rawChatId: string) {
+  const chatId = rawChatId.trim();
+  if (!/^-100\d{6,}$/.test(chatId) && !/^@[A-Za-z0-9_]{5,}$/.test(chatId)) {
+    await ctx.reply("❌ Не удалось определить канал. Перешлите сюда любой текстовый пост из канала Ai Darslik или отправьте его ID вида <code>-100...</code>.", { parse_mode: "HTML" });
+    return false;
+  }
+  try {
+    const [chat, member] = await Promise.all([
+      ctx.api.getChat(chatId),
+      ctx.api.getChatMember(chatId, ctx.me.id),
+    ]);
+    const isCreator = member.status === "creator";
+    const canInvite = isCreator || (member.status === "administrator" && member.can_invite_users === true);
+    if (!canInvite) {
+      await ctx.reply("❌ Бот найден в канале, но у него нет права приглашать пользователей. Включите для бота право «Приглашение пользователей», затем повторите /course_setup.");
+      return false;
+    }
+    await db.setting.upsert({
+      where: { key: COURSE_CHANNEL_SETTING },
+      create: { key: COURSE_CHANNEL_SETTING, valueRu: chatId, type: "text" },
+      update: { valueRu: chatId },
+    });
+    const { variant } = await ensureCourseCatalog(true);
+    const bonus = await findCourseBonusVariant();
+    pending.delete(String(ctx.from?.id));
+    await ctx.reply(
+      `✅ <b>AI Darslik настроен</b>\n\n` +
+      `Канал: <b>${esc(("title" in chat ? chat.title : "") || chatId)}</b>\n` +
+      `Курс: <b>${money(COURSE_PRICE_UZS, "ru")}</b> · первый в каталоге\n` +
+      `Одноразовая ссылка: ✅\n` +
+      `Бонус Gemini 18 мес.: ${bonus ? `✅ товар #${bonus.id}` : "⚠️ товар не найден, потребуется ручная выдача"}\n` +
+      `ID варианта курса: <code>${variant.id}</code>`,
+      { parse_mode: "HTML" },
+    );
+    return true;
+  } catch (e) {
+    await ctx.reply(`❌ Telegram не дал доступ к каналу: <code>${esc((e as Error).message.slice(0, 250))}</code>\n\nПроверьте ID и право бота приглашать пользователей.`, { parse_mode: "HTML" });
+    return false;
+  }
+}
+
+// One-time owner setup. Forwarding a channel post is easier and safer than
+// asking the owner to discover Telegram's internal -100... id manually.
+bot.command("course_setup", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const supplied = String(ctx.match ?? "").trim();
+  if (supplied) return void await saveCourseChannel(ctx, supplied);
+  pending.set(String(ctx.from?.id), { type: "course_channel" });
+  await ctx.reply(
+    "🎓 <b>Настройка AI Darslik</b>\n\nПерешлите сюда любой <b>текстовый пост</b> из закрытого канала. Либо отправьте ID канала вида <code>-100...</code>.\n\nУ бота должно быть право приглашать пользователей.",
+    { parse_mode: "HTML" },
+  );
+});
+
 // Admin: /channels — is automatic crediting actually possible right now?
 // Telegram only delivers chat_member updates to a bot that is an ADMIN of the
 // channel with permission to see members. Without that the bot cannot notice a
@@ -5142,6 +5523,15 @@ bot.on("message:text", async (ctx) => {
   const state = pending.get(key);
   if (!state) return;
 
+  if (state.type === "course_channel") {
+    if (!isAdmin(ctx)) { pending.delete(key); return; }
+    const origin = (ctx.message as unknown as { forward_origin?: { type?: string; chat?: { id?: string | number } } }).forward_origin;
+    const forwardedId = origin?.type === "channel" && origin.chat?.id ? String(origin.chat.id) : "";
+    const typedId = (ctx.message.text ?? "").trim();
+    await saveCourseChannel(ctx, forwardedId || typedId);
+    return;
+  }
+
   if (state.type === "set_product_video") {
     const txt = (ctx.message.text ?? "").trim().toLowerCase();
     if (["убрать", "убери", "удалить", "-", "reset", "o‘chir", "ochirish"].includes(txt)) {
@@ -5804,6 +6194,12 @@ async function ensureSchema() {
     `ALTER TABLE "BotOrder" ADD COLUMN IF NOT EXISTS "paymentId" TEXT`,
     `CREATE INDEX IF NOT EXISTS "BotOrder_deliveryState_idx"
        ON "BotOrder"("deliveryState") WHERE "deliveryState" <> ''`,
+    // A payment may create at most one course order, and a course order may
+    // create at most one bonus order. NULL legacy/manual payments are excluded.
+    `CREATE UNIQUE INDEX IF NOT EXISTS "BotOrder_course_payment_key"
+       ON "BotOrder"("paymentMethod", "paymentId")
+       WHERE "paymentMethod" IS NOT NULL AND "paymentId" IS NOT NULL
+         AND "source" IN ('course', 'course_bonus')`,
     // Idempotency for Telegram Stars payments: externalId holds the
     // telegram_payment_charge_id, so the same payment can never be credited
     // twice. Partial (externalId IS NOT NULL) because Payme/Click rows leave it
@@ -6024,10 +6420,17 @@ async function deliverPaidPaymeTopUps() {
 
 async function bootstrap() {
   await ensureSchema();             // create missing tables before serving anything
+  await ensureCourseCatalog(Boolean(await configuredCourseChannel())).catch((e) => {
+    console.error("[bot] ensureCourseCatalog failed:", (e as Error).message);
+  });
   await backfillChannelVerified();  // one-time referral verification backfill (guarded)
   await maybeResetAdmins();         // one-time admin reset (guarded)
   // Poll for Payme top-ups the webhook credited, to notify + fulfil them.
-  setInterval(() => { deliverPaidPaymeTopUps().catch(() => {}); checkPromoExpiry().catch(() => {}); }, 12_000);
+  setInterval(() => {
+    deliverPaidPaymeTopUps().catch(() => {});
+    retryPendingCourseOrders().catch(() => {});
+    checkPromoExpiry().catch(() => {});
+  }, 12_000);
   const pollingOptions = {
     drop_pending_updates: false,
     allowed_updates: [
