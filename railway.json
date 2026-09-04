@@ -4,6 +4,8 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "npm run start:all"
+    "startCommand": "npm run start:all",
+    "overlapSeconds": "0",
+    "drainingSeconds": "0"
   }
 }
