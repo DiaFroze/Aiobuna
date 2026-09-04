@@ -59,13 +59,26 @@ function giftsBannerAsset(): { file: InputFile; isVideo: boolean } | null {
   }
   return null;
 }
-const shopBannerFile = () => mediaAssetFile("shop-banner.jpg");
+let cachedBannerFileId: string | null = null;
+let cachedBannerIsVideo = false;
+
+function cacheBannerFileId(msg: any, isVideo: boolean) {
+  if (!msg) return;
+  if (isVideo && "video" in msg && msg.video?.file_id) {
+    cachedBannerFileId = msg.video.file_id;
+    cachedBannerIsVideo = true;
+  } else if (!isVideo && "photo" in msg && Array.isArray(msg.photo) && msg.photo.length > 0) {
+    cachedBannerFileId = msg.photo[msg.photo.length - 1].file_id;
+    cachedBannerIsVideo = false;
+  }
+}
+
 // Shop banner: an admin-set Telegram file_id (photo OR video) wins; otherwise a
-// file on disk (shop-banner.mov/.mp4 → video, .jpg/.png → photo). Set it from
-// the phone with /banner — no redeploy needed to change it.
+// cached Telegram file_id; otherwise a file on disk (shop-banner.mov/.mp4 → video, .jpg/.png → photo).
 async function shopBanner(): Promise<{ src: string | InputFile; isVideo: boolean } | null> {
   const fileId = (await setting("shop_banner_file_id", "")).trim();
   if (fileId) return { src: fileId, isVideo: (await setting("shop_banner_is_video", "")).trim() === "1" };
+  if (cachedBannerFileId) return { src: cachedBannerFileId, isVideo: cachedBannerIsVideo };
   for (const name of ["shop-banner.mov", "shop-banner.mp4"]) {
     const f = mediaAssetFile(name);
     if (f) return { src: f, isVideo: true };
@@ -754,7 +767,7 @@ async function showMenu(ctx: Context, page: number, sort: Sort, edit: boolean, f
       const send = banner.isVideo
         ? ctx.replyWithVideo(banner.src, { caption: text, parse_mode: "HTML", reply_markup: kb })
         : ctx.replyWithPhoto(banner.src, { caption: text, parse_mode: "HTML", reply_markup: kb });
-      await send.catch(async () => {
+      await send.then((msg) => cacheBannerFileId(msg, banner.isVideo)).catch(async () => {
         await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
       });
     } else {
@@ -2697,7 +2710,7 @@ async function sendHome(ctx: Context, user: Awaited<ReturnType<typeof getUser>>)
     const send = banner.isVideo
       ? ctx.replyWithVideo(banner.src, { caption: menu.text, parse_mode: "HTML", reply_markup: menu.kb })
       : ctx.replyWithPhoto(banner.src, { caption: menu.text, parse_mode: "HTML", reply_markup: menu.kb });
-    await send.catch(async () => {
+    await send.then((msg) => cacheBannerFileId(msg, banner.isVideo)).catch(async () => {
       await ctx.reply(menu.text, { parse_mode: "HTML", reply_markup: menu.kb }).catch(() => {});
     });
   } else {
@@ -5479,7 +5492,7 @@ bot.on("chat_member", async (ctx) => {
     const send = banner.isVideo
       ? bot.api.sendVideo(tgId, banner.src, { caption: menu.text, parse_mode: "HTML", reply_markup: menu.kb })
       : bot.api.sendPhoto(tgId, banner.src, { caption: menu.text, parse_mode: "HTML", reply_markup: menu.kb });
-    await send.catch(async () => {
+    await send.then((msg) => cacheBannerFileId(msg, banner.isVideo)).catch(async () => {
       await bot.api.sendMessage(tgId, menu.text, { parse_mode: "HTML", reply_markup: menu.kb }).catch(() => {});
     });
   } else {
@@ -5533,6 +5546,12 @@ bot.catch((err) => console.error("[bot] error:", err.error));
 // cosmetic emoji.
 function stripPremiumDecorations(payload: any): boolean {
   let changed = false;
+  if (typeof payload?.reply_markup === "string") {
+    try {
+      payload.reply_markup = JSON.parse(payload.reply_markup);
+      changed = true;
+    } catch {}
+  }
   const rm = payload?.reply_markup;
   const scrub = (rows?: any[][]) => {
     if (!rows) return;
@@ -5570,6 +5589,17 @@ function isPremiumDecorationError(error: unknown): boolean {
   return /custom[_ ]emoji|icon_custom_emoji|button_type_invalid/i.test(description);
 }
 
+function hasInputFile(obj: any): boolean {
+  if (!obj || typeof obj !== "object") return false;
+  if (obj instanceof InputFile) return true;
+  return Object.values(obj).some((v: any) => {
+    if (v instanceof InputFile) return true;
+    if (Array.isArray(v)) return v.some(hasInputFile);
+    if (typeof v === "object") return hasInputFile(v);
+    return false;
+  });
+}
+
 // Auto-color every button (Bot API 9.4 `style`) + premium nav icons, with a
 // safety net: if the send is rejected and the payload carried premium emoji,
 // retry once without them so one bad emoji can't blank a whole screen.
@@ -5604,6 +5634,18 @@ bot.api.config.use(async (prev, method, payload, signal) => {
           }
         }
       }
+
+  // For multipart form-data (e.g. sendPhoto with InputFile), grammY will pass payload.reply_markup
+  // into valuePart. If reply_markup is an object, grammY calls JSON.stringify on it which quotes
+  // icon_custom_emoji_id. Pre-stringifying reply_markup with raw unquoted numeric IDs guarantees
+  // that grammY places the exact unquoted integer into the form-data stream!
+  if (hasInputFile(payload) && payload && (payload as any).reply_markup && typeof (payload as any).reply_markup === "object") {
+    (payload as any).reply_markup = JSON.stringify((payload as any).reply_markup).replace(
+      /"icon_custom_emoji_id"\s*:\s*"(\d+)"/g,
+      '"icon_custom_emoji_id":$1'
+    );
+  }
+
   try {
     return await prev(method, payload, signal);
   } catch (e) {
