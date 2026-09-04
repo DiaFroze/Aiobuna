@@ -240,15 +240,20 @@ const pending = new Map<
   | { type: "stars_custom_qty"; variantId: number; back: string }
 >();
 
-const bot = new Bot(token);
-
 // Telegram Bot API requires icon_custom_emoji_id as a JSON number,
 // but these are 19-digit IDs that exceed JS Number precision.
 // We patch the raw fetch body to convert "icon_custom_emoji_id":"123" → "icon_custom_emoji_id":123
 // without going through JS number parsing (which would lose precision).
 const _origFetch = globalThis.fetch;
-globalThis.fetch = async function patchedFetch(input: RequestInfo | URL, init?: RequestInit) {
-  const url = typeof input === "string" ? input : input instanceof URL ? input.href : (input && typeof input === "object" && "url" in input) ? String((input as any).url) : "";
+const patchedFetch: typeof fetch = async function patchedFetch(input: RequestInfo | URL, init?: RequestInit) {
+  const url =
+    typeof input === "string"
+      ? input
+      : input instanceof URL
+      ? input.href
+      : input && typeof input === "object" && "url" in input
+      ? String((input as any).url)
+      : "";
   if (
     url.includes("api.telegram.org") &&
     init?.body &&
@@ -262,6 +267,13 @@ globalThis.fetch = async function patchedFetch(input: RequestInfo | URL, init?: 
   }
   return _origFetch(input as RequestInfo, init);
 } as typeof fetch;
+globalThis.fetch = patchedFetch;
+
+const bot = new Bot(token, {
+  client: {
+    fetch: patchedFetch,
+  },
+});
 
 // ---------- helpers ----------
 const money = (n: number, lang: string | null | undefined) =>
@@ -5596,7 +5608,8 @@ bot.api.config.use(async (prev, method, payload, signal) => {
     return await prev(method, payload, signal);
   } catch (e) {
     if (isPremiumDecorationError(e) && stripPremiumDecorations(payload)) {
-      console.error(`[bot] ${method} rejected with premium emoji, retrying plain:`, (e as { description?: string })?.description ?? (e as Error).message);
+      const desc = (e as { description?: string })?.description ?? (e as Error).message;
+      console.error(`[bot] ${method} rejected with premium emoji (${desc}), retrying plain`);
       return await prev(method, payload, signal);
     }
     throw e;
