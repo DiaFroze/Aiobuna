@@ -89,6 +89,12 @@ async function shopBanner(): Promise<{ src: string | InputFile; isVideo: boolean
   }
   return null;
 }
+let cachedCourseBannerFileId: string | null = null;
+const courseBannerFile = () => mediaAssetFile("course-banner.jpg");
+function courseBanner(): string | InputFile | null {
+  if (cachedCourseBannerFileId) return cachedCourseBannerFileId;
+  return courseBannerFile();
+}
 const promoInstructionsFile = () => mediaAssetFile("promo-instructions.mp4");
 const howToPayFile = () => mediaAssetFile("how-to-pay.mp4");
 const howToActivateFile = () => mediaAssetFile("how-to-activate.mp4");
@@ -101,6 +107,7 @@ type SendOrEditOpts = {
   reply_markup?: InlineKeyboard | undefined;
   photo?: string | InputFile | null;
   video?: string | InputFile | null;
+  onPhotoSent?: (msg: any) => void;
   link_preview_options?: { url?: string; show_above_text?: boolean; prefer_large_media?: boolean; is_disabled?: boolean } | undefined;
 };
 async function sendOrEdit(ctx: Context, text: string, opts: SendOrEditOpts = {}) {
@@ -120,9 +127,13 @@ async function sendOrEdit(ctx: Context, text: string, opts: SendOrEditOpts = {})
 
   if (photo) {
     if (chatId && messageId) await ctx.api.deleteMessage(chatId, messageId).catch(() => {});
-    await ctx.replyWithPhoto(photo, { caption: text, parse_mode: "HTML", reply_markup: kb }).catch(async () => {
-      await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
-    });
+    await ctx.replyWithPhoto(photo, { caption: text, parse_mode: "HTML", reply_markup: kb })
+      .then((msg) => {
+        opts.onPhotoSent?.(msg);
+      })
+      .catch(async () => {
+        await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+      });
     return;
   }
 
@@ -487,7 +498,7 @@ function mainKeyboard(lang: string) {
   // Подарки retired (GIFTS_ENABLED=false) — referral rewards are now a discount
   // applied at checkout, not a free-item shop.
   if (GIFTS_ENABLED) kb.text(t(lang, "btn_freebies")).row();
-  kb.text(t(lang, "btn_profile")).text(t(lang, "btn_instructions")).row();
+  kb.text(t(lang, "btn_profile")).row();
   return kb.resized().persistent();
 }
 
@@ -596,6 +607,57 @@ async function configuredCourseChannel(): Promise<string> {
   return (process.env.COURSE_CHANNEL_ID ?? await setting(COURSE_CHANNEL_SETTING, "")).trim();
 }
 
+const COURSE_DESC_UZ = `Sun'iy intellekt yordamida noldan professional darajada kontent, rasm va video yaratish bo'yicha to'liq amaliy kurs!
+
+📌 <b>Kursda nimalar o'rganasiz (20 ta darslik):</b>
+1. AI bilan tanishuv | 2. Eng kuchli AI ilovalar
+3. G'oyalar xazinasi | 4. Prompt engineering
+5. Poza va rakurslar | 6. Formatlar siri
+7. AI fotosessiya | 8. Multfilm olami
+9. Instagram profili | 10. To'g'ri auditoriya
+11. Gem bot yaratish | 12. Flow AI video
+13. Gapiruvchi buyumlar | 14. Multfilm videolari
+15. Reklama videolari | 16. CapCut montaj
+17. Instagramga yuklash | 18. Retro rasmlarni tiklash
+19. AI musiqa | 20. Portfolio & narx
+
+🎁 <b>Bonus:</b> 18 oylik <b>Gemini AI Pro</b> (5 TB) sovg'a!
+🔒 Yopiq kanalga bir martalik havola to'lovdan so'ng darhol beriladi.`;
+
+const COURSE_DESC_RU = `Полный практический курс по созданию контента, фото и видео с помощью нейросетей от А до Я!
+
+📌 <b>Чему вы научитесь на курсе (20 уроков):</b>
+1. Знакомство с ИИ | 2. Топ AI-приложения
+3. Банк идей | 4. Промпт-инжиниринг
+5. Позы и ракурсы | 6. Секреты форматов
+7. AI-фотосессия | 8. Мир анимации
+9. Профиль Instagram | 10. Целевая аудитория
+11. Создание Gem-бота | 12. Flow AI видео
+13. Говорящие предметы | 14. Мультфильмы
+15. Рекламные ролики | 16. Монтаж в CapCut
+17. Публикация в Instagram | 18. Реставрация фото
+19. AI-музыка | 20. Портфолио и прайс
+
+🎁 <b>Бонус:</b> <b>Gemini AI Pro на 18 месяцев</b> (5 ТБ облака) в подарок!
+🔒 Персональная ссылка в закрытый канал выдаётся сразу после оплаты.`;
+
+const COURSE_DESC_EN = `Comprehensive hands-on course on creating content, photos, and videos with AI from scratch!
+
+📌 <b>What you will learn (20 Lessons):</b>
+1. AI Intro | 2. Top AI Apps
+3. Idea Generation | 4. Prompt Engineering
+5. Poses & Angles | 6. Format Secrets
+7. AI Photoshoot | 8. Animation World
+9. Instagram Profile | 10. Target Audience
+11. Gem Bot Creation | 12. Flow AI Video
+13. Talking Objects | 14. Cartoon Videos
+15. Commercial Ads | 16. CapCut Editing
+17. Instagram Upload | 18. Photo Restoration
+19. AI Music | 20. Portfolio & Pricing
+
+🎁 <b>Bonus:</b> 18 Months of <b>Gemini AI Pro</b> (5TB cloud) included!
+🔒 Private channel invite link is delivered instantly upon payment.`;
+
 /** Create the course catalog entry once and keep its contractual price/order stable. */
 async function ensureCourseCatalog(activate = false) {
   let product = await db.product.findUnique({
@@ -607,13 +669,13 @@ async function ensureCourseCatalog(activate = false) {
     product = await db.product.create({
       data: {
         code: COURSE_PRODUCT_CODE,
-        titleRu: "AI Darslik — создание видео с ИИ",
-        titleUz: "AI Darslik — sun'iy intellekt bilan video yaratish",
-        titleEn: "AI Darslik — AI Video Creation",
+        titleRu: "SUBHUB AI Kurs — 20 практических уроков",
+        titleUz: "SUBHUB AI Kurs — 20 ta darslik to'liq kurs",
+        titleEn: "SUBHUB AI Course — 20 Complete Lessons",
         emoji: "🎓",
-        descRu: "Закрытый практический курс по созданию видео с помощью искусственного интеллекта. После оплаты вы получите персональную ссылку в канал и Gemini AI Pro на 18 месяцев в подарок.",
-        descUz: "Sun'iy intellekt yordamida video yaratish bo'yicha yopiq amaliy kurs. To'lovdan so'ng kanalga shaxsiy havola va sovg'a sifatida 18 oylik Gemini AI Pro olasiz.",
-        descEn: "A private practical course on creating videos with AI. Payment includes a personal channel invite and 18 months of Gemini AI Pro as a bonus.",
+        descRu: COURSE_DESC_RU,
+        descUz: COURSE_DESC_UZ,
+        descEn: COURSE_DESC_EN,
         sortOrder: -100_000,
         isActive: activate,
         refDiscount: false,
@@ -644,7 +706,16 @@ async function ensureCourseCatalog(activate = false) {
   } else {
     product = await db.product.update({
       where: { id: product.id },
-      data: { sortOrder: -100_000, ...(activate ? { isActive: true } : {}) },
+      data: {
+        sortOrder: -100_000,
+        titleRu: "SUBHUB AI Kurs — 20 практических уроков",
+        titleUz: "SUBHUB AI Kurs — 20 ta darslik to'liq kurs",
+        titleEn: "SUBHUB AI Course — 20 Complete Lessons",
+        descRu: COURSE_DESC_RU,
+        descUz: COURSE_DESC_UZ,
+        descEn: COURSE_DESC_EN,
+        ...(activate ? { isActive: true } : {}),
+      },
       include: { plans: { include: { variants: true }, orderBy: { sortOrder: "asc" } } },
     });
   }
@@ -1077,6 +1148,7 @@ async function showMenu(ctx: Context, page: number, sort: Sort, edit: boolean, f
         reply_markup: kb,
         photo: banner && !banner.isVideo ? banner.src : null,
         video: banner && banner.isVideo ? banner.src : null,
+        onPhotoSent: (msg) => banner && cacheBannerFileId(msg, banner.isVideo),
       });
     } else if (banner) {
       const send = banner.isVideo
@@ -1322,7 +1394,7 @@ async function appendCardPayButtons(kb: InlineKeyboard, userId: number, variantI
 }
 
 async function buildQtyChooser(
-  v: { id: number; priceUzs: number; autoSupplier: boolean; supplierStock: number; titleRu: string; titleUz: string; durationDays: number; needsUsername?: boolean; fragmentKind?: string; fragmentAmount?: number; bulkPrices?: string | null; bulkBonus?: string | null; plan: { product: { id: number; code: string; titleRu: string; titleEn: string; titleUz: string; descRu?: string; descEn?: string; descUz?: string; refDiscount?: boolean; videoFileId?: string | null } } },
+  v: { id: number; priceUzs: number; autoSupplier: boolean; supplierStock: number; titleRu: string; titleUz: string; durationDays: number; needsUsername?: boolean; fragmentKind?: string; fragmentAmount?: number; bulkPrices?: string | null; bulkBonus?: string | null; plan: { product: { id: number; code: string; titleRu: string; titleEn: string; titleUz: string; descRu?: string; descEn?: string; descUz?: string; refDiscount?: boolean; videoFileId?: string | null; bannerFileId?: string | null } } },
   lang: string,
   user: { id: number; tgId: string; bonusReferrals?: number | null; spentReferrals?: number | null },
   qty: number,
@@ -1402,8 +1474,8 @@ async function buildQtyChooser(
   kb.text(t(lang, "back"), siblings > 1 ? `p:${v.plan.product.id}:${back}` : `m:${back}`);
 
   const pd = await pick3(v.plan.product.descRu ?? "", v.plan.product.descEn, v.plan.product.descUz, lang);
-  const descFull = pd?.trim() ? stripTags(pd.trim()) : "";
-  const desc = descFull.length > 380 ? `${descFull.slice(0, 380)}…` : descFull;
+  const descFull = course ? (pd?.trim() ?? "") : (pd?.trim() ? stripTags(pd.trim()) : "");
+  const desc = course ? descFull : (descFull.length > 380 ? `${descFull.slice(0, 380)}…` : descFull);
   const offers = describeBulk(unitPrice, deal.tiers, deal.bonuses, (n) => money(n, lang));
 
   const flashBlock = promo && flashPct > 0
@@ -1414,7 +1486,7 @@ async function buildQtyChooser(
 
   const text =
     `${head} <b>${esc(title)}</b>\n` +
-    (desc ? `\n${esc(desc)}\n` : "") +
+    (desc ? `\n${course ? desc : esc(desc)}\n` : "") +
     (flashBlock ? `\n${flashBlock}` : "") +
     (vipLabel ? `\n💎 <b>${esc(vipLabel)}</b>` : "") +
     (course ? "" : `\n${t(lang, "price_each", { v: unitPrice > 0 ? money(unitPrice, lang) : t(lang, "free") })}`) +
@@ -1425,7 +1497,8 @@ async function buildQtyChooser(
     `\n${t(lang, "total", { v: money(payTotal, lang) })}` +
     (deal.saved > 0 && !disc ? ` <b>(−${money(deal.saved, lang)})</b>` : "") +
     (offers.length > 0 ? `\n\n🔥 <b>Выгодные наборы:</b>\n${offers.map((o) => `• ${o}`).join("\n")}` : "");
-  return { text, kb, max, videoFileId: v.plan.product.videoFileId ?? null };
+  const photo = course ? courseBanner() : (v.plan.product.bannerFileId?.trim() || null);
+  return { text, kb, max, videoFileId: v.plan.product.videoFileId ?? null, photo, isCourse: course };
 }
 
 async function showQtyChooser(ctx: Context, variantId: number, qty: number, back: string, edit: boolean, initial = false) {
@@ -1449,20 +1522,40 @@ async function showQtyChooser(ctx: Context, variantId: number, qty: number, back
     return ack();
   }
   const video = built.videoFileId;
+  const photo = built.photo;
   if (!edit) {
     // Fresh message (e.g. after typing a quantity).
     if (video) {
       await ctx.replyWithVideo(video, { caption: built.text, parse_mode: "HTML", reply_markup: built.kb }).catch(async () => {
         await ctx.reply(built.text, { parse_mode: "HTML", reply_markup: built.kb }).catch(() => {});
       });
+    } else if (photo) {
+      await ctx.replyWithPhoto(photo, { caption: built.text, parse_mode: "HTML", reply_markup: built.kb })
+        .then((msg) => {
+          if (built.isCourse && typeof photo !== "string" && msg && "photo" in msg && Array.isArray(msg.photo) && msg.photo.length > 0) {
+            cachedCourseBannerFileId = msg.photo[msg.photo.length - 1].file_id;
+          }
+        })
+        .catch(async () => {
+          await ctx.reply(built.text, { parse_mode: "HTML", reply_markup: built.kb }).catch(() => {});
+        });
     } else {
       await ctx.reply(built.text, { parse_mode: "HTML", reply_markup: built.kb });
     }
-  } else if (initial && video) {
-    // First entry from the product card: replace it with the video buy card.
-    await sendOrEdit(ctx, built.text, { reply_markup: built.kb, video });
+  } else if (initial && (video || photo)) {
+    // First entry from the product card: replace it with the media buy card.
+    await sendOrEdit(ctx, built.text, {
+      reply_markup: built.kb,
+      video,
+      photo,
+      onPhotoSent: (msg) => {
+        if (built.isCourse && typeof photo !== "string" && msg && "photo" in msg && Array.isArray(msg.photo) && msg.photo.length > 0) {
+          cachedCourseBannerFileId = msg.photo[msg.photo.length - 1].file_id;
+        }
+      },
+    });
   } else {
-    // ± re-render: edit text/caption in place — keeps the video, no flicker.
+    // ± re-render: edit text/caption in place — keeps the media, no flicker.
     await sendOrEdit(ctx, built.text, { reply_markup: built.kb });
   }
   await ack();
