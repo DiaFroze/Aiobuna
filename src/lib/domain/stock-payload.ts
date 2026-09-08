@@ -108,9 +108,103 @@ export function serializeStockPayload(payload: StructuredStockPayload): string {
 }
 
 /**
+ * Tries to parse a multi-line or single-line labeled account block, e.g.:
+ * Email: user@domain.com
+ * Password: secretpassword
+ * 2FA: JBSWY3DPEHPK3PXP
+ *
+ * or
+ * Email: user@domain.com | Password: secretpassword
+ */
+export function tryParseLabeledAccount(raw: string): AccountPayload | null {
+  const text = String(raw ?? "").trim();
+  if (!text) return null;
+
+  // If there are multiple passwords, this is a multi-item batch, not a single account
+  const passHeaders = text.match(/(?:^|[\r\n|;,])\s*(?:password|pass|pwd|parol|пароль|пасс)\s*[:=–-]?/gi);
+  if (passHeaders && passHeaders.length > 1) {
+    return null;
+  }
+
+  // Must have an explicit password label to be a labeled account
+  const passMatch = text.match(
+    /(?:^|[\r\n|;,])\s*(?:password|pass|pwd|parol|пароль|пасс)\s*[:=–-]?\s*([^\r\n|;,]+)/i
+  );
+  if (!passMatch) return null;
+
+  const password = passMatch[1].trim();
+  if (!password) return null;
+
+  // Look for email/login/username label
+  let login = "";
+  const loginMatch = text.match(
+    /(?:^|[\r\n|;,])\s*(?:email|e-mail|mail|login|username|user|account|аккаунт|логин|почта)\s*[:=–-]?\s*([^\r\n|;,]+)/i
+  );
+  if (loginMatch) {
+    login = loginMatch[1].trim();
+  } else {
+    // If no explicit login label, look for an email address in the text
+    const emailMatch = text.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+    if (emailMatch) {
+      login = emailMatch[1].trim();
+    }
+  }
+  if (!login) return null;
+
+  // Look for 2FA / extra / PIN / Code
+  let extra: string | undefined;
+  const extraMatch = text.match(
+    /(?:^|[\r\n|;,])\s*(?:2fa|two-factor|pin|secret|token|extra|пин|код|доп|дополнительно)\s*[:=–-]?\s*([^\r\n|;,]+)/i
+  );
+  if (extraMatch) {
+    const candidate = extraMatch[1].trim();
+    if (candidate && candidate !== password && candidate !== login) {
+      extra = candidate;
+    }
+  }
+
+  return {
+    type: "account",
+    login,
+    password,
+    ...(extra ? { extra } : {}),
+  };
+}
+
+/**
+ * Splits a raw payload into separate item strings, handling both single-line
+ * items and multi-line account blocks.
+ */
+export function splitPayloadItems(trimmed: string): string[] {
+  if (!trimmed) return [];
+
+  // 1. If separated by blank lines, split by blank lines
+  if (trimmed.includes("\n\n") || trimmed.includes("\r\n\r\n")) {
+    const blocks = trimmed.split(/\r?\n\s*\r?\n/).map((b) => b.trim()).filter(Boolean);
+    if (blocks.length > 1) return blocks;
+  }
+
+  // 2. If it contains multiple account blocks without blank lines (e.g. Email: ...\nPassword: ...\nEmail: ...)
+  const passCount = (trimmed.match(/(?:^|[\r\n|;,])\s*(?:password|pass|pwd|parol|пароль|пасс)\s*[:=–-]?/gi) || []).length;
+  if (passCount > 1) {
+    const splitByLabels = trimmed
+      .split(/(?<=\n)(?=(?:email|e-mail|mail|login|username|user|account|аккаунт|логин|почта)\s*[:=–-])/i)
+      .map((b) => b.trim())
+      .filter(Boolean);
+    if (splitByLabels.length > 1) {
+      return splitByLabels;
+    }
+  }
+
+  // 3. Fallback: split by single newline
+  return trimmed.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+}
+
+/**
  * Parses a raw stock payload from DB or input string.
  * Supports:
  * - Structured JSON strings (`{"type": "account", ...}`)
+ * - Labeled accounts (`Email: ... \n Password: ...` or `Email: ... | Password: ...`)
  * - Plain links (`https://...`)
  * - Link + Promo combinations (`https://... : PROMO123` or `https://... | PROMO123`)
  * - Account lines (`email:password` or `login | password`)
@@ -165,7 +259,13 @@ export function parseStockPayload(raw: string): StructuredStockPayload {
     }
   }
 
-  // 2. Link + Promo pattern: e.g. "https://domain.com/redeem : PROMO123" or "https://domain.com/redeem | PROMO123"
+  // 2. Try labeled account (e.g. Email: ... \n Password: ...)
+  const labeled = tryParseLabeledAccount(trimmed);
+  if (labeled) {
+    return labeled;
+  }
+
+  // 3. Link + Promo pattern: e.g. "https://domain.com/redeem : PROMO123" or "https://domain.com/redeem | PROMO123"
   // Must have a space or clear separator like : or | so URL paths aren't treated as delimiters
   const urlPromoMatch = trimmed.match(/^(https?:\/\/\S+?)\s*(?:[:|]|\s--\s|\t)\s*(\S.*)$/i);
   if (urlPromoMatch) {
@@ -176,36 +276,39 @@ export function parseStockPayload(raw: string): StructuredStockPayload {
     }
   }
 
-  // 3. Pure URL link
+  // 4. Pure URL link
   if (/^https?:\/\/[^\s]+$/i.test(trimmed)) {
     return { type: "link", link: trimmed };
   }
 
-  // 4. Account pattern: "email@domain.com:password", "login:password", "login | password", "login;password"
+  // 5. Account pattern: "email@domain.com:password", "login:password", "login | password", "login;password"
   // Needs to contain a delimiter and no spaces in login (or email format)
   const accountDelimMatch = trimmed.match(/^([^\s:@;]+@[^\s:@;]+\.[^\s:@;]+|[^:\s|;]{2,50})\s*[:|;]\s*([^\r\n]+)$/);
   if (accountDelimMatch && !trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
-    const login = accountDelimMatch[1].trim();
-    const rest = accountDelimMatch[2].trim();
-    // Check if rest contains extra like ":2FA_KEY"
-    const subMatch = rest.match(/^([^:\s]+)\s*[:|]\s*(.+)$/);
-    if (subMatch) {
-      return {
-        type: "account",
-        login,
-        password: subMatch[1].trim(),
-        extra: subMatch[2].trim(),
-      };
+    const candidateLogin = accountDelimMatch[1].trim();
+    const reserved = /^(?:email|e-mail|mail|login|username|user|account|password|pass|pwd|parol|пароль|логин|почта|аккаунт|code|код|key|ключ|link|url|ссылка)$/i;
+    if (!reserved.test(candidateLogin)) {
+      const rest = accountDelimMatch[2].trim();
+      // Check if rest contains extra like ":2FA_KEY"
+      const subMatch = rest.match(/^([^:\s]+)\s*[:|]\s*(.+)$/);
+      if (subMatch) {
+        return {
+          type: "account",
+          login: candidateLogin,
+          password: subMatch[1].trim(),
+          extra: subMatch[2].trim(),
+        };
+      }
+      return { type: "account", login: candidateLogin, password: rest };
     }
-    return { type: "account", login, password: rest };
   }
 
-  // 5. Code pattern: alphanumeric key, e.g. "XXXX-YYYY-ZZZZ" or single word code without spaces (6 to 64 chars)
+  // 6. Code pattern: alphanumeric key, e.g. "XXXX-YYYY-ZZZZ" or single word code without spaces (6 to 64 chars)
   if (/^[A-Za-z0-9_\-]{6,64}$/.test(trimmed)) {
     return { type: "code", code: trimmed };
   }
 
-  // 6. Default: plain text
+  // 7. Default: plain text
   return { type: "text", text: trimmed };
 }
 
@@ -277,17 +380,24 @@ export function renderDeliveryGoods(rawPayload: string, lang = "ru"): string {
     return `${lbl.yourGoods}\n\n${trimmed}`;
   }
 
-  // Split items by newline
-  const lines = trimmed.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
-  if (lines.length === 0) return "";
+  // Check if the entire rawPayload is a single item (e.g. structured JSON, single-line account/link/code,
+  // or a multi-line labeled account like "Email: ...\nPassword: ...")
+  const wholeParsed = parseStockPayload(trimmed);
+  if (wholeParsed.type !== "text") {
+    return `${lbl.yourGoods}\n\n${formatSingleStockPayloadForTelegram(wholeParsed, lang)}`;
+  }
 
-  if (lines.length === 1) {
-    const parsed = parseStockPayload(lines[0]);
+  // Split items: handles both single-line items and multi-line account blocks
+  const itemsRaw = splitPayloadItems(trimmed);
+  if (itemsRaw.length === 0) return "";
+
+  if (itemsRaw.length === 1) {
+    const parsed = parseStockPayload(itemsRaw[0]);
     return `${lbl.yourGoods}\n\n${formatSingleStockPayloadForTelegram(parsed, lang)}`;
   }
 
   // If there are multiple items, format each one cleanly
-  const items = lines.map((line) => parseStockPayload(line));
+  const items = itemsRaw.map((it) => parseStockPayload(it));
   const renderedItems = items.map((item, idx) => {
     const header = lbl.itemNum.replace("{n}", String(idx + 1));
     const body = formatSingleStockPayloadForTelegram(item, lang);
@@ -304,12 +414,27 @@ export function formatStockPayloadForFile(rawPayload: string): string {
   const trimmed = String(rawPayload ?? "").trim();
   if (!trimmed) return "";
 
-  const lines = trimmed.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+  // Check if entire payload is a single item
+  const wholeParsed = parseStockPayload(trimmed);
+  if (wholeParsed.type !== "text") {
+    switch (wholeParsed.type) {
+      case "account":
+        return `Логин: ${wholeParsed.login} | Пароль: ${wholeParsed.password}${wholeParsed.extra ? ` | Доп: ${wholeParsed.extra}` : ""}`;
+      case "link_promo":
+        return `Ссылка: ${wholeParsed.link} | Промокод: ${wholeParsed.promo}`;
+      case "link":
+        return `Ссылка: ${wholeParsed.link}`;
+      case "code":
+        return `Код: ${wholeParsed.code}`;
+    }
+  }
 
-  return lines
-    .map((line, idx) => {
-      const parsed = parseStockPayload(line);
-      const prefix = lines.length > 1 ? `[#${idx + 1}] ` : "";
+  const itemsRaw = splitPayloadItems(trimmed);
+
+  return itemsRaw
+    .map((raw, idx) => {
+      const parsed = parseStockPayload(raw);
+      const prefix = itemsRaw.length > 1 ? `[#${idx + 1}] ` : "";
 
       switch (parsed.type) {
         case "account":
@@ -326,3 +451,4 @@ export function formatStockPayloadForFile(rawPayload: string): string {
     })
     .join("\n");
 }
+

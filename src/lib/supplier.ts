@@ -3,6 +3,7 @@
 // be added without code — as long as they follow a supported `format`.
 // Currently supported format: "vex" (see docs/VEX_API.md). Add new formats here.
 import { primaryCeCode, replaceCeTokensForPublic } from "./emoji/ce-tokens";
+import { serializeStockPayload, parseStockPayload, tryParseLabeledAccount } from "./domain/stock-payload";
 
 export interface Source {
   slug: string;
@@ -249,34 +250,128 @@ export async function sourceOrder(
   };
 }
 
-function extractDelivery(j: any): string {
+export function isOrderTrackingCode(str: string): boolean {
+  const s = String(str ?? "").trim();
+  if (!s) return false;
+  // Qamify order code: RA-5588C8F82B
+  if (/^RA-[A-Z0-9]+$/i.test(s)) return true;
+  // Generic order reference codes like ORD-12345, ORDER-12345, INV-12345
+  if (/^(?:ORD|ORDER|INV|INVOICE)-[A-Z0-9]+$/i.test(s)) return true;
+  // Boolean or status words
+  if (/^(?:ok|success|completed|delivered|pending|processing|true|false)$/i.test(s)) return true;
+  return false;
+}
+
+export function normalizeDeliveryItem(it: any): string {
+  if (it === null || it === undefined) return "";
+  if (typeof it === "string") {
+    const s = it.trim();
+    if (!s || isOrderTrackingCode(s)) return "";
+    const labeled = tryParseLabeledAccount(s);
+    if (labeled) {
+      return serializeStockPayload(labeled);
+    }
+    const parsed = parseStockPayload(s);
+    if (parsed.type === "account") {
+      return serializeStockPayload(parsed);
+    }
+    return s;
+  }
+  if (typeof it === "object") {
+    // Check if it is an account object with email/login and password
+    const login = it.email ?? it.login ?? it.username ?? it.user ?? it.mail ?? it.account;
+    const password = it.password ?? it.pass ?? it.pwd ?? it.parol;
+    if (typeof login === "string" && typeof password === "string" && login.trim() && password.trim()) {
+      const extra = it.extra ?? it["2fa"] ?? it.pin ?? it.secret ?? it.token;
+      return serializeStockPayload({
+        type: "account",
+        login: login.trim(),
+        password: password.trim(),
+        ...(extra ? { extra: String(extra).trim() } : {}),
+      });
+    }
+    // Check if it is an object containing key/license/credentials/delivery/delivered_goods/code
+    for (const prop of ["key", "license", "credentials", "delivery", "delivered_goods", "content", "promo", "data", "code"]) {
+      const val = it[prop];
+      if (typeof val === "string" && val.trim() && !isOrderTrackingCode(val.trim())) {
+        return normalizeDeliveryItem(val.trim());
+      }
+      if (Array.isArray(val) && val.length > 0) {
+        const mapped = val.map(normalizeDeliveryItem).filter(Boolean);
+        if (mapped.length > 0) return mapped.join("\n");
+      }
+    }
+    return JSON.stringify(it);
+  }
+  return String(it);
+}
+
+export function extractDelivery(j: any): string {
   if (!j || typeof j !== "object") return String(j ?? "");
-  for (const k of [
-    "delivery",
-    "delivery_content",
-    "content",
-    "credentials",
-    "code",
-    "key",
-    "keys",
-    "data",
-    "license",
-    "account",
-  ]) {
-    const v = j[k] ?? j?.order?.[k] ?? j?.result?.[k];
-    if (typeof v === "string" && v.trim()) return v.trim();
-    if (Array.isArray(v) && v.length) {
-      const lines = v.map((it) => (typeof it === "string" ? it : it?.code ?? it?.key ?? it?.content ?? JSON.stringify(it)));
-      if (lines.some(Boolean)) return lines.filter(Boolean).join("\n");
+
+  // 1. Prioritize explicit item/key arrays (which represent the actual delivered units)
+  const arraySources = [
+    j?.order?.keys,
+    j?.order?.items,
+    j?.order?.delivered_goods,
+    j?.order?.deliveries,
+    j?.order?.credentials,
+    j?.keys,
+    j?.items,
+    j?.deliveries,
+    j?.data?.keys,
+    j?.data?.items,
+    j?.result?.keys,
+    j?.result?.items,
+  ];
+
+  for (const arr of arraySources) {
+    if (Array.isArray(arr) && arr.length > 0) {
+      const lines = arr.map(normalizeDeliveryItem).filter(Boolean);
+      if (lines.length > 0) return lines.join("\n");
     }
   }
-  const items = j.items ?? j.deliveries ?? j?.order?.items ?? j?.order?.keys;
-  if (Array.isArray(items) && items.length) {
-    const lines = items.map((it) =>
-      typeof it === "string" ? it : it?.code ?? it?.content ?? it?.credentials ?? it?.key ?? JSON.stringify(it),
-    );
-    if (lines.some(Boolean)) return lines.filter(Boolean).join("\n");
+
+  // 2. Check delivery fields (excluding order references like `order.code`)
+  const fieldNames = [
+    "delivered_goods",
+    "delivery",
+    "delivery_content",
+    "credentials",
+    "content",
+    "license",
+    "account",
+    "key",
+    "data",
+  ];
+
+  const containers = [j?.order, j?.data, j?.result, j];
+
+  for (const field of fieldNames) {
+    for (const container of containers) {
+      if (!container || typeof container !== "object") continue;
+      const v = container[field];
+      if (typeof v === "string" && v.trim() && !isOrderTrackingCode(v.trim())) {
+        const norm = normalizeDeliveryItem(v.trim());
+        if (norm) return norm;
+      }
+      if (Array.isArray(v) && v.length > 0) {
+        const lines = v.map(normalizeDeliveryItem).filter(Boolean);
+        if (lines.length > 0) return lines.join("\n");
+      }
+      if (v && typeof v === "object") {
+        const norm = normalizeDeliveryItem(v);
+        if (norm && !norm.startsWith("{")) return norm;
+      }
+    }
   }
+
+  // 3. Fallback: single code property ONLY IF not an order tracking code and not in an order wrapper
+  if (typeof j.code === "string" && j.code.trim() && !isOrderTrackingCode(j.code.trim()) && !j.order) {
+    const norm = normalizeDeliveryItem(j.code.trim());
+    if (norm) return norm;
+  }
+
   return "```\n" + JSON.stringify(j, null, 2).slice(0, 1500) + "\n```";
 }
 

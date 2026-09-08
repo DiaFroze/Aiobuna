@@ -113,6 +113,32 @@ describe("Qamify Supplier Integration", () => {
     expect(res.payload).toContain("KEY-ABCD-1234-EFGH\nKEY-WXYZ-5678-IJKL");
   });
 
+  it("extracts account credentials from Qamify order ignoring order.code tracking reference", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementationOnce(async () => {
+      return new Response(
+        JSON.stringify({
+          status: "success",
+          order: {
+            id: 1047,
+            code: "RA-5588C8F82B",
+            product_id: 123,
+            keys: [
+              "Email: ShamikaRexroat52591@outlook.com\nPassword: masuk123",
+            ],
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    });
+
+    const res = await sourceOrder(qamifySource, "123", 1, "order-1047");
+    // Crucial check: order reference code RA-... must NOT be returned as goods
+    expect(res.payload).not.toContain("RA-5588C8F82B");
+    expect(res.payload).toContain("ShamikaRexroat52591@outlook.com");
+    expect(res.payload).toContain("masuk123");
+  });
+
+
   it("envQamifySource picks up environment variables", () => {
     const originalEnv = { ...process.env };
     try {

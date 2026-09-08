@@ -7,7 +7,9 @@ import {
   formatStockPayloadForFile,
   serializeStockPayload,
   escHtml,
+  tryParseLabeledAccount,
 } from "../src/lib/domain/stock-payload";
+
 
 describe("escHtml", () => {
   it("escapes dangerous HTML characters", () => {
@@ -124,7 +126,40 @@ describe("parseStockPayload", () => {
       code: "VEX-PROMO-2026-9999",
     });
   });
+
+  it("auto-detects multi-line labeled account (e.g. Qamify format)", () => {
+    const raw = "Email: ShamikaRexroat52591@outlook.com\nPassword: masuk123";
+    const parsed = parseStockPayload(raw);
+    expect(parsed).toEqual({
+      type: "account",
+      login: "ShamikaRexroat52591@outlook.com",
+      password: "masuk123",
+    });
+  });
+
+  it("auto-detects single-line labeled account with 2FA", () => {
+    const raw = "Email: test@gmail.com | Password: secretpassword | 2FA: JBSWY3DPEHPK3PXP";
+    const parsed = parseStockPayload(raw);
+    expect(parsed).toEqual({
+      type: "account",
+      login: "test@gmail.com",
+      password: "secretpassword",
+      extra: "JBSWY3DPEHPK3PXP",
+    });
+  });
+
+  it("auto-detects Russian labeled account", () => {
+    const raw = "Логин: my_user\nПароль: my_pass\nДоп: extra_info";
+    const parsed = parseStockPayload(raw);
+    expect(parsed).toEqual({
+      type: "account",
+      login: "my_user",
+      password: "my_pass",
+      extra: "extra_info",
+    });
+  });
 });
+
 
 describe("detectStockPayloadType", () => {
   it("returns correct category for badges", () => {
@@ -239,7 +274,32 @@ describe("renderDeliveryGoods", () => {
     const rendered = renderDeliveryGoods(legacy, "ru");
     expect(rendered).toContain("<code>legacy-token-here</code>");
   });
+
+  it("renders multi-line account payload as a single clean account block", () => {
+    const raw = "Email: ShamikaRexroat52591@outlook.com\nPassword: masuk123";
+    const renderedUz = renderDeliveryGoods(raw, "uz");
+
+    expect(renderedUz).toContain("🎁 <b>Mahsulotingiz:</b>");
+    expect(renderedUz).toContain("📧 <b>Login / Email:</b>\n<code>ShamikaRexroat52591@outlook.com</code>");
+    expect(renderedUz).toContain("🔑 <b>Parol:</b>\n<code>masuk123</code>");
+    expect(renderedUz).toContain("(nusxalash uchun login yoki parol ustiga bosing)");
+    // Must NOT split into two items (Mahsulot #1 / Mahsulot #2)
+    expect(renderedUz).not.toContain("Mahsulot #1");
+  });
+
+  it("renders multiple multi-line accounts with numbering", () => {
+    const raw = "Email: user1@outlook.com\nPassword: pass1\n\nEmail: user2@outlook.com\nPassword: pass2";
+    const rendered = renderDeliveryGoods(raw, "uz");
+
+    expect(rendered).toContain("📦 <b>Mahsulot #1:</b>");
+    expect(rendered).toContain("<code>user1@outlook.com</code>");
+    expect(rendered).toContain("<code>pass1</code>");
+    expect(rendered).toContain("📦 <b>Mahsulot #2:</b>");
+    expect(rendered).toContain("<code>user2@outlook.com</code>");
+    expect(rendered).toContain("<code>pass2</code>");
+  });
 });
+
 
 describe("formatStockPayloadForFile", () => {
   it("formats accounts cleanly for .txt file export", () => {
