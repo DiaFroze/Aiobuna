@@ -86,6 +86,10 @@ export async function migrateSourceAction(formData: FormData) {
     where: { supplierKey: fromSlug },
     data: { supplierKey: toSlug },
   });
+  await botDb.variantSupplier.updateMany({
+    where: { supplierKey: fromSlug },
+    data: { supplierKey: toSlug },
+  });
 
   await audit({
     adminId: admin.id,

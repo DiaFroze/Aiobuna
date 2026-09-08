@@ -1,8 +1,8 @@
 import Link from "next/link";
 import { PageHeader, Table, EmptyState, StatCard } from "@/components/admin/ui";
 import { botDb, botConfigured } from "@/lib/botDb";
-import { sourceProducts, sourceBalance, envVexSource, envBuyerSource, type Source, type SupplierProduct } from "@/lib/supplier";
-import { importSourceProductAction } from "./actions";
+import { sourceProducts, sourceBalance, envVexSource, envBuyerSource, envQamifySource, type Source, type SupplierProduct } from "@/lib/supplier";
+import { importSourceProductAction, linkProductToVariantAction } from "./actions";
 
 export const dynamic = "force-dynamic";
 
@@ -21,9 +21,16 @@ export default async function BotImportPage({ searchParams }: { searchParams: { 
   const dbSources = await botDb.apiSource.findMany({ where: { isActive: true }, orderBy: { id: "asc" } });
   // Env-only sources (key in Railway, not the DB) appear here too, unless a DB
   // row already claims the same slug.
-  const envRows: SrcRow[] = [envBuyerSource(), envVexSource()]
+  const envRows: SrcRow[] = [envBuyerSource(), envVexSource(), envQamifySource()]
     .filter((s): s is Source => !!s)
-    .map((s, i) => ({ id: -1 - i, slug: s.slug, name: s.slug === "somadeth" ? "SoMaDeth" : s.slug.toUpperCase(), baseUrl: s.baseUrl, apiKey: s.apiKey, format: s.format }))
+    .map((s, i) => ({
+      id: -1 - i,
+      slug: s.slug,
+      name: s.slug === "somadeth" ? "SoMaDeth" : s.slug === "qamify" ? "Qamify" : s.slug.toUpperCase(),
+      baseUrl: s.baseUrl,
+      apiKey: s.apiKey,
+      format: s.format,
+    }))
     .filter((es) => !dbSources.some((d) => d.slug === es.slug));
   const sources: SrcRow[] = [
     ...dbSources.map((d) => ({ id: d.id, slug: d.slug, name: d.name, baseUrl: d.baseUrl, apiKey: d.apiKey, format: d.format })),
@@ -53,8 +60,19 @@ export default async function BotImportPage({ searchParams }: { searchParams: { 
     error = (e as Error).message;
   }
 
-  const linked = await botDb.variant.findMany({ where: { supplierKey: current.slug }, select: { supplierExternalId: true } });
-  const imported = new Set(linked.map((l) => l.supplierExternalId));
+  const [linked, multiLinked, allVariants] = await Promise.all([
+    botDb.variant.findMany({ where: { supplierKey: current.slug }, select: { supplierExternalId: true } }),
+    botDb.variantSupplier.findMany({ where: { supplierKey: current.slug }, select: { supplierExternalId: true } }),
+    botDb.variant.findMany({
+      where: { isActive: true },
+      include: { plan: { include: { product: true } } },
+      orderBy: { id: "asc" },
+    }),
+  ]);
+  const imported = new Set([
+    ...linked.map((l) => l.supplierExternalId),
+    ...multiLinked.map((l) => l.supplierExternalId),
+  ]);
 
   return (
     <div className="space-y-6">
@@ -125,14 +143,46 @@ export default async function BotImportPage({ searchParams }: { searchParams: { 
                 </td>
                 <td className="px-4 py-3">
                   {done ? (
-                    <span className="badge bg-brand/10 text-brand">импортировано</span>
+                    <span className="badge bg-brand/10 text-brand">подключен ✓</span>
                   ) : canOrder ? (
-                    <form action={importSourceProductAction} className="flex items-center gap-2">
-                      <input type="hidden" name="slug" value={current.slug} />
-                      <input type="hidden" name="extId" value={p.id} />
-                      <input name="markup" type="number" step="1" min="0" defaultValue={20} className="input w-20 text-sm" />
-                      <button className="btn-primary text-xs whitespace-nowrap">На продажу</button>
-                    </form>
+                    <div className="space-y-2 min-w-[220px]">
+                      <form action={importSourceProductAction} className="flex items-center gap-2">
+                        <input type="hidden" name="slug" value={current.slug} />
+                        <input type="hidden" name="extId" value={p.id} />
+                        <input name="markup" type="number" step="1" min="0" defaultValue={20} className="input w-16 text-xs" title="Наценка %" />
+                        <button className="btn-primary text-xs whitespace-nowrap">Создать товар</button>
+                      </form>
+
+                      {allVariants.length > 0 && (
+                        <details className="text-xs">
+                          <summary className="cursor-pointer text-muted hover:text-foreground select-none">
+                            🔗 Связать с существующим...
+                          </summary>
+                          <form action={linkProductToVariantAction} className="mt-2 p-2 rounded bg-surface-2 border space-y-2">
+                            <input type="hidden" name="slug" value={current.slug} />
+                            <input type="hidden" name="extId" value={p.id} />
+                            <div>
+                              <label className="text-[10px] text-muted block mb-0.5">Товар в боте</label>
+                              <select name="variantId" required className="input text-xs w-full">
+                                <option value="">— выберите тариф —</option>
+                                {allVariants.map((v) => (
+                                  <option key={v.id} value={v.id}>
+                                    {v.plan.product.titleRu} · {v.titleRu} ({v.priceUzs.toLocaleString("ru-RU")} сум)
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <div>
+                                <label className="text-[10px] text-muted block mb-0.5">Уровень (2=Резерв)</label>
+                                <input name="priority" type="number" min="1" max="9" defaultValue={2} className="input text-xs w-16" />
+                              </div>
+                              <button className="btn-secondary text-xs mt-3.5">🔗 Связать</button>
+                            </div>
+                          </form>
+                        </details>
+                      )}
+                    </div>
                   ) : (
                     <span className="text-xs text-muted italic">Только ручная выдача</span>
                   )}

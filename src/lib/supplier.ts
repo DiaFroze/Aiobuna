@@ -37,6 +37,36 @@ function assertVex(src: Source) {
   if (!src.baseUrl || !src.apiKey) throw new Error("У источника не заданы URL или ключ");
 }
 
+// --- Qamify Reseller API (format: "qamify") -------------------------------
+// REST reseller API: GET /v1/ping, GET /v1/balance, GET /v1/products, POST /v1/orders
+// Idempotency-Key header is required for orders.
+async function qamifyCall(
+  src: Source,
+  path: string,
+  opts?: { method?: string; body?: unknown; headers?: Record<string, string> },
+) {
+  const baseUrl = (src.baseUrl || "https://api.qamify.site").replace(/\/+$/, "");
+  if (!src.apiKey) throw new Error("У источника не задан API ключ");
+  const res = await fetch(`${baseUrl}${path}`, {
+    method: opts?.method ?? "GET",
+    signal: AbortSignal.timeout(20000),
+    headers: {
+      Authorization: `Bearer ${src.apiKey}`,
+      "X-API-Key": src.apiKey,
+      "Content-Type": "application/json",
+      ...(opts?.headers ?? {}),
+    },
+    body: opts?.body ? JSON.stringify(opts.body) : undefined,
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`${src.slug} ${path} ${res.status}: ${text.slice(0, 200)}`);
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`${src.slug} ${path}: invalid JSON`);
+  }
+}
+
 // --- SoMaDeth "Buyer API" (format: "somadeth") -----------------------------
 // Bearer-auth REST wallet: GET /balance, GET /products, POST /purchase
 // {product_id, qty}. The key lives in Railway env, never in code.
@@ -74,6 +104,10 @@ async function vexCall(src: Source, action: string, opts?: { method?: string; bo
 }
 
 export async function sourceBalance(src: Source): Promise<number> {
+  if (src.format === "qamify") {
+    const j = await qamifyCall(src, "/v1/balance");
+    return Number(j?.balance ?? j?.data?.balance ?? 0);
+  }
   if (src.format === "somadeth") {
     const j = await buyerCall(src, "/api/telegram-buyer/balance");
     return Number(j?.balance ?? 0);
@@ -84,6 +118,36 @@ export async function sourceBalance(src: Source): Promise<number> {
 }
 
 export async function sourceProducts(src: Source): Promise<SupplierProduct[]> {
+  if (src.format === "qamify") {
+    const j = await qamifyCall(src, "/v1/products");
+    const arr: any[] = Array.isArray(j)
+      ? j
+      : Array.isArray(j?.products)
+      ? j.products
+      : Array.isArray(j?.data)
+      ? j.data
+      : [];
+    return arr
+      .map((p) => {
+        const available = p.available !== undefined ? Boolean(p.available) : (p.stock ?? 0) > 0;
+        const rawStock = p.stock ?? p.available_qty ?? p.qty ?? p.count;
+        const stock = rawStock !== undefined && rawStock !== null ? Number(rawStock) : available ? 9999 : 0;
+        return {
+          id: String(p.id ?? p.product_id ?? ""),
+          name: String(p.name ?? p.title ?? "").trim(),
+          price: Number(p.price ?? p.reseller_price ?? p.base_price ?? 0),
+          stock,
+          available,
+          category: p.category ?? null,
+          manualDelivery: Boolean(p.manual_delivery),
+          apiOrderable: !p.manual_delivery,
+          descriptionClean: replaceCeTokensForPublic(p.description ?? ""),
+          premiumEmojiCode: primaryCeCode(p.description ?? "")?.code ?? null,
+          warrantyType: p.warranty_type ?? null,
+        };
+      })
+      .filter((p) => p.id && p.name);
+  }
   if (src.format === "somadeth") {
     const j = await buyerCall(src, "/api/telegram-buyer/products");
     const arr: any[] = Array.isArray(j?.products) ? j.products : [];
@@ -138,6 +202,28 @@ export async function sourceOrder(
   quantity = 1,
   externalOrderId?: string | number,
 ): Promise<SupplierOrderResult> {
+  if (src.format === "qamify") {
+    const idempotencyKey = externalOrderId
+      ? `order-${externalOrderId}`
+      : `order-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const j = await qamifyCall(src, "/v1/orders", {
+      method: "POST",
+      headers: {
+        "Idempotency-Key": idempotencyKey,
+      },
+      body: {
+        product_id: Number(productId),
+        qty: quantity,
+        idempotency_key: idempotencyKey,
+      },
+    });
+    return {
+      payload: extractDelivery(j),
+      status: String(j?.status ?? (j?.ok ? "ok" : "delivered")),
+      idempotentReplay: Boolean(j?.idempotent_replay ?? j?.replayed),
+      raw: j,
+    };
+  }
   if (src.format === "somadeth") {
     // Buyer API buys per-call with {product_id, qty}. A 400 (insufficient wallet
     // balance / validation) is thrown by buyerCall and handled upstream — the
@@ -165,14 +251,29 @@ export async function sourceOrder(
 
 function extractDelivery(j: any): string {
   if (!j || typeof j !== "object") return String(j ?? "");
-  for (const k of ["delivery", "delivery_content", "content", "credentials", "code", "key", "data"]) {
-    const v = j[k] ?? j?.order?.[k];
+  for (const k of [
+    "delivery",
+    "delivery_content",
+    "content",
+    "credentials",
+    "code",
+    "key",
+    "keys",
+    "data",
+    "license",
+    "account",
+  ]) {
+    const v = j[k] ?? j?.order?.[k] ?? j?.result?.[k];
     if (typeof v === "string" && v.trim()) return v.trim();
+    if (Array.isArray(v) && v.length) {
+      const lines = v.map((it) => (typeof it === "string" ? it : it?.code ?? it?.key ?? it?.content ?? JSON.stringify(it)));
+      if (lines.some(Boolean)) return lines.filter(Boolean).join("\n");
+    }
   }
-  const items = j.items ?? j.deliveries ?? j?.order?.items;
+  const items = j.items ?? j.deliveries ?? j?.order?.items ?? j?.order?.keys;
   if (Array.isArray(items) && items.length) {
     const lines = items.map((it) =>
-      typeof it === "string" ? it : it?.code ?? it?.content ?? it?.credentials ?? JSON.stringify(it),
+      typeof it === "string" ? it : it?.code ?? it?.content ?? it?.credentials ?? it?.key ?? JSON.stringify(it),
     );
     if (lines.some(Boolean)) return lines.filter(Boolean).join("\n");
   }
@@ -198,3 +299,15 @@ export function envBuyerSource(): Source | null {
   const apiKey = pick("SOMADETH_API_KEY", "SoMaDeth_API_KEY", "SOMADETH_KEY", "BUYER_API_KEY");
   return baseUrl && apiKey ? { slug: "somadeth", baseUrl, apiKey, format: "somadeth" } : null;
 }
+
+// Qamify Reseller API source from env (Railway → Variables).
+export function envQamifySource(): Source | null {
+  const pick = (...names: string[]) => {
+    for (const n of names) if (process.env[n]) return process.env[n] as string;
+    return "";
+  };
+  const baseUrl = (pick("QAMIFY_API_URL", "QAMIFY_URL") || "https://api.qamify.site").replace(/\/+$/, "");
+  const apiKey = pick("QAMIFY_API_KEY", "QAMIFY_KEY");
+  return apiKey ? { slug: "qamify", baseUrl, apiKey, format: "qamify" } : null;
+}
+

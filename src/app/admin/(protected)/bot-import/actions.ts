@@ -5,7 +5,7 @@ import { requirePermission } from "@/lib/auth/session";
 import { PERMISSIONS } from "@/lib/security/rbac";
 import { botDb } from "@/lib/botDb";
 import { audit } from "@/lib/security/audit";
-import { sourceProducts, envVexSource, envBuyerSource, type Source } from "@/lib/supplier";
+import { sourceProducts, envVexSource, envBuyerSource, envQamifySource, type Source } from "@/lib/supplier";
 import { geminiLocalize } from "@/lib/gemini";
 
 function num(v: FormDataEntryValue | null): number {
@@ -22,6 +22,7 @@ async function getSource(slug: string): Promise<Source | null> {
   // Env-only sources (key lives in Railway, never in the DB).
   if (slug === "vex") return envVexSource();
   if (slug === "somadeth" || slug === "buyer") return envBuyerSource();
+  if (slug === "qamify") return envQamifySource();
   return null;
 }
 
@@ -89,7 +90,19 @@ export async function importSourceProductAction(formData: FormData) {
               supplierExternalId: extId,
               supplierPriceUsdt: p.price,
               supplierStock: p.stock,
+              routingStrategy: "priority",
               isActive: true,
+              suppliers: {
+                create: {
+                  supplierKey: slug,
+                  supplierExternalId: extId,
+                  supplierPriceUsdt: p.price,
+                  supplierStock: p.stock,
+                  priority: 1,
+                  isActive: true,
+                  name: `${p.name} (${slug})`,
+                },
+              },
             },
           },
         },
@@ -107,3 +120,71 @@ export async function importSourceProductAction(formData: FormData) {
   revalidatePath("/admin/bot-import");
   revalidatePath("/admin/bot-products");
 }
+
+/**
+ * Link an API product to an EXISTING Variant as an alternate / cascade supplier.
+ * E.g. connect Gemini from Qamify as Level 2 to an existing Gemini product.
+ */
+export async function linkProductToVariantAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.PRODUCTS_WRITE);
+  const slug = String(formData.get("slug") ?? "").trim();
+  const extId = String(formData.get("extId") ?? "").trim();
+  const variantId = Number(formData.get("variantId"));
+  const priority = Math.max(1, Math.round(num(formData.get("priority"))) || 2);
+  if (!slug || !extId || !variantId) return;
+
+  const src = await getSource(slug);
+  if (!src) return;
+
+  const products = await sourceProducts(src);
+  const p = products.find((x) => x.id === extId);
+  const price = p ? p.price : 0;
+  const stock = p ? p.stock : 0;
+  const name = p ? p.name : `${slug} #${extId}`;
+
+  // Upsert VariantSupplier
+  await botDb.variantSupplier.upsert({
+    where: {
+      variantId_supplierKey_supplierExternalId: {
+        variantId,
+        supplierKey: slug,
+        supplierExternalId: extId,
+      },
+    },
+    create: {
+      variantId,
+      supplierKey: slug,
+      supplierExternalId: extId,
+      supplierPriceUsdt: price,
+      supplierStock: stock,
+      priority,
+      name,
+      isActive: true,
+    },
+    update: {
+      supplierPriceUsdt: price,
+      supplierStock: stock,
+      priority,
+      name,
+      isActive: true,
+    },
+  });
+
+  // Ensure autoSupplier is on
+  await botDb.variant.update({
+    where: { id: variantId },
+    data: { autoSupplier: true },
+  });
+
+  await audit({
+    adminId: admin.id,
+    action: "bot.variant.link_supplier",
+    entityType: "VariantSupplier",
+    entityId: `${variantId}:${slug}:${extId}`,
+    metadata: { priority, price },
+  });
+
+  revalidatePath("/admin/bot-import");
+  revalidatePath("/admin/bot-products");
+}
+

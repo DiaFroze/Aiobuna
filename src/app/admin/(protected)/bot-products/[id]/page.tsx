@@ -14,6 +14,9 @@ import {
   addPlanAction,
   addStockAction,
   clearStockAction,
+  addVariantSupplierAction,
+  updateVariantSupplierAction,
+  deleteVariantSupplierAction,
 } from "../actions";
 import { ProductDescriptionEditor } from "@/components/admin/ProductDescriptionEditor";
 
@@ -21,10 +24,23 @@ export const dynamic = "force-dynamic";
 
 export default async function BotProductEditPage({ params }: { params: { id: string } }) {
   const id = Number(params.id);
-  const product = await botDb.product.findUnique({
-    where: { id },
-    include: { plans: { orderBy: { sortOrder: "asc" }, include: { variants: { orderBy: { sortOrder: "asc" } } } } },
-  });
+  const [product, apiSources] = await Promise.all([
+    botDb.product.findUnique({
+      where: { id },
+      include: {
+        plans: {
+          orderBy: { sortOrder: "asc" },
+          include: {
+            variants: {
+              orderBy: { sortOrder: "asc" },
+              include: { suppliers: { orderBy: { priority: "asc" } } },
+            },
+          },
+        },
+      },
+    }),
+    botDb.apiSource.findMany({ where: { isActive: true }, orderBy: { name: "asc" } }),
+  ]);
   if (!product) notFound();
 
   // Unsold stock count per variant (shown as "Остаток" and sold in the bot).
@@ -189,129 +205,327 @@ export default async function BotProductEditPage({ params }: { params: { id: str
           {plan.variants.length === 0 ? (
             <p className="text-sm text-muted">Нет вариантов. Добавьте ниже.</p>
           ) : (
-            <div className="space-y-2">
+            <div className="space-y-4">
               {plan.variants.map((v) => {
                 const st = stockByVariant.get(v.id) ?? 0;
+                const totalSuppStock = v.suppliers.length > 0
+                  ? v.suppliers.filter((s) => s.isActive).reduce((acc, s) => acc + s.supplierStock, 0)
+                  : v.supplierStock;
                 const stockText = v.manualDelivery
                   ? (v.manualStockLimit >= 0 ? `${v.manualStockLimit} (руч)` : "∞")
-                  : (v.autoSupplier ? `API: ${v.supplierStock}` : String(st));
+                  : (v.autoSupplier ? `API: ${totalSuppStock}` : String(st));
                 return (
-                  <form
-                    key={v.id}
-                    action={updateVariantAction}
-                    className="rounded-xl border bg-surface-2/40 p-3 grid grid-cols-2 md:grid-cols-12 gap-2 items-end"
-                  >
-                    <input type="hidden" name="variantId" value={v.id} />
-                    <input type="hidden" name="productId" value={product.id} />
-                    <div className="col-span-2 md:col-span-3">
-                      <label className="text-[11px] text-muted">Вариант</label>
-                      <input name="titleRu" defaultValue={v.titleRu} className="input mt-1 text-sm" />
-                    </div>
-                    <div className="md:col-span-1">
-                      <label className="text-[11px] text-muted">Дней</label>
-                      <input name="durationDays" type="number" min="0" defaultValue={v.durationDays} className="input mt-1 text-sm" />
-                    </div>
-                    <div className="md:col-span-2">
-                      <label className="text-[11px] text-muted">Цена (сум) 💰</label>
-                      <input name="priceUzs" type="number" step="1" min="0" defaultValue={v.priceUzs} className="input mt-1 text-sm" />
-                    </div>
-                    <div className="md:col-span-1">
-                      <label className="text-[11px] text-muted">Stars</label>
-                      <input name="priceStars" type="number" step="1" min="0" defaultValue={v.priceStars} className="input mt-1 text-sm" />
-                    </div>
-                    <div className="md:col-span-1">
-                      <label className="text-[11px] text-muted" title="Цена в рефералах. 0 = нельзя купить за рефералы.">Реф.🤝</label>
-                      <input name="pointsCost" type="number" step="1" min="0" defaultValue={v.pointsCost} className="input mt-1 text-sm" placeholder="0" />
-                    </div>
-                    <div className="md:col-span-1">
-                      <label className="text-[11px] text-muted" title="Для ручной выдачи. -1 = безлимит">Лимит</label>
-                      <input name="manualStockLimit" type="number" min="-1" defaultValue={v.manualStockLimit} className="input mt-1 text-sm font-mono" placeholder="∞" />
-                    </div>
-                    <div className="md:col-span-1">
-                      <label className="text-[11px] text-muted">Остаток</label>
-                      <div className="mt-1 text-sm">📦 {stockText}</div>
-                    </div>
-                    <div className="md:col-span-2 flex flex-col gap-1 text-xs">
-                      <label className="flex items-center gap-1">
-                        <input type="checkbox" name="isActive" defaultChecked={v.isActive} /> вкл
-                      </label>
-                      <label className="flex items-center gap-1" title="Выдаёте логин/пароль вручную после оплаты через /give">
-                        <input type="checkbox" name="manual" defaultChecked={v.manualDelivery} /> выдача админом
-                      </label>
-                    </div>
-                    <div className="col-span-2 md:col-span-1 flex gap-1 justify-end">
-                      <button className="btn-primary text-xs px-3">💾</button>
-                      <button formAction={deleteVariantAction} className="btn-danger text-xs px-3">✕</button>
-                    </div>
-
-                    {/* Stars / Premium — delivered to a Telegram account */}
-                    <div className="col-span-2 md:col-span-12 grid md:grid-cols-3 gap-2 pt-2 mt-1 border-t">
-                      <label className="flex items-center gap-2 text-xs" title="Спросить @username получателя ДО оплаты">
-                        <input type="checkbox" name="needsUsername" defaultChecked={v.needsUsername} />
-                        👤 Спрашивать @username
-                      </label>
-                      <div>
-                        <label className="text-[11px] text-muted">Тип Fragment</label>
-                        <select name="fragmentKind" defaultValue={v.fragmentKind} className="input mt-1 text-sm">
-                          <option value="">— обычный товар —</option>
-                          <option value="stars">⭐ Telegram Stars</option>
-                          <option value="premium">💎 Telegram Premium</option>
-                        </select>
+                  <div key={v.id} className="rounded-xl border bg-surface-2/40 p-3 space-y-3">
+                    <form
+                      action={updateVariantAction}
+                      className="grid grid-cols-2 md:grid-cols-12 gap-2 items-end"
+                    >
+                      <input type="hidden" name="variantId" value={v.id} />
+                      <input type="hidden" name="productId" value={product.id} />
+                      <div className="col-span-2 md:col-span-3">
+                        <label className="text-[11px] text-muted">Вариант</label>
+                        <input name="titleRu" defaultValue={v.titleRu} className="input mt-1 text-sm" />
                       </div>
-                      <div>
-                        <label className="text-[11px] text-muted">Кол-во (звёзд / месяцев)</label>
-                        <input
-                          name="fragmentAmount"
-                          type="number"
-                          min="0"
-                          defaultValue={v.fragmentAmount}
-                          className="input mt-1 text-sm"
-                          placeholder="100"
-                        />
+                      <div className="md:col-span-1">
+                        <label className="text-[11px] text-muted">Дней</label>
+                        <input name="durationDays" type="number" min="0" defaultValue={v.durationDays} className="input mt-1 text-sm" />
                       </div>
-                      <p className="md:col-span-3 text-[10px] text-muted">
-                        Для Stars — количество звёзд (например 100). Для Premium — только 3, 6 или 12 месяцев,
-                        других сроков Fragment не даёт. Включите «Спрашивать @username» и «выдача админом»:
-                        бот соберёт получателя до оплаты и пришлёт вам готовое задание на выдачу.
-                      </p>
-                    </div>
-
-                    {/* Quantity deals — full width under the main row */}
-                    <div className="col-span-2 md:col-span-12 grid md:grid-cols-2 gap-2 pt-2 mt-1 border-t">
-                      <div>
-                        <label className="text-[11px] text-muted">
-                          🔥 Цены за набор
-                          <span className="ml-1 opacity-60">— «2=55000,3=80000»</span>
+                      <div className="md:col-span-2">
+                        <label className="text-[11px] text-muted">Цена (сум) 💰</label>
+                        <input name="priceUzs" type="number" step="1" min="0" defaultValue={v.priceUzs} className="input mt-1 text-sm" />
+                      </div>
+                      <div className="md:col-span-1">
+                        <label className="text-[11px] text-muted">Stars</label>
+                        <input name="priceStars" type="number" step="1" min="0" defaultValue={v.priceStars} className="input mt-1 text-sm" />
+                      </div>
+                      <div className="md:col-span-1">
+                        <label className="text-[11px] text-muted" title="Цена в рефералах. 0 = нельзя купить за рефералы.">Реф.🤝</label>
+                        <input name="pointsCost" type="number" step="1" min="0" defaultValue={v.pointsCost} className="input mt-1 text-sm" placeholder="0" />
+                      </div>
+                      <div className="md:col-span-1">
+                        <label className="text-[11px] text-muted" title="Для ручной выдачи. -1 = безлимит">Лимит</label>
+                        <input name="manualStockLimit" type="number" min="-1" defaultValue={v.manualStockLimit} className="input mt-1 text-sm font-mono" placeholder="∞" />
+                      </div>
+                      <div className="md:col-span-1">
+                        <label className="text-[11px] text-muted">Остаток</label>
+                        <div className="mt-1 text-sm">📦 {stockText}</div>
+                      </div>
+                      <div className="md:col-span-2 flex flex-col gap-1 text-xs">
+                        <label className="flex items-center gap-1">
+                          <input type="checkbox" name="isActive" defaultChecked={v.isActive} /> вкл
                         </label>
-                        <input
-                          name="bulkPrices"
-                          defaultValue={v.bulkPrices}
-                          className="input mt-1 text-sm font-mono"
-                          placeholder="2=55000,3=80000"
-                        />
-                        <p className="text-[10px] text-muted mt-1">
-                          Итоговая цена за это количество. Пример: 1 шт. — {v.priceUzs.toLocaleString("ru-RU")} сум,
-                          2 шт. — 55 000, 3 шт. — 80 000. Свыше самого большого набора цена считается по его же ставке за штуку.
+                        <label className="flex items-center gap-1" title="Выдаёте логин/пароль вручную после оплаты через /give">
+                          <input type="checkbox" name="manual" defaultChecked={v.manualDelivery} /> выдача админом
+                        </label>
+                      </div>
+                      <div className="col-span-2 md:col-span-1 flex gap-1 justify-end">
+                        <button className="btn-primary text-xs px-3">💾</button>
+                        <button formAction={deleteVariantAction} className="btn-danger text-xs px-3">✕</button>
+                      </div>
+
+                      {/* Supplier routing & auto order */}
+                      <div className="col-span-2 md:col-span-12 grid md:grid-cols-2 gap-3 pt-2 mt-1 border-t bg-surface-1/50 p-2 rounded-lg">
+                        <div>
+                          <label className="flex items-center gap-1 font-semibold text-xs text-foreground cursor-pointer">
+                            <input type="checkbox" name="autoSupplier" defaultChecked={v.autoSupplier} />
+                            ⚡ Авто-заказ у поставщика (API)
+                          </label>
+                          <p className="text-[11px] text-muted mt-0.5">
+                            При покупке бот заказывает у подключенного поставщика по выбранной стратегии.
+                          </p>
+                        </div>
+                        <div>
+                          <label className="text-[11px] font-medium text-foreground">Стратегия выбора поставщика</label>
+                          <select name="routingStrategy" defaultValue={v.routingStrategy || "priority"} className="input mt-1 text-xs">
+                            <option value="priority">🎯 Приоритет (Каскад: Уровень 1 → 2 если ошибка/нет стока)</option>
+                            <option value="cheapest">💸 Самый дешевый (сравнение цен поставщиков USDT)</option>
+                            <option value="balance">💳 По наличию баланса у поставщика</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      {/* Stars / Premium — delivered to a Telegram account */}
+                      <div className="col-span-2 md:col-span-12 grid md:grid-cols-3 gap-2 pt-2 mt-1 border-t">
+                        <label className="flex items-center gap-2 text-xs" title="Спросить @username получателя ДО оплаты">
+                          <input type="checkbox" name="needsUsername" defaultChecked={v.needsUsername} />
+                          👤 Спрашивать @username
+                        </label>
+                        <div>
+                          <label className="text-[11px] text-muted">Тип Fragment</label>
+                          <select name="fragmentKind" defaultValue={v.fragmentKind} className="input mt-1 text-sm">
+                            <option value="">— обычный товар —</option>
+                            <option value="stars">⭐ Telegram Stars</option>
+                            <option value="premium">💎 Telegram Premium</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="text-[11px] text-muted">Кол-во (звёзд / месяцев)</label>
+                          <input
+                            name="fragmentAmount"
+                            type="number"
+                            min="0"
+                            defaultValue={v.fragmentAmount}
+                            className="input mt-1 text-sm"
+                            placeholder="100"
+                          />
+                        </div>
+                        <p className="md:col-span-3 text-[10px] text-muted">
+                          Для Stars — количество звёзд (например 100). Для Premium — только 3, 6 или 12 месяцев,
+                          других сроков Fragment не даёт. Включите «Спрашивать @username» и «выдача админом»:
+                          бот соберёт получателя до оплаты и пришлёт вам готовое задание на выдачу.
                         </p>
                       </div>
-                      <div>
-                        <label className="text-[11px] text-muted">
-                          🎁 Подарок за количество
-                          <span className="ml-1 opacity-60">— «2+1»</span>
-                        </label>
-                        <input
-                          name="bulkBonus"
-                          defaultValue={v.bulkBonus}
-                          className="input mt-1 text-sm font-mono"
-                          placeholder="2+1"
-                        />
-                        <p className="text-[10px] text-muted mt-1">
-                          Купил 2 — получил 3. Повторяется: за 4 купленных дадут 2 в подарок.
-                          Подарочные штуки списываются со склада, сверх остатка не выдаются.
-                        </p>
+
+                      {/* Quantity deals — full width under the main row */}
+                      <div className="col-span-2 md:col-span-12 grid md:grid-cols-2 gap-2 pt-2 mt-1 border-t">
+                        <div>
+                          <label className="text-[11px] text-muted">
+                            🔥 Цены за набор
+                            <span className="ml-1 opacity-60">— «2=55000,3=80000»</span>
+                          </label>
+                          <input
+                            name="bulkPrices"
+                            defaultValue={v.bulkPrices}
+                            className="input mt-1 text-sm font-mono"
+                            placeholder="2=55000,3=80000"
+                          />
+                          <p className="text-[10px] text-muted mt-1">
+                            Итоговая цена за это количество. Пример: 1 шт. — {v.priceUzs.toLocaleString("ru-RU")} сум,
+                            2 шт. — 55 000, 3 шт. — 80 000. Свыше самого большого набора цена считается по его же ставке за штуку.
+                          </p>
+                        </div>
+                        <div>
+                          <label className="text-[11px] text-muted">
+                            🎁 Подарок за количество
+                            <span className="ml-1 opacity-60">— «2+1»</span>
+                          </label>
+                          <input
+                            name="bulkBonus"
+                            defaultValue={v.bulkBonus}
+                            className="input mt-1 text-sm font-mono"
+                            placeholder="2+1"
+                          />
+                          <p className="text-[10px] text-muted mt-1">
+                            Купил 2 — получил 3. Повторяется: за 4 купленных дадут 2 в подарок.
+                            Подарочные штуки списываются со склада, сверх остатка не выдаются.
+                          </p>
+                        </div>
                       </div>
-                    </div>
-                  </form>
+                    </form>
+
+                    {/* Multi-Supplier details */}
+                    <details className="border-t pt-2 mt-1 text-xs">
+                      <summary className="cursor-pointer font-medium text-foreground flex items-center gap-2 select-none">
+                        <span>🔗 Подключенные поставщики (Multi-Supplier)</span>
+                        {v.suppliers.length > 0 ? (
+                          <span className="badge bg-brand/10 text-brand">
+                            {v.suppliers.length} подключено · {v.routingStrategy === "cheapest" ? "Самый дешевый" : v.routingStrategy === "balance" ? "По балансу" : "Каскад по уровням"}
+                          </span>
+                        ) : v.supplierKey ? (
+                          <span className="badge bg-surface-3 text-muted">
+                            1 (старый формат: {v.supplierKey})
+                          </span>
+                        ) : (
+                          <span className="badge bg-warning/10 text-warning">нет поставщиков</span>
+                        )}
+                      </summary>
+
+                      <div className="mt-3 space-y-3 pl-2">
+                        {v.suppliers.length > 0 ? (
+                          <div className="space-y-2">
+                            {v.suppliers.map((s) => (
+                              <form
+                                key={s.id}
+                                action={updateVariantSupplierAction}
+                                className="flex flex-wrap items-center gap-2 p-2 rounded-lg bg-surface-1 border"
+                              >
+                                <input type="hidden" name="id" value={s.id} />
+                                <input type="hidden" name="productId" value={product.id} />
+                                <span className="badge font-semibold bg-brand/20 text-brand">
+                                  Уровень {s.priority} {s.priority === 1 ? "(Основной)" : `(Резерв #${s.priority})`}
+                                </span>
+                                <span className="font-mono font-medium">{s.supplierKey}</span>
+                                <span className="text-muted font-mono text-[11px]">ID: {s.supplierExternalId}</span>
+                                <div className="flex items-center gap-1">
+                                  <span className="text-muted">Закупка:</span>
+                                  <input
+                                    name="supplierPriceUsdt"
+                                    type="number"
+                                    step="0.01"
+                                    defaultValue={s.supplierPriceUsdt}
+                                    className="input text-xs w-16 py-1 px-1 font-mono"
+                                  />
+                                  <span className="text-muted">$</span>
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  <span className="text-muted">Сток:</span>
+                                  <input
+                                    name="supplierStock"
+                                    type="number"
+                                    defaultValue={s.supplierStock}
+                                    className="input text-xs w-16 py-1 px-1 font-mono"
+                                  />
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  <span className="text-muted">Уровень:</span>
+                                  <input
+                                    name="priority"
+                                    type="number"
+                                    min="1"
+                                    max="99"
+                                    defaultValue={s.priority}
+                                    className="input text-xs w-12 py-1 px-1 font-mono"
+                                  />
+                                </div>
+                                <label className="flex items-center gap-1 text-muted">
+                                  <input type="checkbox" name="isActive" defaultChecked={s.isActive} /> вкл
+                                </label>
+                                <button className="btn-primary text-xs px-2 py-1">💾</button>
+                                <button formAction={deleteVariantSupplierAction} className="btn-danger text-xs px-2 py-1">
+                                  🗑
+                                </button>
+                              </form>
+                            ))}
+                          </div>
+                        ) : v.supplierKey ? (
+                          <div className="p-2 rounded-lg bg-surface-1 border flex items-center justify-between">
+                            <div>
+                              <span className="font-medium text-foreground">Поставщик: {v.supplierKey}</span>
+                              <span className="text-muted ml-2 font-mono">ID: {v.supplierExternalId}</span>
+                              <span className="text-muted ml-2">Закупка: {v.supplierPriceUsdt}$</span>
+                            </div>
+                            <form action={addVariantSupplierAction}>
+                              <input type="hidden" name="variantId" value={v.id} />
+                              <input type="hidden" name="productId" value={product.id} />
+                              <input type="hidden" name="supplierKey" value={v.supplierKey} />
+                              <input type="hidden" name="supplierExternalId" value={v.supplierExternalId ?? ""} />
+                              <input type="hidden" name="supplierPriceUsdt" value={v.supplierPriceUsdt} />
+                              <input type="hidden" name="supplierStock" value={v.supplierStock} />
+                              <input type="hidden" name="priority" value="1" />
+                              <input type="hidden" name="isActive" value="on" />
+                              <button className="btn-secondary text-xs">⚡ Перевести в мульти-поставщика (Уровень 1)</button>
+                            </form>
+                          </div>
+                        ) : (
+                          <p className="text-muted italic">К этому тарифу пока не подключено ни одного поставщика.</p>
+                        )}
+
+                        {/* Add supplier link form */}
+                        <form
+                          action={addVariantSupplierAction}
+                          className="p-3 rounded-lg bg-surface-2/60 border space-y-2"
+                        >
+                          <input type="hidden" name="variantId" value={v.id} />
+                          <input type="hidden" name="productId" value={product.id} />
+                          <div className="font-medium text-foreground">＋ Подключить поставщика к этому тарифу:</div>
+                          <div className="grid grid-cols-2 md:grid-cols-6 gap-2 items-end">
+                            <div className="col-span-2">
+                              <label className="text-[10px] text-muted">Поставщик (API Source)</label>
+                              <select name="supplierKey" required className="input text-xs mt-1">
+                                <option value="">— выберите источник —</option>
+                                {apiSources.map((src) => (
+                                  <option key={src.slug} value={src.slug}>
+                                    {src.name} ({src.slug})
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <div className="col-span-2">
+                              <label className="text-[10px] text-muted">ID товара в API поставщика</label>
+                              <input
+                                name="supplierExternalId"
+                                required
+                                placeholder="напр. 12345 или gemini-1m"
+                                className="input text-xs font-mono mt-1"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[10px] text-muted" title="1 = Уровень 1 (основной), 2 = Уровень 2 (резервный)">
+                                Уровень (Приоритет)
+                              </label>
+                              <input
+                                name="priority"
+                                type="number"
+                                min="1"
+                                max="99"
+                                defaultValue={v.suppliers.length + 1}
+                                className="input text-xs font-mono mt-1"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[10px] text-muted">Закупка USDT</label>
+                              <input
+                                name="supplierPriceUsdt"
+                                type="number"
+                                step="0.01"
+                                min="0"
+                                defaultValue={0}
+                                className="input text-xs font-mono mt-1"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[10px] text-muted">Сток</label>
+                              <input
+                                name="supplierStock"
+                                type="number"
+                                min="0"
+                                defaultValue={100}
+                                className="input text-xs font-mono mt-1"
+                              />
+                            </div>
+                            <div className="flex items-center gap-1 pt-4">
+                              <label className="flex items-center gap-1 text-xs">
+                                <input type="checkbox" name="isActive" defaultChecked /> вкл
+                              </label>
+                            </div>
+                            <div className="col-span-2 md:col-span-2">
+                              <button className="btn-primary text-xs w-full">＋ Подключить</button>
+                            </div>
+                          </div>
+                        </form>
+                      </div>
+                    </details>
+                  </div>
                 );
               })}
             </div>

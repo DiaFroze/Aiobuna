@@ -24,6 +24,22 @@ export default async function BotApisPage() {
     });
   }
 
+  // Auto-provision Qamify from .env on first visit if configured.
+  const hasQamify = await botDb.apiSource.findUnique({ where: { slug: "qamify" } });
+  const qamKey = process.env.QAMIFY_API_KEY || process.env.QAMIFY_KEY;
+  if (!hasQamify && qamKey) {
+    await botDb.apiSource.create({
+      data: {
+        slug: "qamify",
+        name: "Qamify Reseller",
+        baseUrl: process.env.QAMIFY_API_URL || "https://api.qamify.site",
+        apiKey: qamKey,
+        format: "qamify",
+        isActive: true,
+      },
+    });
+  }
+
   const sources = await botDb.apiSource.findMany({ orderBy: { id: "asc" } });
 
   // Count linked variants per slug for migration display

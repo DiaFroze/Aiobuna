@@ -10,7 +10,8 @@ try {
 import { Bot, InlineKeyboard, Keyboard, InputFile, type Context } from "grammy";
 import type { MessageEntity, UserFromGetMe } from "grammy/types";
 import { db } from "./db";
-import { sourceOrder, envVexSource, envBuyerSource, type Source } from "../lib/supplier";
+import { sourceOrder, envVexSource, envBuyerSource, envQamifySource, sourceBalance, type Source } from "../lib/supplier";
+import { sortSuppliersByStrategy, type SupplierCandidate, type RoutingStrategy } from "../lib/domain/supplier-routing";
 import { geminiTranslate } from "../lib/gemini";
 import { t, LANGS, LANG_NAMES, normalizeLang, btnVariants, type Lang } from "./i18n";
 import { generateVerificationCode } from "../lib/orderCode";
@@ -614,7 +615,15 @@ const isVariantBuyable = (v: { isActive: boolean; plan: { product: { isActive: b
 const isFragmentBacked = (v: { fragmentKind?: string | null }): boolean =>
   v.fragmentKind === "stars" || v.fragmentKind === "premium";
 
-async function availableStock(v: { id: number; autoSupplier: boolean; supplierStock: number; manualDelivery?: boolean; manualStockLimit?: number; fragmentKind?: string }): Promise<number> {
+async function availableStock(v: {
+  id: number;
+  autoSupplier: boolean;
+  supplierStock: number;
+  manualDelivery?: boolean;
+  manualStockLimit?: number;
+  fragmentKind?: string;
+  suppliers?: Array<{ isActive: boolean; supplierStock: number }>;
+}): Promise<number> {
   // Supplier-backed goods (Telegram Stars / Premium) have no warehouse at all:
   // they are bought on demand from Fragment, so counting uploaded codes or a
   // manual limit is meaningless. Deriving availability from those fields is why
@@ -629,8 +638,24 @@ async function availableStock(v: { id: number; autoSupplier: boolean; supplierSt
     return v.manualStockLimit !== undefined && v.manualStockLimit >= 0 ? v.manualStockLimit : STOCK_UNLIMITED;
   }
   const local = await db.stockItem.count({ where: { variantId: v.id, isSold: false } });
-  // Local stock + API stock (both available; local is used first in doBuy)
-  return local + (v.autoSupplier ? v.supplierStock : 0);
+  if (!v.autoSupplier) return local;
+
+  if (v.suppliers && v.suppliers.length > 0) {
+    const suppStock = v.suppliers.filter((s) => s.isActive).reduce((sum, s) => sum + s.supplierStock, 0);
+    return local + suppStock;
+  }
+
+  const linked = await db.variantSupplier.findMany({
+    where: { variantId: v.id, isActive: true },
+    select: { supplierStock: true },
+  });
+  if (linked.length > 0) {
+    const suppStock = linked.reduce((sum, s) => sum + s.supplierStock, 0);
+    return local + suppStock;
+  }
+
+  // Local stock + API stock (fallback to single supplier stock on Variant)
+  return local + (v.supplierStock || 0);
 }
 
 function isCourseProduct(v: { plan: { product: { code: string } } }): boolean {
@@ -953,12 +978,47 @@ async function deliverCourseBonus(courseOrderId: number): Promise<void> {
       if (claimed.count === 1) payload = stock.payload;
     }
   }
-  if (!payload && variant?.autoSupplier && variant.supplierKey && variant.supplierExternalId) {
-    try {
-      const src = await resolveSource(variant.supplierKey);
-      if (src) payload = (await sourceOrder(src, variant.supplierExternalId, 1, bonus.id)).payload;
-    } catch (e) {
-      console.error("[bot] course bonus supplier failed:", (e as Error).message);
+  if (!payload && variant?.autoSupplier) {
+    const variantSuppliers = await db.variantSupplier.findMany({
+      where: { variantId: variant.id, isActive: true },
+      orderBy: { priority: "asc" },
+    });
+    let candidates: SupplierCandidate[] = [];
+    if (variantSuppliers.length > 0) {
+      candidates = variantSuppliers.map((vs) => ({
+        supplierKey: vs.supplierKey,
+        supplierExternalId: vs.supplierExternalId,
+        supplierPriceUsdt: vs.supplierPriceUsdt,
+        supplierStock: vs.supplierStock,
+        priority: vs.priority,
+        isActive: vs.isActive,
+      }));
+    } else if (variant.supplierKey && variant.supplierExternalId) {
+      candidates = [
+        {
+          supplierKey: variant.supplierKey,
+          supplierExternalId: variant.supplierExternalId,
+          supplierPriceUsdt: variant.supplierPriceUsdt,
+          supplierStock: variant.supplierStock,
+          priority: 1,
+          isActive: true,
+        },
+      ];
+    }
+    const sorted = sortSuppliersByStrategy(candidates, ((variant as any).routingStrategy as RoutingStrategy) || "priority");
+    for (const cand of sorted) {
+      try {
+        const src = await resolveSource(cand.supplierKey);
+        if (src) {
+          const res = await sourceOrder(src, cand.supplierExternalId, 1, bonus.id);
+          if (res.payload) {
+            payload = res.payload;
+            break;
+          }
+        }
+      } catch (e) {
+        console.error(`[bot] course bonus supplier ${cand.supplierKey} failed:`, (e as Error).message);
+      }
     }
   }
 
@@ -1096,6 +1156,7 @@ async function resolveSource(slug: string | null | undefined): Promise<Source | 
   if (row) return { slug: row.slug, baseUrl: row.baseUrl, apiKey: row.apiKey, format: row.format };
   if (slug === "vex") return envVexSource();
   if (slug === "somadeth" || slug === "buyer") return envBuyerSource();
+  if (slug === "qamify") return envQamifySource();
   return null;
 }
 async function disclaimerFor(lang: string): Promise<string> {
@@ -1168,7 +1229,7 @@ async function buildMenu(lang: string, page: number, sort: Sort, userId: number,
     db.product.findMany({
       where: { isActive: true },
       orderBy: { sortOrder: "asc" },
-      include: { plans: { include: { variants: { where: { isActive: true } } } } },
+      include: { plans: { include: { variants: { where: { isActive: true }, include: { suppliers: { where: { isActive: true } } } } } } },
     }),
     stockMap(),
     priceOverridesFor(userId),
@@ -1178,12 +1239,26 @@ async function buildMenu(lang: string, page: number, sort: Sort, userId: number,
   // stock whenever autoSupplier was on (a product with 5 in local stock but 0
   // at the supplier read as sold out) and ignored manualStockLimit entirely
   // (a sold-out manual item still looked available). Keep the two in sync.
-  const stOf = (v: { id: number; autoSupplier: boolean; supplierStock: number; manualDelivery: boolean; manualStockLimit?: number; fragmentKind?: string }) => {
+  const stOf = (v: {
+    id: number;
+    autoSupplier: boolean;
+    supplierStock: number;
+    manualDelivery: boolean;
+    manualStockLimit?: number;
+    fragmentKind?: string;
+    suppliers?: Array<{ isActive: boolean; supplierStock: number }>;
+  }) => {
     if (isFragmentBacked(v)) return STOCK_UNLIMITED;
     if (v.manualDelivery) {
       return v.manualStockLimit !== undefined && v.manualStockLimit >= 0 ? v.manualStockLimit : STOCK_UNLIMITED;
     }
-    return (stock.get(v.id) ?? 0) + (v.autoSupplier ? v.supplierStock : 0);
+    const local = stock.get(v.id) ?? 0;
+    if (!v.autoSupplier) return local;
+    if (v.suppliers && v.suppliers.length > 0) {
+      const suppStock = v.suppliers.filter((s) => s.isActive).reduce((sum, s) => sum + s.supplierStock, 0);
+      return local + suppStock;
+    }
+    return local + (v.supplierStock || 0);
   };
   const priceOf = (v: { id: number; priceUzs: number }) => overrides.get(v.id)?.priceUzs ?? v.priceUzs;
 
@@ -1836,7 +1911,13 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
     const suffix = isRefGift ? `\n\n♻️ ${refPointsCost} реф. возвращены на ваш счёт.` : "";
     await bot.api.sendMessage(tgId, t(lang, msgKey) + suffix, { parse_mode: "HTML" }).catch(() => {});
   };
-  const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
+  const v = await db.variant.findUnique({
+    where: { id: variantId },
+    include: {
+      plan: { include: { product: true } },
+      suppliers: { where: { isActive: true }, orderBy: { priority: "asc" } },
+    },
+  });
   if (!v || !isVariantBuyable(v)) return abort("plan_unavailable");
   const pt = await pick3(v.plan.product.titleRu, v.plan.product.titleEn, v.plan.product.titleUz, lang);
   const vt = await locName(v.titleRu, v.titleUz, lang);
@@ -2044,22 +2125,80 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
     }
 
     // 3. Grab remaining from supplier
-    if (supplierQty > 0 && v.autoSupplier && v.supplierKey && v.supplierExternalId) {
-      const src = await resolveSource(v.supplierKey);
-      if (src) {
+    if (supplierQty > 0 && v.autoSupplier) {
+      const variantSuppliers = v.suppliers && v.suppliers.length > 0
+        ? v.suppliers
+        : await db.variantSupplier.findMany({
+            where: { variantId: v.id, isActive: true },
+            orderBy: { priority: "asc" },
+          });
+
+      let candidates: SupplierCandidate[] = [];
+      if (variantSuppliers.length > 0) {
+        candidates = variantSuppliers.map((vs) => ({
+          supplierKey: vs.supplierKey,
+          supplierExternalId: vs.supplierExternalId,
+          supplierPriceUsdt: vs.supplierPriceUsdt,
+          supplierStock: vs.supplierStock,
+          priority: vs.priority,
+          isActive: vs.isActive,
+          name: vs.name ?? undefined,
+        }));
+      } else if (v.supplierKey && v.supplierExternalId) {
+        // Fallback to legacy single supplier on Variant
+        candidates = [
+          {
+            supplierKey: v.supplierKey,
+            supplierExternalId: v.supplierExternalId,
+            supplierPriceUsdt: v.supplierPriceUsdt,
+            supplierStock: v.supplierStock,
+            priority: 1,
+            isActive: true,
+          },
+        ];
+      }
+
+      let balances: Record<string, number> | undefined = undefined;
+      const strategy = ((v as any).routingStrategy as RoutingStrategy) || "priority";
+      if (strategy === "cheapest" || strategy === "balance") {
+        balances = {};
+        const distinctKeys = Array.from(new Set(candidates.map((c) => c.supplierKey)));
+        await Promise.all(
+          distinctKeys.map(async (key) => {
+            try {
+              const s = await resolveSource(key);
+              if (s) {
+                balances![key] = await sourceBalance(s);
+              }
+            } catch (err) {
+              console.warn(`[bot] failed to fetch balance for supplier ${key}:`, (err as Error).message);
+            }
+          }),
+        );
+      }
+
+      const sortedCandidates = sortSuppliersByStrategy(candidates, strategy, balances);
+
+      for (const cand of sortedCandidates) {
+        const src = await resolveSource(cand.supplierKey);
+        if (!src) {
+          console.warn(`[bot] could not resolve supplier source: ${cand.supplierKey}`);
+          continue;
+        }
         try {
-          // Pass our order ID as external_order_id — Vexoran will de-duplicate
-          // retries: same ID → same order returned, never double-charged.
-          const delivered = await sourceOrder(src, v.supplierExternalId, supplierQty, reserve.orderId);
+          console.log(`[bot] attempting supplier ${cand.supplierKey} (${cand.supplierExternalId}) for order #${reserve.orderId} (strategy: ${strategy}, priority: ${cand.priority})`);
+          const delivered = await sourceOrder(src, cand.supplierExternalId, supplierQty, reserve.orderId);
           if (delivered.idempotentReplay) {
             console.log(`[bot] supplier idempotent replay for order #${reserve.orderId}`);
           }
           if (delivered.payload) {
             payloads.push(delivered.payload);
             supplierOk = true;
+            console.log(`[bot] supplier ${cand.supplierKey} successfully delivered for order #${reserve.orderId}`);
+            break;
           }
         } catch (supplierErr) {
-          console.error("[bot] supplier fail:", (supplierErr as Error).message);
+          console.error(`[bot] supplier ${cand.supplierKey} failed for order #${reserve.orderId}:`, (supplierErr as Error).message);
         }
       }
     }
@@ -4681,13 +4820,20 @@ bot.command("stock", async (ctx) => {
   if (!isAdmin(ctx)) return;
   const variants = await db.variant.findMany({
     where: { isActive: true },
-    include: { plan: { include: { product: true } } },
+    include: {
+      plan: { include: { product: true } },
+      suppliers: { where: { isActive: true } },
+    },
     orderBy: { id: "asc" },
   });
   const lines: string[] = ["📦 <b>Склад</b>\n"];
   for (const v of variants) {
     const local = await db.stockItem.count({ where: { variantId: v.id, isSold: false } });
-    const api = v.autoSupplier ? v.supplierStock : 0;
+    const api = v.autoSupplier
+      ? v.suppliers.length > 0
+        ? v.suppliers.reduce((sum, s) => sum + s.supplierStock, 0)
+        : v.supplierStock
+      : 0;
     lines.push(`• <b>${esc(v.plan.product.titleRu)}</b> — ${esc(v.titleRu)}`);
     lines.push(`  Свой склад: ${local} | API: ${api} | Всего: ${local + api}`);
   }
@@ -6379,6 +6525,25 @@ async function ensureSchema() {
     `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "needsUsername" BOOLEAN NOT NULL DEFAULT false`,
     `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "fragmentKind" TEXT NOT NULL DEFAULT ''`,
     `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "fragmentAmount" INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "routingStrategy" TEXT NOT NULL DEFAULT 'priority'`,
+    `CREATE TABLE IF NOT EXISTS "VariantSupplier" (
+      "id" SERIAL NOT NULL,
+      "variantId" INTEGER NOT NULL,
+      "supplierKey" TEXT NOT NULL,
+      "supplierExternalId" TEXT NOT NULL,
+      "supplierPriceUsdt" DOUBLE PRECISION NOT NULL DEFAULT 0,
+      "supplierStock" INTEGER NOT NULL DEFAULT 0,
+      "priority" INTEGER NOT NULL DEFAULT 1,
+      "isActive" BOOLEAN NOT NULL DEFAULT true,
+      "name" TEXT,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "VariantSupplier_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "VariantSupplier_variantId_supplierKey_supplierExternalId_key"
+       ON "VariantSupplier"("variantId", "supplierKey", "supplierExternalId")`,
+    `CREATE INDEX IF NOT EXISTS "VariantSupplier_variantId_priority_idx"
+       ON "VariantSupplier"("variantId", "priority")`,
     `ALTER TABLE "BotOrder" ADD COLUMN IF NOT EXISTS "targetUsername" TEXT`,
     `CREATE TABLE IF NOT EXISTS "BotPollVote" (
       "tgId" TEXT NOT NULL,

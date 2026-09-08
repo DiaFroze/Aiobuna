@@ -660,11 +660,34 @@ model Variant {
   // Stars count, or Premium months (Fragment supports only 3, 6 and 12).
   fragmentAmount     Int     @default(0)
 
+  // Multi-supplier routing strategy: "priority" (cascade by priority level), "cheapest" (lowest price), "balance" (highest/positive balance)
+  routingStrategy    String  @default("priority")
+  suppliers          VariantSupplier[]
+
   stockItems   StockItem[]
   customPrices UserVariantPrice[]
 
   @@unique([supplierKey, supplierExternalId])
 }
+
+model VariantSupplier {
+  id                 Int      @id @default(autoincrement())
+  variantId          Int
+  variant            Variant  @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  supplierKey        String   // ApiSource.slug (e.g. "qamify", "vex", "somadeth")
+  supplierExternalId String
+  supplierPriceUsdt  Float    @default(0)
+  supplierStock      Int      @default(0)
+  priority           Int      @default(1) // 1 = Level 1 (primary), 2 = Level 2 (cascade fallback), etc.
+  isActive           Boolean  @default(true)
+  name               String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@unique([variantId, supplierKey, supplierExternalId])
+  @@index([variantId, priority])
+}
+
 
 model BotSetting {
   key       String   @id

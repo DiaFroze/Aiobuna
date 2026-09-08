@@ -244,6 +244,10 @@ export async function updateVariantAction(formData: FormData) {
       manualDelivery: manual,
       manualStockLimit,
       isActive: formData.get("isActive") === "on",
+      autoSupplier: formData.get("autoSupplier") === "on",
+      routingStrategy: ["priority", "cheapest", "balance"].includes(str(formData.get("routingStrategy")))
+        ? str(formData.get("routingStrategy"))
+        : "priority",
     },
   });
   await audit({
@@ -261,6 +265,120 @@ export async function deleteVariantAction(formData: FormData) {
   const id = Number(formData.get("variantId"));
   await botDb.variant.delete({ where: { id } });
   revalidatePath(`/admin/bot-products/${formData.get("productId")}`);
+}
+
+/** Link a supplier (Level 1, Level 2 cascade, etc.) to a variant */
+export async function addVariantSupplierAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.PRODUCTS_WRITE);
+  const variantId = Number(formData.get("variantId"));
+  const productId = str(formData.get("productId"));
+  const supplierKey = str(formData.get("supplierKey"));
+  const supplierExternalId = str(formData.get("supplierExternalId"));
+  const supplierPriceUsdt = num(formData.get("supplierPriceUsdt"));
+  const supplierStock = Math.round(num(formData.get("supplierStock")));
+  const priority = Math.round(num(formData.get("priority"))) || 1;
+  const name = str(formData.get("name")) || null;
+  const isActive = formData.get("isActive") === "on";
+
+  if (!variantId || !supplierKey || !supplierExternalId) return;
+
+  await botDb.variantSupplier.upsert({
+    where: {
+      variantId_supplierKey_supplierExternalId: {
+        variantId,
+        supplierKey,
+        supplierExternalId,
+      },
+    },
+    create: {
+      variantId,
+      supplierKey,
+      supplierExternalId,
+      supplierPriceUsdt,
+      supplierStock,
+      priority,
+      name,
+      isActive,
+    },
+    update: {
+      supplierPriceUsdt,
+      supplierStock,
+      priority,
+      name,
+      isActive,
+    },
+  });
+
+  // Automatically enable autoSupplier on variant
+  await botDb.variant.update({
+    where: { id: variantId },
+    data: { autoSupplier: true },
+  });
+
+  await audit({
+    adminId: admin.id,
+    action: "bot.variant.supplier.add",
+    entityType: "VariantSupplier",
+    entityId: `${variantId}:${supplierKey}:${supplierExternalId}`,
+    metadata: { priority, supplierPriceUsdt },
+  });
+
+  revalidatePath(`/admin/bot-products/${productId}`);
+}
+
+/** Update priority or details of a linked supplier */
+export async function updateVariantSupplierAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.PRODUCTS_WRITE);
+  const id = Number(formData.get("id"));
+  const productId = str(formData.get("productId"));
+  const priority = Math.max(1, Math.round(num(formData.get("priority"))) || 1);
+  const supplierPriceUsdt = num(formData.get("supplierPriceUsdt"));
+  const supplierStock = Math.round(num(formData.get("supplierStock")));
+  const isActive = formData.get("isActive") === "on";
+  const name = str(formData.get("name")) || null;
+
+  if (!id) return;
+
+  await botDb.variantSupplier.update({
+    where: { id },
+    data: {
+      priority,
+      supplierPriceUsdt,
+      supplierStock,
+      isActive,
+      name,
+    },
+  });
+
+  await audit({
+    adminId: admin.id,
+    action: "bot.variant.supplier.update",
+    entityType: "VariantSupplier",
+    entityId: String(id),
+    metadata: { priority, supplierPriceUsdt, isActive },
+  });
+
+  revalidatePath(`/admin/bot-products/${productId}`);
+}
+
+/** Remove a linked supplier from a variant */
+export async function deleteVariantSupplierAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.PRODUCTS_WRITE);
+  const id = Number(formData.get("id"));
+  const productId = str(formData.get("productId"));
+
+  if (!id) return;
+
+  await botDb.variantSupplier.delete({ where: { id } });
+
+  await audit({
+    adminId: admin.id,
+    action: "bot.variant.supplier.delete",
+    entityType: "VariantSupplier",
+    entityId: String(id),
+  });
+
+  revalidatePath(`/admin/bot-products/${productId}`);
 }
 
 /**
