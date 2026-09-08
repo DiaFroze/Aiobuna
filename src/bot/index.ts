@@ -152,14 +152,25 @@ async function sendOrEdit(ctx: Context, text: string, opts: SendOrEditOpts = {})
 
   if (photo) {
     if (chatId && messageId) await ctx.api.deleteMessage(chatId, messageId).catch(() => {});
-    await ctx.replyWithPhoto(photo, { caption: text, parse_mode: "HTML", reply_markup: kb })
-      .then((msg) => {
+    if (text.length <= 1024) {
+      try {
+        const msg = await ctx.replyWithPhoto(photo, { caption: text, parse_mode: "HTML", reply_markup: kb });
         opts.onPhotoSent?.(msg);
-      })
-      .catch(async (err) => {
-        console.error("[bot] replyWithPhoto failed, falling back to text:", (err as Error)?.message || err);
-        await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
-      });
+        return;
+      } catch (err) {
+        console.warn("[bot] replyWithPhoto with caption failed, falling back to separate photo + text:", (err as Error)?.message || err);
+      }
+    }
+    // If text exceeds Telegram's 1024 caption limit or single photo+caption failed:
+    // Send photo first so banner is never lost, followed by the full text and keyboard.
+    const photoMsg = await ctx.replyWithPhoto(photo).catch((err) => {
+      console.error("[bot] replyWithPhoto (standalone) failed:", (err as Error)?.message || err);
+      return null;
+    });
+    if (photoMsg) opts.onPhotoSent?.(photoMsg);
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: opts.link_preview_options }).catch((err) => {
+      console.error("[bot] reply text failed:", (err as Error)?.message || err);
+    });
     return;
   }
 
@@ -627,46 +638,7 @@ async function configuredCourseChannel(): Promise<string> {
   return (process.env.COURSE_CHANNEL_ID ?? await setting(COURSE_CHANNEL_SETTING, "")).trim();
 }
 
-const COURSE_DESC_UZ = `<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> <b>G‘oyadan — tayyor kontentgacha ✨</b>
-Sun’iy intellekt bilan noldan kontent, rasm, video va musiqa yaratishni o‘rganing!
-
-<tg-emoji emoji-id="5467512909909214089">🎓</tg-emoji> <b>20 ta darsdan iborat amaliy kurs:</b>
-<tg-emoji emoji-id="5927026418616636353">🧠</tg-emoji> <b>AI ASOSLARI:</b> 01. AI bilan tanishuv • 02. Eng kuchli ilovalar • 03. G‘oyalar xazinasi • 04. Prompt engineering
-<tg-emoji emoji-id="5235837920081887219">📸</tg-emoji> <b>RASM & VIZUAL:</b> 05. Poza va rakurslar • 06. Formatlar siri • 07. AI fotosessiya • 08. Multfilm olami
-<tg-emoji emoji-id="5256131095094652290">🎯</tg-emoji> <b>AUDITORIYA:</b> 09. Instagram profili • 10. To‘g‘ri auditoriya
-<tg-emoji emoji-id="5375464961822695044">🎬</tg-emoji> <b>AI VIDEO:</b> 11. Gem bot • 12. Flow AI video • 13. Gapiruvchi buyumlar • 14. Multfilm videolari • 15. Reklama roliklari
-<tg-emoji emoji-id="5188481279963715781">🚀</tg-emoji> <b>MONTAJ & DAROMAD:</b> 16. CapCut montaj • 17. Instagramga yuklash • 18. Retro rasmlar • 19. AI musiqa • 20. Portfolio va narx
-
-<tg-emoji emoji-id="6283073379184415506">🎁</tg-emoji> <b>BONUS:</b> 18 oylik <b>Gemini AI Pro</b> (5 TB) sovg‘a!
-<tg-emoji emoji-id="5197288647275071607">🛡</tg-emoji> <b>KURS:</b> Yopiq kanalga havola to‘lovdan so‘ng darhol beriladi.`;
-
-const COURSE_DESC_RU = `<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> <b>От идеи — до готового контента ✨</b>
-Научитесь создавать фото, видео, музыку и рекламу с помощью нейросетей от А до Я!
-
-<tg-emoji emoji-id="5467512909909214089">🎓</tg-emoji> <b>Практический курс из 20 уроков:</b>
-<tg-emoji emoji-id="5927026418616636353">🧠</tg-emoji> <b>ОСНОВЫ И ИДЕИ:</b> 01. Знакомство с ИИ • 02. Топ AI-приложения • 03. Банк идей • 04. Промпт-инжиниринг
-<tg-emoji emoji-id="5235837920081887219">📸</tg-emoji> <b>ФОТО И ВИЗУАЛ:</b> 05. Позы и ракурсы • 06. Секреты форматов • 07. AI-фотосессия • 08. Мир анимации
-<tg-emoji emoji-id="5256131095094652290">🎯</tg-emoji> <b>АУДИТОРИЯ:</b> 09. Профиль Instagram • 10. Целевая аудитория
-<tg-emoji emoji-id="5375464961822695044">🎬</tg-emoji> <b>AI ВИДЕО:</b> 11. Gem-бот • 12. Flow AI видео • 13. Говорящие предметы • 14. Мультфильмы • 15. Рекламные ролики
-<tg-emoji emoji-id="5188481279963715781">🚀</tg-emoji> <b>МОНТАЖ И ПРАЙС:</b> 16. Монтаж в CapCut • 17. Публикация в Instagram • 18. Реставрация фото • 19. AI-музыка • 20. Портфолио и заработок
-
-<tg-emoji emoji-id="6283073379184415506">🎁</tg-emoji> <b>БОНУС:</b> <b>Gemini AI Pro на 18 месяцев</b> (5 ТБ облака) в подарок!
-<tg-emoji emoji-id="5197288647275071607">🛡</tg-emoji> <b>ВЫДАЧА:</b> Ссылка в закрытый канал выдаётся сразу после оплаты.`;
-
-const COURSE_DESC_EN = `<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> <b>From Idea to Ready Content ✨</b>
-Learn to create photos, videos, music, and ads using AI from scratch!
-
-<tg-emoji emoji-id="5467512909909214089">🎓</tg-emoji> <b>20-Lesson Hands-on Course:</b>
-<tg-emoji emoji-id="5927026418616636353">🧠</tg-emoji> <b>AI BASICS:</b> 01. Intro to AI • 02. Top AI Apps • 03. Idea Treasury • 04. Prompt Engineering
-<tg-emoji emoji-id="5235837920081887219">📸</tg-emoji> <b>VISUAL CREATION:</b> 05. Poses & Angles • 06. Format Secrets • 07. AI Photoshoot • 08. Animation World
-<tg-emoji emoji-id="5256131095094652290">🎯</tg-emoji> <b>AUDIENCE:</b> 09. Instagram Profile • 10. Target Audience
-<tg-emoji emoji-id="5375464961822695044">🎬</tg-emoji> <b>AI VIDEO:</b> 11. Gem Bot • 12. Flow AI Video • 13. Talking Objects • 14. Cartoon Videos • 15. Commercial Ads
-<tg-emoji emoji-id="5188481279963715781">🚀</tg-emoji> <b>EDITING & PRICING:</b> 16. CapCut Editing • 17. Instagram Upload • 18. Photo Restoration • 19. AI Music • 20. Portfolio & Pricing
-
-<tg-emoji emoji-id="6283073379184415506">🎁</tg-emoji> <b>BONUS:</b> 18 Months of <b>Gemini AI Pro</b> (5TB Cloud) included!
-<tg-emoji emoji-id="5197288647275071607">🛡</tg-emoji> <b>DELIVERY:</b> Private channel invite link delivered instantly upon payment.`;
-
-const COURSE_DESC_FULL_UZ = `<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> <b>SUBHUB AI KURS</b>
+const COURSE_DESC_UZ = `<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> <b>SUBHUB AI KURS</b>
 G‘oyadan — tayyor kontentgacha ✨
 
 Sun’iy intellekt yordamida rasm, video, musiqa va reklama kontenti yaratishni o‘rganing. Boshlash uchun tajriba shart emas — hammasini noldan boshlaymiz!
@@ -711,7 +683,7 @@ Bir martalik to‘lovdan so‘ng yopiq kanalga kirish havolasini darhol olasiz.
 
 <tg-emoji emoji-id="5231102735817918643">👇</tg-emoji> O‘zingizga qulay to‘lov usulini tanlang va o‘rganishni boshlang!`;
 
-const COURSE_DESC_FULL_RU = `<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> <b>SUBHUB AI КУРС</b>
+const COURSE_DESC_RU = `<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> <b>SUBHUB AI КУРС</b>
 От идеи — до готового контента ✨
 
 Научитесь создавать изображения, видео, музыку и рекламный контент с помощью нейросетей. Опыт не требуется — начинаем с нуля!
@@ -756,7 +728,7 @@ const COURSE_DESC_FULL_RU = `<tg-emoji emoji-id="5372917041193828849">🚀</tg-e
 
 <tg-emoji emoji-id="5231102735817918643">👇</tg-emoji> Выберите удобный способ оплаты ниже и начните обучение!`;
 
-const COURSE_DESC_FULL_EN = `<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> <b>SUBHUB AI COURSE</b>
+const COURSE_DESC_EN = `<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> <b>SUBHUB AI COURSE</b>
 From Idea to Ready Content ✨
 
 Learn to create photos, videos, music, and ads using AI from scratch. No prior experience required!
@@ -800,6 +772,10 @@ Learn to create photos, videos, music, and ads using AI from scratch. No prior e
 Instant personal invite link to the private channel upon payment.
 
 <tg-emoji emoji-id="5231102735817918643">👇</tg-emoji> Choose your payment method below to get started!`;
+
+const COURSE_DESC_FULL_UZ = COURSE_DESC_UZ;
+const COURSE_DESC_FULL_RU = COURSE_DESC_RU;
+const COURSE_DESC_FULL_EN = COURSE_DESC_EN;
 
 /** Create the course catalog entry once and keep its contractual price/order stable. */
 async function ensureCourseCatalog(activate = false) {
@@ -851,12 +827,12 @@ async function ensureCourseCatalog(activate = false) {
       where: { id: product.id },
       data: {
         sortOrder: -100_000,
-        titleRu: "SUBHUB AI Kurs — 20 практических уроков",
-        titleUz: "SUBHUB AI Kurs — 20 ta darslik to'liq kurs",
-        titleEn: "SUBHUB AI Course — 20 Complete Lessons",
-        descRu: COURSE_DESC_RU,
-        descUz: COURSE_DESC_UZ,
-        descEn: COURSE_DESC_EN,
+        titleRu: product.titleRu || "SUBHUB AI Kurs — 20 практических уроков",
+        titleUz: product.titleUz || "SUBHUB AI Kurs — 20 ta darslik to'liq kurs",
+        titleEn: product.titleEn || "SUBHUB AI Course — 20 Complete Lessons",
+        descRu: product.descRu?.trim() ? product.descRu : COURSE_DESC_RU,
+        descUz: product.descUz?.trim() ? product.descUz : COURSE_DESC_UZ,
+        descEn: product.descEn?.trim() ? product.descEn : COURSE_DESC_EN,
         ...(activate ? { isActive: true } : {}),
       },
       include: { plans: { include: { variants: true }, orderBy: { sortOrder: "asc" } } },
@@ -1629,15 +1605,7 @@ async function buildQtyChooser(
   const formattedDesc = pd?.trim() ? tgHtml(formatRichText(pd.trim())) : "";
   let desc = "";
   if (course) {
-    // If course description fits within the banner media caption limit (< 750 chars), use it directly.
-    // If it's a long syllabus (> 750 chars, like the 1880-char full curriculum), use the concise
-    // structured syllabus for the banner card so replyWithPhoto NEVER fails Telegram's 1024-char limit,
-    // and provide the full syllabus via the prominent `ℹ️ Batafsil dastur` button.
-    if (formattedDesc && formattedDesc.length <= 750) {
-      desc = formattedDesc;
-    } else {
-      desc = lang === "uz" ? COURSE_DESC_UZ : lang === "ru" ? COURSE_DESC_RU : COURSE_DESC_EN;
-    }
+    desc = formattedDesc || (lang === "uz" ? COURSE_DESC_UZ : lang === "ru" ? COURSE_DESC_RU : COURSE_DESC_EN);
   } else if (hasMedia) {
     desc = safeTruncateHtml(formattedDesc, 650);
   } else {
@@ -1696,15 +1664,20 @@ async function showQtyChooser(ctx: Context, variantId: number, qty: number, back
         await ctx.reply(built.text, { parse_mode: "HTML", reply_markup: built.kb }).catch(() => {});
       });
     } else if (photo) {
-      await ctx.replyWithPhoto(photo, { caption: built.text, parse_mode: "HTML", reply_markup: built.kb })
-        .then((msg) => {
+      if (built.text.length <= 1024) {
+        try {
+          const msg = await ctx.replyWithPhoto(photo, { caption: built.text, parse_mode: "HTML", reply_markup: built.kb });
           if (built.isCourse && typeof photo !== "string" && msg && "photo" in msg && Array.isArray(msg.photo) && msg.photo.length > 0) {
             cachedCourseBannerFileId = msg.photo[msg.photo.length - 1].file_id;
           }
-        })
-        .catch(async () => {
-          await ctx.reply(built.text, { parse_mode: "HTML", reply_markup: built.kb }).catch(() => {});
-        });
+          return;
+        } catch {}
+      }
+      const photoMsg = await ctx.replyWithPhoto(photo).catch(() => null);
+      if (built.isCourse && typeof photo !== "string" && photoMsg && "photo" in photoMsg && Array.isArray(photoMsg.photo) && photoMsg.photo.length > 0) {
+        cachedCourseBannerFileId = photoMsg.photo[photoMsg.photo.length - 1].file_id;
+      }
+      await ctx.reply(built.text, { parse_mode: "HTML", reply_markup: built.kb }).catch(() => {});
     } else {
       await ctx.reply(built.text, { parse_mode: "HTML", reply_markup: built.kb });
     }
