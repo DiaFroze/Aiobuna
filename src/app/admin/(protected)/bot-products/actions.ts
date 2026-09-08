@@ -8,6 +8,8 @@ import { botDb } from "@/lib/botDb";
 import { audit } from "@/lib/security/audit";
 import { geminiLocalize } from "@/lib/gemini";
 import { parseBulkPrices, parseBulkBonus } from "@/lib/domain/bulk-pricing";
+import fs from "node:fs";
+import path from "node:path";
 
 function str(v: FormDataEntryValue | null): string {
   return String(v ?? "").trim();
@@ -413,43 +415,62 @@ export async function testEmojiAction(formData: FormData) {
   }).catch(() => {});
 }
 
-/** Upload a banner image for a product via Telegram Bot API. */
+/** Upload a banner image for a product. Saves locally and optionally registers with Telegram. */
 export async function uploadBannerAction(formData: FormData) {
   const admin = await requirePermission(PERMISSIONS.PRODUCTS_WRITE);
   const productId = Number(formData.get("productId"));
   const file = formData.get("file") as File | null;
   if (!productId || !file || file.size === 0) return;
 
+  const bytes = await file.arrayBuffer();
+  const buffer = Buffer.from(bytes);
+
+  const ext = path.extname(file.name) || ".jpg";
+  const filename = `banner-product-${productId}${ext}`;
+
+  // Save to public/banners and src/bot/assets for universal serving
+  const publicDir = path.join(process.cwd(), "public", "banners");
+  const botAssetsDir = path.join(process.cwd(), "src", "bot", "assets");
+  if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir, { recursive: true });
+  if (!fs.existsSync(botAssetsDir)) fs.mkdirSync(botAssetsDir, { recursive: true });
+
+  fs.writeFileSync(path.join(publicDir, filename), buffer);
+  fs.writeFileSync(path.join(botAssetsDir, filename), buffer);
+
+  let fileId = filename;
+
+  // Optional: Also try to upload to Telegram to get a file_id if bot credentials are valid
   const token = process.env.TELEGRAM_BOT_TOKEN ?? "";
   const chatId = process.env.TELEGRAM_ADMIN_CHAT_ID ?? "";
-  if (!token || !chatId) return;
-
-  // Upload to Telegram to get a file_id
-  const tgForm = new FormData();
-  tgForm.append("chat_id", chatId);
-  tgForm.append("photo", file, file.name);
-  tgForm.append("caption", `📷 Banner for product #${productId}`);
-
-  const res = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
-    method: "POST",
-    body: tgForm,
-  });
-  const json = await res.json() as { ok: boolean; result?: { photo?: { file_id: string }[]; message_id?: number } };
-  if (!json.ok || !json.result?.photo) return;
-
-  const fileId = json.result.photo[json.result.photo.length - 1].file_id;
-
-  // Delete the temp message
-  if (json.result.message_id) {
-    await fetch(`https://api.telegram.org/bot${token}/deleteMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, message_id: json.result.message_id }),
-    }).catch(() => {});
+  if (token && chatId) {
+    try {
+      const tgForm = new FormData();
+      tgForm.append("chat_id", chatId);
+      tgForm.append("photo", new Blob([buffer]), file.name);
+      tgForm.append("caption", `📷 Banner for product #${productId}`);
+      const res = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+        method: "POST",
+        body: tgForm,
+      });
+      const json = await res.json() as { ok: boolean; result?: { photo?: { file_id: string }[]; message_id?: number } };
+      if (json.ok && json.result?.photo && json.result.photo.length > 0) {
+        fileId = json.result.photo[json.result.photo.length - 1].file_id;
+        if (json.result.message_id) {
+          await fetch(`https://api.telegram.org/bot${token}/deleteMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ chat_id: chatId, message_id: json.result.message_id }),
+          }).catch(() => {});
+        }
+      }
+    } catch {
+      // Offline / invalid bot token: local file asset will be used
+    }
   }
 
   await botDb.product.update({ where: { id: productId }, data: { bannerFileId: fileId } });
   await audit({ adminId: admin.id, action: "product.banner.upload", entityType: "BotProduct", entityId: String(productId) });
+  revalidatePath(`/admin/bot-products/${productId}`);
   revalidatePath("/admin/bot-products");
 }
 
@@ -458,7 +479,18 @@ export async function deleteBannerAction(formData: FormData) {
   const admin = await requirePermission(PERMISSIONS.PRODUCTS_WRITE);
   const productId = Number(formData.get("productId"));
   if (!productId) return;
+
+  const p = await botDb.product.findUnique({ where: { id: productId }, select: { bannerFileId: true } });
+  if (p?.bannerFileId) {
+    const filename = p.bannerFileId;
+    const publicPath = path.join(process.cwd(), "public", "banners", filename);
+    const botAssetsPath = path.join(process.cwd(), "src", "bot", "assets", filename);
+    if (fs.existsSync(publicPath)) fs.unlinkSync(publicPath);
+    if (fs.existsSync(botAssetsPath)) fs.unlinkSync(botAssetsPath);
+  }
+
   await botDb.product.update({ where: { id: productId }, data: { bannerFileId: null } });
   await audit({ adminId: admin.id, action: "product.banner.delete", entityType: "BotProduct", entityId: String(productId) });
+  revalidatePath(`/admin/bot-products/${productId}`);
   revalidatePath("/admin/bot-products");
 }

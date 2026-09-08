@@ -39,12 +39,17 @@ import path from "node:path";
 // text-only instead of erroring — never fatal.
 const mediaAssetCache = new Map<string, Buffer>();
 function mediaAssetFile(filename: string): InputFile | null {
+  if (!filename) return null;
   let buf = mediaAssetCache.get(filename);
   if (buf === undefined || buf.length === 0) {
+    const cleanName = filename.replace(/^[/\\]+/, "");
     const candidates = [
-      path.join(__dirname, "assets", filename),
-      path.join(process.cwd(), "src", "bot", "assets", filename),
-      path.join(process.cwd(), "assets", filename),
+      path.join(__dirname, "assets", cleanName),
+      path.join(process.cwd(), "src", "bot", "assets", cleanName),
+      path.join(process.cwd(), "public", "banners", cleanName),
+      path.join(process.cwd(), "public", cleanName),
+      path.join(process.cwd(), "assets", cleanName),
+      path.isAbsolute(filename) ? filename : path.join(process.cwd(), cleanName),
     ];
     for (const c of candidates) {
       try {
@@ -57,7 +62,7 @@ function mediaAssetFile(filename: string): InputFile | null {
     if (!buf) buf = Buffer.alloc(0);
     if (buf.length > 0) mediaAssetCache.set(filename, buf);
   }
-  return buf.length > 0 ? new InputFile(buf, filename) : null;
+  return buf.length > 0 ? new InputFile(buf, path.basename(filename)) : null;
 }
 function giftsBannerAsset(): { file: InputFile; isVideo: boolean } | null {
   for (const name of ["gifts-banner.mov", "gifts-banner.mp4", "gifts-banner.png", "gifts-banner.jpg"]) {
@@ -104,6 +109,16 @@ const courseBannerFile = () => mediaAssetFile("course-banner.jpg");
 function courseBanner(): string | InputFile | null {
   if (cachedCourseBannerFileId) return cachedCourseBannerFileId;
   return courseBannerFile();
+}
+function resolveProductBanner(bannerRef: string | null | undefined): string | InputFile | null {
+  if (!bannerRef || !bannerRef.trim()) return null;
+  const ref = bannerRef.trim();
+  if (ref.startsWith("http://") || ref.startsWith("https://")) {
+    return ref;
+  }
+  const local = mediaAssetFile(ref);
+  if (local) return local;
+  return ref;
 }
 const promoInstructionsFile = () => mediaAssetFile("promo-instructions.mp4");
 const howToPayFile = () => mediaAssetFile("how-to-pay.mp4");
@@ -1522,7 +1537,7 @@ async function appendCardPayButtons(kb: InlineKeyboard, userId: number, variantI
 }
 
 async function buildQtyChooser(
-  v: { id: number; priceUzs: number; autoSupplier: boolean; supplierStock: number; titleRu: string; titleUz: string; durationDays: number; needsUsername?: boolean; fragmentKind?: string; fragmentAmount?: number; bulkPrices?: string | null; bulkBonus?: string | null; plan: { product: { id: number; code: string; titleRu: string; titleEn: string; titleUz: string; descRu?: string; descEn?: string; descUz?: string; refDiscount?: boolean; videoFileId?: string | null; bannerFileId?: string | null } } },
+  v: { id: number; priceUzs: number; autoSupplier: boolean; supplierStock: number; titleRu: string; titleUz: string; durationDays: number; needsUsername?: boolean; fragmentKind?: string; fragmentAmount?: number; bulkPrices?: string | null; bulkBonus?: string | null; plan: { product: { id: number; code: string; titleRu: string; titleEn: string; titleUz: string; emoji?: string | null; premiumEmoji?: string | null; descRu?: string; descEn?: string; descUz?: string; refDiscount?: boolean; videoFileId?: string | null; bannerFileId?: string | null } } },
   lang: string,
   user: { id: number; tgId: string; bonusReferrals?: number | null; spentReferrals?: number | null },
   qty: number,
@@ -1537,7 +1552,13 @@ async function buildQtyChooser(
   // ("Gemini AI Pro 18 Oy — Gemini AI Pro 18m" → "Gemini AI Pro 18m").
   const title = formatItemTitle(pt, vt);
   const brandEmoji = giftPremiumEmoji(pt);
-  const head = brandEmoji ? `<tg-emoji emoji-id="${brandEmoji}">💎</tg-emoji>` : "🧾";
+  const head = course
+    ? '<tg-emoji emoji-id="5467512909909214089">🎓</tg-emoji>'
+    : brandEmoji
+    ? `<tg-emoji emoji-id="${brandEmoji}">💎</tg-emoji>`
+    : v.plan.product.premiumEmoji
+    ? `<tg-emoji emoji-id="${v.plan.product.premiumEmoji}">${v.plan.product.emoji || "✨"}</tg-emoji>`
+    : "🧾";
   const max = await availableStock(v);
   if (max <= 0) return null;
   // Fragment refuses anything under 50 stars, so the ± buttons must not be able
@@ -1563,18 +1584,14 @@ async function buildQtyChooser(
   const flashPct = promo && promo.originalPrice > unitPrice ? Math.round((promo.originalPrice - unitPrice) / promo.originalPrice * 100) : 0;
 
   const kb = new InlineKeyboard();
-  if (course) {
-    // Course access is sold per person and always creates exactly one link.
-    const detailsLabel = lang === "uz" ? "ℹ️ Batafsil dastur (20 ta dars)" : lang === "ru" ? "ℹ️ Подробная программа (20 уроков)" : "ℹ️ Full Curriculum (20 Lessons)";
-    kb.text(detailsLabel, `cfull:${v.id}:${back}`).row();
-  } else if (starStep) {
+  if (starStep) {
     kb.text("−50", `q:${v.id}:${qty - 50}:${back}`)
       .text("−10", `q:${v.id}:${qty - 10}:${back}`)
       .text(`${qty} ⭐`, "noop")
       .text("+10", `q:${v.id}:${qty + 10}:${back}`)
       .text("+50", `q:${v.id}:${qty + 50}:${back}`)
       .row();
-  } else {
+  } else if (!course) {
     kb.text("➖", `q:${v.id}:${qty - 1}:${back}`)
       .text(`${qty}`, "noop")
       .text("➕", `q:${v.id}:${qty + 1}:${back}`)
@@ -1603,7 +1620,9 @@ async function buildQtyChooser(
   const siblings = await db.variant.count({ where: { isActive: true, plan: { productId: v.plan.product.id } } });
   kb.text(t(lang, "back"), siblings > 1 ? `p:${v.plan.product.id}:${back}` : `m:${back}`);
 
-  const photo = course ? (v.plan.product.bannerFileId?.trim() || courseBanner()) : (v.plan.product.bannerFileId?.trim() || null);
+  const photo = course
+    ? (resolveProductBanner(v.plan.product.bannerFileId) || courseBanner())
+    : resolveProductBanner(v.plan.product.bannerFileId);
   const hasMedia = Boolean(photo || v.plan.product.videoFileId);
 
   const pd = await pick3(v.plan.product.descRu ?? "", v.plan.product.descEn, v.plan.product.descUz, lang);
