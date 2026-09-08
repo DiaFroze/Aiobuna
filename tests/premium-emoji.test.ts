@@ -111,6 +111,16 @@ describe("rich-text formatting for Telegram custom emoji", () => {
       '<tg-emoji emoji-id="5235837920081887219">📸</tg-emoji>',
     );
   });
+
+  it("handles and cleans escaped quotes \\\" inside tg-emoji tag", () => {
+    const raw = '<tg-emoji emoji-id=\\"5372917041193828849\\">🚀</tg-emoji> SUBHUB AI KURS';
+    expect(formatRichText(raw)).toBe(
+      '<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> SUBHUB AI KURS',
+    );
+    expect(tgHtml(formatRichText(raw))).toBe(
+      '<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> SUBHUB AI KURS',
+    );
+  });
 });
 
 describe("tgHtml safe Telegram HTML escaping & tag preservation", () => {
@@ -125,6 +135,11 @@ describe("tgHtml safe Telegram HTML escaping & tag preservation", () => {
   it("preserves links with href", () => {
     const input = '<a href="https://t.me/subhub">SubHub Channel</a>';
     expect(tgHtml(input)).toBe(input);
+  });
+
+  it("recovers and cleans <tg-emoji> even if it has raw backslashes and quotes", () => {
+    const input = '<tg-emoji emoji-id=\\"5372917041193828849\\">🚀</tg-emoji>';
+    expect(tgHtml(input)).toBe('<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji>');
   });
 });
 

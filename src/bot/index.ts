@@ -1603,9 +1603,27 @@ async function buildQtyChooser(
   const siblings = await db.variant.count({ where: { isActive: true, plan: { productId: v.plan.product.id } } });
   kb.text(t(lang, "back"), siblings > 1 ? `p:${v.plan.product.id}:${back}` : `m:${back}`);
 
+  const photo = course ? (v.plan.product.bannerFileId?.trim() || courseBanner()) : (v.plan.product.bannerFileId?.trim() || null);
+  const hasMedia = Boolean(photo || v.plan.product.videoFileId);
+
   const pd = await pick3(v.plan.product.descRu ?? "", v.plan.product.descEn, v.plan.product.descUz, lang);
   const formattedDesc = pd?.trim() ? tgHtml(formatRichText(pd.trim())) : "";
-  const desc = course ? formattedDesc : safeTruncateHtml(formattedDesc, 600);
+  let desc = "";
+  if (course) {
+    // If course description fits within the banner media caption limit (< 750 chars), use it directly.
+    // If it's a long syllabus (> 750 chars, like the 1880-char full curriculum), use the concise
+    // structured syllabus for the banner card so replyWithPhoto NEVER fails Telegram's 1024-char limit,
+    // and provide the full syllabus via the prominent `ℹ️ Batafsil dastur` button.
+    if (formattedDesc && formattedDesc.length <= 750) {
+      desc = formattedDesc;
+    } else {
+      desc = lang === "uz" ? COURSE_DESC_UZ : lang === "ru" ? COURSE_DESC_RU : COURSE_DESC_EN;
+    }
+  } else if (hasMedia) {
+    desc = safeTruncateHtml(formattedDesc, 650);
+  } else {
+    desc = safeTruncateHtml(formattedDesc, 3000);
+  }
   const offers = describeBulk(unitPrice, deal.tiers, deal.bonuses, (n) => money(n, lang));
 
   const flashBlock = promo && flashPct > 0
@@ -1627,7 +1645,6 @@ async function buildQtyChooser(
     `\n${t(lang, "total", { v: money(payTotal, lang) })}` +
     (deal.saved > 0 && !disc ? ` <b>(−${money(deal.saved, lang)})</b>` : "") +
     (offers.length > 0 ? `\n\n🔥 <b>Выгодные наборы:</b>\n${offers.map((o) => `• ${o}`).join("\n")}` : "");
-  const photo = course ? courseBanner() : (v.plan.product.bannerFileId?.trim() || null);
   return { text, kb, max, videoFileId: v.plan.product.videoFileId ?? null, photo, isCourse: course };
 }
 
@@ -5595,7 +5612,10 @@ bot.on("callback_query:data", async (ctx) => {
       await ctx.answerCallbackQuery().catch(() => {});
       const vid = Number(rest[0]);
       const back = rest.slice(1).join(":") || "0:all";
-      const fullText = lang === "uz" ? COURSE_DESC_FULL_UZ : lang === "ru" ? COURSE_DESC_FULL_RU : COURSE_DESC_FULL_EN;
+      const v = await db.variant.findUnique({ where: { id: vid }, include: { plan: { include: { product: true } } } });
+      const pd = v ? await pick3(v.plan.product.descRu ?? "", v.plan.product.descEn, v.plan.product.descUz, lang) : "";
+      const customFull = pd?.trim() && pd.trim().length > 600 ? tgHtml(formatRichText(pd.trim())) : null;
+      const fullText = customFull || (lang === "uz" ? COURSE_DESC_FULL_UZ : lang === "ru" ? COURSE_DESC_FULL_RU : COURSE_DESC_FULL_EN);
       const fullKb = new InlineKeyboard().text(lang === "uz" ? "📷 Kartochkaga qaytish" : lang === "ru" ? "📷 Вернуться к карточке" : "📷 Back to Card", `b:${vid}:${back}`);
       return sendOrEdit(ctx, fullText, { reply_markup: fullKb });
     }

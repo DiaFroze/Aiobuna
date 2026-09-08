@@ -31,23 +31,25 @@ export function formatRichText(raw: string | null | undefined): string {
   if (!raw) return "";
   let s = raw;
 
-  // 1. Bracket syntax: [emoji:12345:🚀] or [emoji:12345]
+  // 1. Normalize ANY existing <tg-emoji ...> tag, removing backslashes, unescaping quotes or &quot;,
+  // handling id or emoji-id:
+  s = s.replace(/<tg-emoji\s+(?:emoji-)?id=(?:\\*["']|&quot;)?(\d+)(?:\\*["']|&quot;)?\s*>/gi, '<tg-emoji emoji-id="$1">');
+  s = s.replace(/<\/tg-emoji\s*>/gi, '</tg-emoji>');
+
+  // 2. Bracket syntax: [emoji:12345:🚀] or [emoji:12345]
   s = s.replace(/\[emoji:(\d+)(?::([^\]]+))?\]/gi, (_m, id, fallback) => {
     const char = fallback?.trim() || "✨";
     return `<tg-emoji emoji-id="${id}">${char}</tg-emoji>`;
   });
 
-  // 2. Reseller syntax: {ce:12345:🚀} or {ce:12345}
+  // 3. Reseller syntax: {ce:12345:🚀} or {ce:12345}
   s = s.replace(/\{ce:(\d+)(?::([^}]+))?\}/gi, (_m, id, fallback) => {
     const char = fallback?.trim() || "✨";
     return `<tg-emoji emoji-id="${id}">${char}</tg-emoji>`;
   });
 
-  // 3. Compact syntax: :emoji:12345:
+  // 4. Compact syntax: :emoji:12345:
   s = s.replace(/:emoji:(\d+):/gi, (_m, id) => `<tg-emoji emoji-id="${id}">✨</tg-emoji>`);
-
-  // 4. Normalize <tg-emoji id="..."> -> <tg-emoji emoji-id="...">
-  s = s.replace(/<tg-emoji\s+id=["']?(\d+)["']?>/gi, '<tg-emoji emoji-id="$1">');
 
   return s;
 }
@@ -69,8 +71,9 @@ export function tgHtml(s: string | null | undefined): string {
   out = out.replace(/&lt;a\s+href=["']([^"']+)["']&gt;([\s\S]*?)&lt;\/a&gt;/gi, '<a href="$1">$2</a>');
 
   // Restore <tg-emoji emoji-id="...">char</tg-emoji>
+  // Even if there were escaped quotes or backslashes before escaping
   out = out.replace(
-    /&lt;tg-emoji\s+emoji-id=["']?(\d+)["']?&gt;([\s\S]*?)&lt;\/tg-emoji&gt;/gi,
+    /&lt;tg-emoji\s+(?:emoji-)?id=(?:\\*["']|&quot;)?(\d+)(?:\\*["']|&quot;)?\s*&gt;([\s\S]*?)&lt;\/tg-emoji&gt;/gi,
     '<tg-emoji emoji-id="$1">$2</tg-emoji>',
   );
 
