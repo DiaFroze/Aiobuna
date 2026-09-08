@@ -11,6 +11,7 @@ import {
   safeTruncateHtml,
   resolveProductPremiumEmoji,
   sanitizeTextCustomEmojis,
+  messageEntitiesToHtml,
 } from "@/lib/emoji/rich-text";
 
 const base: EmojiConfig = {
@@ -274,6 +275,36 @@ describe("sanitizeTextCustomEmojis", () => {
   it("strips unrecognized tags into clean character without causing 400 errors", () => {
     const text = '<tg-emoji emoji-id="777777777777">XYZ</tg-emoji> Description';
     expect(sanitizeTextCustomEmojis(text)).toBe("XYZ Description");
+  });
+});
+
+describe("messageEntitiesToHtml", () => {
+  it("converts custom_emoji entity directly to tg-emoji HTML tag with exact emoji ID", () => {
+    const text = "CapCut 🖤 video";
+    const entities = [
+      { type: "custom_emoji", offset: 7, length: 2, custom_emoji_id: "5375464961822695044" },
+    ];
+    const html = messageEntitiesToHtml(text, entities);
+    expect(html).toBe('CapCut <tg-emoji emoji-id="5375464961822695044">🖤</tg-emoji> video');
+  });
+
+  it("handles formatting like bold and custom emojis simultaneously", () => {
+    const text = "Super 🚀 Fast";
+    const entities = [
+      { type: "bold", offset: 0, length: 5 },
+      { type: "custom_emoji", offset: 6, length: 2, custom_emoji_id: "5372917041193828849" },
+    ];
+    const html = messageEntitiesToHtml(text, entities);
+    expect(html).toBe('<b>Super</b> <tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> Fast');
+  });
+
+  it("escapes raw HTML characters in non-entity text while preserving tags", () => {
+    const text = "Formula <a & b> 🚀";
+    const entities = [
+      { type: "custom_emoji", offset: 16, length: 2, custom_emoji_id: "5372917041193828849" },
+    ];
+    const html = messageEntitiesToHtml(text, entities);
+    expect(html).toBe('Formula &lt;a &amp; b&gt; <tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji>');
   });
 });
 

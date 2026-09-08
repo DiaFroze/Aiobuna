@@ -77,6 +77,12 @@ export default async function BotProductEditPage({ params }: { params: { id: str
         💡 <b>AI-оформление:</b> Нажмите «✨ Оформить через ИИ (Gemini)» для автоматического создания красивого описания с анимированными Telegram Premium эмодзи на русском и узбекском языках.
       </div>
 
+      <div className="card p-3 text-xs text-muted flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-primary/20 bg-primary/5">
+        <div>
+          📱 <b>Установка описания прямо из Telegram:</b> отправьте боту команду <code className="bg-surface-2 px-1.5 py-0.5 rounded font-bold text-foreground">/desc</code> со своего аккаунта администратора. Выберите этот товар и просто отправьте сообщение со своими <b>премиум-эмодзи</b> — бот сохранит их в точности!
+        </div>
+      </div>
+
       <form action={updateBotProductAction} className="card p-5 space-y-4">
         <input type="hidden" name="id" value={product.id} />
 

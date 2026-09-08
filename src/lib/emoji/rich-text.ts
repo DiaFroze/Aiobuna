@@ -19,6 +19,119 @@ export function stripHtml(s: string): string {
   return s.replace(/<[^>]*>/g, "");
 }
 
+export interface TelegramEntityLike {
+  type: string;
+  offset: number;
+  length: number;
+  custom_emoji_id?: string;
+  url?: string;
+}
+
+/**
+ * Converts a Telegram message string and its entities (from message.entities or caption_entities)
+ * into clean Telegram HTML, preserving custom animated emojis (<tg-emoji emoji-id="..."),
+ * bold, italic, code, pre, underline, strikethrough, spoiler, and text links.
+ */
+export function messageEntitiesToHtml(
+  text: string,
+  entities?: TelegramEntityLike[],
+): string {
+  if (!text) return "";
+  if (!entities || entities.length === 0) {
+    return escHtml(text);
+  }
+
+  const opensAt = new Map<number, Array<{ tag: string; length: number }>>();
+  const closesAt = new Map<number, string[]>();
+
+  for (const ent of entities) {
+    let openTag = "";
+    let closeTag = "";
+
+    switch (ent.type) {
+      case "custom_emoji":
+        if (ent.custom_emoji_id) {
+          openTag = `<tg-emoji emoji-id="${ent.custom_emoji_id}">`;
+          closeTag = `</tg-emoji>`;
+        }
+        break;
+      case "bold":
+        openTag = "<b>";
+        closeTag = "</b>";
+        break;
+      case "italic":
+        openTag = "<i>";
+        closeTag = "</i>";
+        break;
+      case "code":
+        openTag = "<code>";
+        closeTag = "</code>";
+        break;
+      case "pre":
+        openTag = "<pre>";
+        closeTag = "</pre>";
+        break;
+      case "underline":
+        openTag = "<u>";
+        closeTag = "</u>";
+        break;
+      case "strikethrough":
+        openTag = "<s>";
+        closeTag = "</s>";
+        break;
+      case "spoiler":
+        openTag = "<tg-spoiler>";
+        closeTag = "</tg-spoiler>";
+        break;
+      case "text_link":
+        if (ent.url) {
+          openTag = `<a href="${ent.url.replace(/"/g, "&quot;")}">`;
+          closeTag = "</a>";
+        }
+        break;
+      default:
+        continue;
+    }
+
+    if (!openTag) continue;
+
+    const start = ent.offset;
+    const end = ent.offset + ent.length;
+
+    if (!opensAt.has(start)) opensAt.set(start, []);
+    opensAt.get(start)!.push({ tag: openTag, length: ent.length });
+
+    if (!closesAt.has(end)) closesAt.set(end, []);
+    closesAt.get(end)!.push(closeTag);
+  }
+
+  // Sort opens at same pos by length descending (outer wraps inner)
+  for (const list of opensAt.values()) {
+    list.sort((a, b) => b.length - a.length);
+  }
+
+  let out = "";
+  for (let i = 0; i <= text.length; i++) {
+    if (closesAt.has(i)) {
+      const tags = closesAt.get(i)!;
+      for (const t of tags) out += t;
+    }
+    if (opensAt.has(i)) {
+      const list = opensAt.get(i)!;
+      for (const item of list) out += item.tag;
+    }
+    if (i < text.length) {
+      const ch = text[i];
+      if (ch === "&") out += "&amp;";
+      else if (ch === "<") out += "&lt;";
+      else if (ch === ">") out += "&gt;";
+      else out += ch;
+    }
+  }
+
+  return sanitizeTextCustomEmojis(out);
+}
+
 /**
  * Converts various friendly custom emoji formats into native Telegram HTML <tg-emoji> tags.
  * Supports:

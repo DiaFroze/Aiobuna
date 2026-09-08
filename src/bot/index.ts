@@ -39,6 +39,7 @@ import {
   sanitizeTextCustomEmojis,
   OFFICIAL_TEXT_EMOJI_IDS,
   EMOJI_CHAR_TO_PREMIUM,
+  messageEntitiesToHtml,
 } from "../lib/emoji/rich-text";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
@@ -319,6 +320,12 @@ const pending = new Map<
   | { type: "premium_pick_user"; variantId: number; qty: number }
   // Telegram Stars bought by a freely typed amount rather than a fixed pack.
   | { type: "stars_custom_qty"; variantId: number; back: string }
+  | {
+      type: "set_product_desc";
+      productId: number;
+      targetLang: "both_uz" | "uz" | "ru";
+      tempUzDesc?: string;
+    }
 >();
 
 // Telegram Bot API requires icon_custom_emoji_id as a JSON number,
@@ -5347,6 +5354,49 @@ bot.command("pvideo", async (ctx) => {
   await ctx.reply("🎬 Выберите товар, чтобы задать видео (🎬 = видео уже есть):", { reply_markup: kb }).catch(() => {});
 });
 
+// Set product description with Telegram Premium Emojis directly from chat
+bot.command(["desc", "setdesc", "tavsif", "opisanie"], async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const products = await db.product.findMany({
+    where: { isActive: true },
+    orderBy: { sortOrder: "asc" },
+    select: { id: true, titleRu: true, emoji: true, descUz: true, descRu: true }
+  });
+  if (!products.length) return ctx.reply("❌ Нет активных товаров.");
+
+  const kb = new InlineKeyboard();
+  for (const p of products) {
+    const mark = (p.descUz && p.descRu) ? "✅ " : "📝 ";
+    kb.text(`${mark}${p.emoji || "✨"} ${p.titleRu}`, `setdesc:prod:${p.id}`).row();
+  }
+  kb.text("❌ Отмена", "setdesc:cancel").row();
+
+  await ctx.reply(
+    "📝 <b>Установка описания товара</b>\n\n" +
+    "Вы можете отправить текст прямо из Telegram с <b>премиум-эмодзи</b>, и бот сохранит их в точности!\n\n" +
+    "Выберите товар, для которого хотите настроить описание:",
+    { parse_mode: "HTML", reply_markup: kb }
+  ).catch(() => {});
+});
+
+bot.command("admin", async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const text =
+    `🛠 <b>Команды администратора:</b>\n\n` +
+    `📝 <b>/desc</b> — Установка описания товара с премиум-эмодзи\n` +
+    `🖼 <b>/banner</b> — Задать общий баннер магазина\n` +
+    `🎬 <b>/pvideo</b> — Видеоинструкция для товара\n` +
+    `📢 <b>/post</b> — Рассылка сообщения пользователям\n` +
+    `🎁 <b>/sendgifts</b> — Рассылка подарков рефералов\n` +
+    `📊 <b>/health</b> — Диагностика базы и системы\n` +
+    `📦 <b>/stock</b> — Просмотр остатков ключей\n` +
+    `👥 <b>/refs &lt;tgId&gt;</b> — Список приглашённых пользователя\n` +
+    `🔍 <b>/refinfo &lt;tgId&gt;</b> — Детали рефералов и заказов\n` +
+    `⚡ <b>/promo</b> — Запуск скидочной акции`;
+  await ctx.reply(text, { parse_mode: "HTML" }).catch(() => {});
+});
+
+
 bot.command("post", async (ctx) => {
   if (!isAdmin(ctx)) return;
   const replyTo = ctx.message?.reply_to_message;
@@ -5784,6 +5834,90 @@ bot.on("callback_query:data", async (ctx) => {
       await ctx.answerCallbackQuery().catch(() => {});
       return ctx.reply("Пришлите видео для этого товара одним сообщением.\nЧтобы убрать видео — напишите: убрать").catch(() => {});
     }
+    if (tag === "setdesc") {
+      if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {});
+      const action = rest[0]; // "prod", "lang", "cancel", "back"
+      if (action === "cancel") {
+        pending.delete(String(ctx.from?.id));
+        await ctx.answerCallbackQuery({ text: "Отменено" }).catch(() => {});
+        return ctx.deleteMessage().catch(() => {});
+      }
+      if (action === "back") {
+        const products = await db.product.findMany({
+          where: { isActive: true },
+          orderBy: { sortOrder: "asc" },
+          select: { id: true, titleRu: true, emoji: true, descUz: true, descRu: true },
+        });
+        const kb = new InlineKeyboard();
+        for (const p of products) {
+          const mark = p.descUz && p.descRu ? "✅ " : "📝 ";
+          kb.text(`${mark}${p.emoji || "✨"} ${p.titleRu}`, `setdesc:prod:${p.id}`).row();
+        }
+        kb.text("❌ Отмена", "setdesc:cancel").row();
+        await ctx.answerCallbackQuery().catch(() => {});
+        return ctx.editMessageText(
+          "📝 <b>Установка описания товара</b>\n\nВыберите товар:",
+          { parse_mode: "HTML", reply_markup: kb },
+        ).catch(() => {});
+      }
+      if (action === "prod") {
+        const pid = Number(rest[1]);
+        const p = await db.product.findUnique({ where: { id: pid } });
+        if (!p) return ctx.answerCallbackQuery({ text: "Товар не найден", show_alert: true });
+
+        const kb = new InlineKeyboard()
+          .text("🇺🇿 Сначала UZ, затем RU (Оба языка)", `setdesc:lang:${pid}:both_uz`).row()
+          .text("🇺🇿 Только на узбекском (UZ)", `setdesc:lang:${pid}:uz`).row()
+          .text("🇷🇺 Только на русском (RU)", `setdesc:lang:${pid}:ru`).row()
+          .text("⬅️ Назад к товарам", "setdesc:back").row();
+
+        await ctx.answerCallbackQuery().catch(() => {});
+        return ctx.editMessageText(
+          `📦 Товар: <b>${p.emoji || "✨"} ${esc(p.titleRu)}</b>\n\n` +
+          `Выберите, для какого языка вы хотите отправить описание:`,
+          { parse_mode: "HTML", reply_markup: kb },
+        ).catch(() => {});
+      }
+      if (action === "lang") {
+        const pid = Number(rest[1]);
+        const mode = rest[2] as "both_uz" | "uz" | "ru";
+        const p = await db.product.findUnique({ where: { id: pid } });
+        if (!p) return ctx.answerCallbackQuery({ text: "Товар не найден", show_alert: true });
+
+        const key = String(ctx.from?.id);
+        pending.set(key, {
+          type: "set_product_desc",
+          productId: pid,
+          targetLang: mode,
+        });
+
+        await ctx.answerCallbackQuery().catch(() => {});
+
+        let msg = "";
+        if (mode === "both_uz") {
+          msg =
+            `📦 Товар: <b>${p.emoji || "✨"} ${esc(p.titleRu)}</b>\n\n` +
+            `🇺🇿 <b>Шаг 1 из 2: Описание на узбекском языке (UZ)</b>\n\n` +
+            `Отправьте сейчас сообщение с описанием и <b>премиум-эмодзи</b> прямо в этот чат.\n` +
+            `Бот сохранит все ваши анимированные эмодзи и форматирование (жирный, курсив и т.д.).\n\n` +
+            `<i>Для отмены напишите /cancel</i>`;
+        } else if (mode === "uz") {
+          msg =
+            `📦 Товар: <b>${p.emoji || "✨"} ${esc(p.titleRu)}</b>\n\n` +
+            `🇺🇿 <b>Отправьте описание на узбекском языке (UZ):</b>\n\n` +
+            `Отправьте сообщение с премиум-эмодзи в этот чат.\n\n` +
+            `<i>Для отмены напишите /cancel</i>`;
+        } else {
+          msg =
+            `📦 Товар: <b>${p.emoji || "✨"} ${esc(p.titleRu)}</b>\n\n` +
+            `🇷🇺 <b>Отправьте описание на русском языке (RU):</b>\n\n` +
+            `Отправьте сообщение с премиум-эмодзи в этот чат.\n\n` +
+            `<i>Для отмены напишите /cancel</i>`;
+        }
+
+        return ctx.reply(msg, { parse_mode: "HTML" }).catch(() => {});
+      }
+    }
     // Premium recipient: "себе" uses the buyer's own numeric id.
     if (tag === "premself") {
       return doBuy(ctx, Number(rest[0]), Number(rest[1]) || 1, undefined, String(ctx.from!.id));
@@ -5872,11 +6006,95 @@ bot.on("callback_query:data", async (ctx) => {
   }
 });
 
+async function handleProductDescInput(
+  ctx: Context,
+  rawText: string,
+  entities?: Array<{ type: string; offset: number; length: number; custom_emoji_id?: string; url?: string }>,
+): Promise<boolean> {
+  const key = String(ctx.from?.id);
+  const state = pending.get(key);
+  if (!state || state.type !== "set_product_desc") return false;
+  if (!isAdmin(ctx)) {
+    pending.delete(key);
+    return true;
+  }
+
+  const trimmed = (rawText ?? "").trim();
+  if (trimmed.toLowerCase() === "/cancel" || trimmed.toLowerCase() === "отмена" || trimmed.toLowerCase() === "bekor") {
+    pending.delete(key);
+    await ctx.reply("❌ Установка описания отменена.").catch(() => {});
+    return true;
+  }
+
+  const p = await db.product.findUnique({ where: { id: state.productId } });
+  if (!p) {
+    pending.delete(key);
+    await ctx.reply("❌ Товар не найден.").catch(() => {});
+    return true;
+  }
+
+  const html = messageEntitiesToHtml(rawText, entities);
+
+  if (state.targetLang === "both_uz") {
+    // Step 1 done (UZ), now ask for RU:
+    state.tempUzDesc = html;
+    state.targetLang = "ru";
+    pending.set(key, state);
+
+    await ctx.reply(
+      `✅ <b>Шаг 1 из 2: Описание на узбекском принято!</b>\n\n` +
+      `<b>Превью UZ:</b>\n${html}\n\n` +
+      `➖➖➖➖➖➖➖➖\n` +
+      `🇷🇺 <b>Шаг 2 из 2: Теперь отправьте описание на русском языке (RU):</b>\n\n` +
+      `<i>(Или отправьте /skip, чтобы оставить текущее русское описание без изменений)</i>`,
+      { parse_mode: "HTML" },
+    ).catch(() => {});
+    return true;
+  }
+
+  // Finishing step:
+  let updateData: { descUz?: string; descRu?: string } = {};
+  if (state.tempUzDesc) {
+    updateData.descUz = state.tempUzDesc;
+    if (trimmed.toLowerCase() !== "/skip") {
+      updateData.descRu = html;
+    }
+  } else if (state.targetLang === "uz") {
+    updateData.descUz = html;
+  } else {
+    updateData.descRu = html;
+  }
+
+  await db.product.update({
+    where: { id: state.productId },
+    data: updateData,
+  });
+  pending.delete(key);
+
+  const kb = new InlineKeyboard()
+    .text("👀 Посмотреть карточку товара", `p:${state.productId}:0:all`)
+    .row()
+    .text("📝 Настроить другой товар", "setdesc:back");
+
+  await ctx.reply(
+    `🎉 <b>Описание товара «${esc(p.titleRu)}» успешно сохранено!</b>\n\n` +
+    `<b>Итоговое превью:</b>\n${html}\n\n` +
+    `Все премиум-эмодзи и оформление сохранены и уже активны в боте!`,
+    { parse_mode: "HTML", reply_markup: kb },
+  ).catch(() => {});
+  return true;
+}
+
 // ---------- free-text input ----------
 bot.on("message:text", async (ctx) => {
   const key = String(ctx.from?.id);
   const state = pending.get(key);
   if (!state) return;
+
+  if (state.type === "set_product_desc") {
+    const consumed = await handleProductDescInput(ctx, ctx.message.text ?? "", ctx.message.entities);
+    if (consumed) return;
+  }
 
   if (state.type === "course_channel") {
     if (!isAdmin(ctx)) { pending.delete(key); return; }
@@ -6126,6 +6344,14 @@ async function handleAdminMedia(ctx: Context, fileId: string | undefined, isVide
     pending.delete(key);
     if (fileId) await saveProductVideo(ctx, st.productId, fileId);
     return true;
+  }
+  if (st?.type === "set_product_desc") {
+    const rawCaption = ctx.message?.caption ?? "";
+    const captionEntities = ctx.message?.caption_entities;
+    if (rawCaption) {
+      await handleProductDescInput(ctx, rawCaption, captionEntities);
+      return true;
+    }
   }
   return false;
 }
