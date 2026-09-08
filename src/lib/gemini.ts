@@ -1,3 +1,5 @@
+import { sanitizeTextCustomEmojis, EMOJI_CHAR_TO_PREMIUM } from "@/lib/emoji/rich-text";
+
 // Gemini vision client: verifies a payment receipt screenshot (Uzcard/Humo
 // transfers) — extracts amount, recipient card, status, transaction id, and an
 // authenticity/tamper assessment, then decides if it matches the expected payment.
@@ -94,6 +96,145 @@ export async function geminiTranslate(text: string, target: string): Promise<str
     return (j?.candidates?.[0]?.content?.parts?.[0]?.text ?? "").trim();
   } catch {
     return "";
+  }
+}
+
+export interface AiProductFormat {
+  titleRu: string;
+  titleUz: string;
+  descRu: string;
+  descUz: string;
+  emoji: string;
+  premiumEmoji: string;
+}
+
+function fixTgEmojiTags(text: string): string {
+  if (!text) return "";
+  const normalized = text.replace(/<tg-emoji\s+emoji-id="([^"]+)">([^<]+)<\/tg-emoji>/gi, (match, idAttr, inner) => {
+    const idTrim = idAttr.trim();
+    const innerTrim = inner.trim();
+    if (/^\d{6,}$/.test(idTrim)) {
+      return `<tg-emoji emoji-id="${idTrim}">${innerTrim}</tg-emoji>`;
+    }
+    if (/^\d{6,}$/.test(innerTrim)) {
+      return `<tg-emoji emoji-id="${innerTrim}">${idTrim}</tg-emoji>`;
+    }
+    return match;
+  });
+  return sanitizeTextCustomEmojis(normalized);
+}
+
+function stripHtml(text: string): string {
+  return text.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * AI-powered product card formatter using Gemini.
+ * Generates beautiful, structured Telegram HTML descriptions with official
+ * Telegram Premium animated emojis (<tg-emoji>) in both RU and UZ,
+ * and picks or preserves the best matching emoji and custom_emoji_id.
+ */
+export async function geminiAiFormatProduct(
+  name: string,
+  description: string,
+  currentEmoji?: string,
+): Promise<AiProductFormat | null> {
+  const key = process.env.GEMINI_API_KEY ?? "";
+  const model = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
+  if (!key) return null;
+
+  const allowedEmojis = `
+- 5372917041193828849: 🚀 (Telegram Premium, скорость, буст)
+- 5424972470023104089: 💎 (Diamond, Stars, премиум)
+- 5375464961822695044: 🖤 или 🎬 (CapCut, видеомонтаж, темная тема)
+- 5927026418616636353: 🧠 (ИИ, Gemini, ChatGPT, Claude, нейросети)
+- 5359512328003941083: ⭐ (Звезда, подписка)
+- 5895708410447401643: 🌟 (Telegram Stars)
+- 5467512909909214089: 🎓 (Курсы, обучение, гайды)
+- 5197288647275071607: 🛡 (VPN, безопасность, защита, гарантия)
+- 5256251637646787356: 🎨 (Дизайн, Canva)
+- 5256131095094652290: 🎯 (Цель, ключевые функции)
+- 6283073379184415506: 🎁 (Подарок, бонус)
+- 5278711610775457808: ✨ (Качество, магия, блеск)
+- 5472164874886846427: 🔥 (Огонь, хит, популярное)
+- 5231102735817918643: 👇 (Стрелка вниз к выбору тарифа)
+`;
+
+  const emojiHint = currentEmoji && currentEmoji !== "✨" ? `Текущий выбранный эмодзи: "${currentEmoji}". ОБЯЗАТЕЛЬНО сохрани его!` : "";
+
+  const prompt = `Ты — профессиональный контент-маркетолог и редактор каталога цифровых товаров в Telegram-боте.
+Твоя задача — красиво оформить карточку товара на русском (RU) и узбекском (UZ, латиница) языках с официальными анимированными Telegram Premium эмодзи (<tg-emoji>).
+
+ДЛЯ ТЕКСТА РАЗРЕШЕНО ИСПОЛЬЗОВАТЬ ТОЛЬКО ЭТИ ОФИЦИАЛЬНЫЕ АНИМИРОВАННЫЕ EMOJI ID:
+${allowedEmojis}
+
+СТРОГИЕ ПРАВИЛА:
+1. Теги эмодзи оформляй СТРОГО в виде: <tg-emoji emoji-id="ID">СИМВОЛ</tg-emoji>.
+   Примеры:
+   <tg-emoji emoji-id="5927026418616636353">🧠</tg-emoji>
+   <tg-emoji emoji-id="5375464961822695044">🖤</tg-emoji>
+   <tg-emoji emoji-id="5278711610775457808">✨</tg-emoji>
+   <tg-emoji emoji-id="5197288647275071607">🛡</tg-emoji>
+   <tg-emoji emoji-id="5231102735817918643">👇</tg-emoji>
+2. Форматирование только HTML: <b>жирный</b>, <i>курсив</i>, <code>код</code>. НИКАКОГО Markdown (никаких **, ##, *, -)!
+3. Переносы строк делай обычным \\n (никаких <p>, <br>).
+4. Структура описания:
+   - Заголовок с анимированным эмодзи.
+   - Пункты преимуществ с красивыми эмодзи в начале каждой строки.
+   - Условия/гарантия (если применимо).
+   - В самом конце обязательный призыв выбрать тариф:
+     На RU: <tg-emoji emoji-id="5231102735817918643">👇</tg-emoji> <b>Выберите нужный тариф ниже:</b>
+     На UZ: <tg-emoji emoji-id="5231102735817918643">👇</tg-emoji> <b>Quyidan kerakli tarifni tanlang:</b>
+5. Поля titleRu и titleUz должны быть ЧИСТЫМ текстом БЕЗ HTML-тегов и без <tg-emoji>.
+6. Поле emoji должно быть 1 основным unicode-символом (например 🖤, 🧠, 🚀, 🛡).
+7. Поле premiumEmoji должно быть соответствующим ID из списка выше.
+8. Верни СТРОГО валидный JSON:
+{
+  "titleRu": "название на русском",
+  "titleUz": "nomi o'zbekcha",
+  "descRu": "красивое описание на русском с HTML и <tg-emoji>",
+  "descUz": "o'zbekcha chiroyli tavsif HTML va <tg-emoji> bilan",
+  "emoji": "основной эмодзи",
+  "premiumEmoji": "ID кастомного эмодзи"
+}
+
+${emojiHint}
+Название товара: ${name}
+Исходное описание:
+${description || name}`;
+
+  try {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
+      method: "POST",
+      signal: AbortSignal.timeout(18000),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { responseMimeType: "application/json", temperature: 0.2 },
+      }),
+    });
+    if (!res.ok) return null;
+    const j = (await res.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+    const text = j?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+    const parsed = JSON.parse(text) as Partial<AiProductFormat>;
+
+    const cleanEmoji = (parsed.emoji || currentEmoji || "✨").trim();
+    let premId = (parsed.premiumEmoji || "").trim();
+    if (!premId && EMOJI_CHAR_TO_PREMIUM[cleanEmoji]) {
+      premId = EMOJI_CHAR_TO_PREMIUM[cleanEmoji].id;
+    }
+
+    return {
+      titleRu: stripHtml(parsed.titleRu || name),
+      titleUz: stripHtml(parsed.titleUz || name),
+      descRu: fixTgEmojiTags(parsed.descRu || description),
+      descUz: fixTgEmojiTags(parsed.descUz || description),
+      emoji: cleanEmoji,
+      premiumEmoji: premId,
+    };
+  } catch (err) {
+    console.error("geminiAiFormatProduct failed:", err);
+    return null;
   }
 }
 

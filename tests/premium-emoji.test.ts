@@ -167,28 +167,27 @@ describe("safeTruncateHtml", () => {
 });
 
 describe("resolveProductPremiumEmoji", () => {
-  it("resolves CapCut Pro correctly to official cinema/video emoji 5375464961822695044", () => {
+  it("resolves CapCut Pro correctly and keeps user's 🖤 character", () => {
     const pe = resolveProductPremiumEmoji({
       titleRu: "CapCut Pro — 1 месяц",
       titleUz: "CapCut Pro — 1 oylik obuna",
       emoji: "🖤",
     });
     expect(pe.id).toBe("5375464961822695044");
-    expect(pe.char).toBe("🎬");
-    expect(pe.textTag).toBe('<tg-emoji emoji-id="5375464961822695044">🎬</tg-emoji>');
+    expect(pe.char).toBe("🖤");
+    expect(pe.textTag).toBe('<tg-emoji emoji-id="5375464961822695044">🖤</tg-emoji>');
     expect(pe.buttonIcon).toBe("5375464961822695044");
   });
 
-  it("keeps custom button icon if admin set a custom emoji for CapCut, while ensuring text uses official emoji", () => {
+  it("strictly respects admin configured premiumEmoji and never overrides it", () => {
     const pe = resolveProductPremiumEmoji({
       titleRu: "CapCut Pro",
       emoji: "🖤",
-      premiumEmoji: "9999999999999999999", // Unofficial custom sticker pack ID
+      premiumEmoji: "9999999999999999999",
     });
-    // In text, must use official ID to prevent Telegram 400 rejection
-    expect(pe.id).toBe("5375464961822695044");
-    expect(pe.textTag).toBe('<tg-emoji emoji-id="5375464961822695044">🎬</tg-emoji>');
-    // For inline button, keeps the custom ID
+    expect(pe.id).toBe("9999999999999999999");
+    expect(pe.char).toBe("🖤");
+    expect(pe.textTag).toBe('<tg-emoji emoji-id="9999999999999999999">🖤</tg-emoji>');
     expect(pe.buttonIcon).toBe("9999999999999999999");
   });
 
@@ -265,10 +264,10 @@ describe("sanitizeTextCustomEmojis", () => {
     );
   });
 
-  it("maps unofficial custom emoji with black heart to official cinema emoji", () => {
+  it("maps unofficial custom emoji with black heart to official video emoji while preserving 🖤", () => {
     const text = '<tg-emoji emoji-id="888888888888">🖤</tg-emoji> CapCut Video';
     expect(sanitizeTextCustomEmojis(text)).toBe(
-      '<tg-emoji emoji-id="5375464961822695044">🎬</tg-emoji> CapCut Video',
+      '<tg-emoji emoji-id="5375464961822695044">🖤</tg-emoji> CapCut Video',
     );
   });
 

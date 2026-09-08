@@ -6,7 +6,7 @@ import { requirePermission } from "@/lib/auth/session";
 import { PERMISSIONS } from "@/lib/security/rbac";
 import { botDb } from "@/lib/botDb";
 import { audit } from "@/lib/security/audit";
-import { geminiLocalize } from "@/lib/gemini";
+import { geminiLocalize, geminiAiFormatProduct } from "@/lib/gemini";
 import { parseBulkPrices, parseBulkBonus } from "@/lib/domain/bulk-pricing";
 import fs from "node:fs";
 import path from "node:path";
@@ -15,28 +15,54 @@ function str(v: FormDataEntryValue | null): string {
   return String(v ?? "").trim();
 }
 
-/** (Re)generate RU/EN/UZ title + description for a product via Gemini. */
+/** (Re)generate RU/UZ title + description + premium emojis for a product via Gemini AI. */
 export async function retranslateProductAction(formData: FormData) {
   const admin = await requirePermission(PERMISSIONS.PRODUCTS_WRITE);
   const id = Number(formData.get("id"));
   const p = await botDb.product.findUnique({ where: { id } });
   if (!p) return;
-  const loc = await geminiLocalize(p.titleRu, p.descRu || p.descUz || p.descEn);
-  if (loc) {
+
+  const formatted = await geminiAiFormatProduct(p.titleRu, p.descRu || p.descUz || p.descEn, p.emoji);
+  if (formatted) {
     await botDb.product.update({
       where: { id },
       data: {
-        titleRu: loc.titleRu,
-        titleEn: loc.titleEn,
-        titleUz: loc.titleUz,
-        descRu: loc.descRu,
-        descEn: loc.descEn,
-        descUz: loc.descUz,
+        titleRu: formatted.titleRu || p.titleRu,
+        titleUz: formatted.titleUz || p.titleUz,
+        descRu: formatted.descRu,
+        descUz: formatted.descUz,
+        emoji: formatted.emoji || p.emoji,
+        premiumEmoji: p.premiumEmoji || formatted.premiumEmoji || null,
       },
     });
-    await audit({ adminId: admin.id, action: "bot.product.translate", entityType: "BotProduct", entityId: String(id) });
+    await audit({ adminId: admin.id, action: "bot.product.ai_format", entityType: "BotProduct", entityId: String(id) });
+  } else {
+    const loc = await geminiLocalize(p.titleRu, p.descRu || p.descUz || p.descEn);
+    if (loc) {
+      await botDb.product.update({
+        where: { id },
+        data: {
+          titleRu: loc.titleRu,
+          titleEn: loc.titleEn,
+          titleUz: loc.titleUz,
+          descRu: loc.descRu,
+          descEn: loc.descEn,
+          descUz: loc.descUz,
+        },
+      });
+      await audit({ adminId: admin.id, action: "bot.product.translate", entityType: "BotProduct", entityId: String(id) });
+    }
   }
   revalidatePath(`/admin/bot-products/${id}`);
+}
+
+/**
+ * Interactive AI format action: formats product content via Gemini AI
+ * and returns JSON for the admin UI editor.
+ */
+export async function aiFormatProductContentAction(name: string, description: string, emoji?: string) {
+  await requirePermission(PERMISSIONS.PRODUCTS_WRITE);
+  return await geminiAiFormatProduct(name, description, emoji);
 }
 
 function num(v: FormDataEntryValue | null): number {

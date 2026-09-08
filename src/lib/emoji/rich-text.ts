@@ -143,12 +143,12 @@ export const EMOJI_CHAR_TO_PREMIUM: Record<string, { id: string; char: string }>
   "📸": { id: "5235837920081887219", char: "📸" },
   "🎯": { id: "5256131095094652290", char: "🎯" },
   "🎬": { id: "5375464961822695044", char: "🎬" },
-  "🎥": { id: "5375464961822695044", char: "🎬" },
-  "📹": { id: "5375464961822695044", char: "🎬" },
-  "🖤": { id: "5375464961822695044", char: "🎬" }, // CapCut / dark theme
+  "🎥": { id: "5375464961822695044", char: "🎥" },
+  "📹": { id: "5375464961822695044", char: "📹" },
+  "🖤": { id: "5375464961822695044", char: "🖤" }, // CapCut / dark theme - keeps 🖤 character!
   "🎁": { id: "6283073379184415506", char: "🎁" },
   "🛡": { id: "5197288647275071607", char: "🛡" },
-  "🛡️": { id: "5197288647275071607", char: "🛡" },
+  "🛡️": { id: "5197288647275071607", char: "🛡️" },
   "👇": { id: "5231102735817918643", char: "👇" },
   "💎": { id: "5424972470023104089", char: "💎" },
   "⭐": { id: "5359512328003941083", char: "⭐" },
@@ -179,9 +179,9 @@ export const BRAND_PREMIUM_EMOJIS: Array<{ match: RegExp; id: string; char: stri
 ];
 
 /**
- * Normalizes and sanitizes custom emoji tags inside message text or captions.
- * Telegram Bot API only allows official animated custom emoji IDs in message text.
- * Any unofficial ID is mapped by fallback character to an official ID, or stripped to plain char.
+ * Normalizes custom emoji tags inside message text or captions.
+ * Telegram Bot API only allows valid animated custom emoji IDs in message text.
+ * Strictly preserves the user's emoji character without ever swapping or altering it.
  */
 export function sanitizeTextCustomEmojis(text: string): string {
   if (!text) return "";
@@ -191,8 +191,7 @@ export function sanitizeTextCustomEmojis(text: string): string {
       return `<tg-emoji emoji-id="${id}">${cleanChar}</tg-emoji>`;
     }
     if (EMOJI_CHAR_TO_PREMIUM[cleanChar]) {
-      const mapped = EMOJI_CHAR_TO_PREMIUM[cleanChar];
-      return `<tg-emoji emoji-id="${mapped.id}">${mapped.char}</tg-emoji>`;
+      return `<tg-emoji emoji-id="${EMOJI_CHAR_TO_PREMIUM[cleanChar].id}">${cleanChar}</tg-emoji>`;
     }
     return cleanChar;
   });
@@ -206,8 +205,9 @@ export interface ResolvedPremiumEmoji {
 }
 
 /**
- * Resolves the appropriate animated Telegram premium custom emoji for a product,
- * taking into account brand keywords, configured unicode emoji, and custom emoji IDs.
+ * Resolves the animated Telegram premium custom emoji for a product.
+ * Respects what the admin explicitly configured (premiumEmoji and emoji) 100%,
+ * falling back to brand keywords or character defaults only when not configured.
  */
 export function resolveProductPremiumEmoji(
   product?: {
@@ -220,6 +220,32 @@ export function resolveProductPremiumEmoji(
   } | null,
   contextTitle?: string | null,
 ): ResolvedPremiumEmoji {
+  const rawEmoji = (product?.emoji || "").trim();
+  const rawPremium = (product?.premiumEmoji || "").trim();
+
+  // 1. HIGHEST PRIORITY: If admin explicitly configured premiumEmoji on the product, NEVER override it!
+  if (rawPremium) {
+    const char = rawEmoji || "✨";
+    return {
+      id: rawPremium,
+      char,
+      textTag: `<tg-emoji emoji-id="${rawPremium}">${char}</tg-emoji>`,
+      buttonIcon: rawPremium,
+    };
+  }
+
+  // 2. If product has a specific unicode emoji configured (e.g. 🖤, ⭐, 🌟, 🎓, 🧠, 📸, etc.)
+  if (rawEmoji && rawEmoji !== "✨" && EMOJI_CHAR_TO_PREMIUM[rawEmoji]) {
+    const matched = EMOJI_CHAR_TO_PREMIUM[rawEmoji];
+    return {
+      id: matched.id,
+      char: rawEmoji,
+      textTag: `<tg-emoji emoji-id="${matched.id}">${rawEmoji}</tg-emoji>`,
+      buttonIcon: matched.id,
+    };
+  }
+
+  // 3. Check brand keywords match in product title or code
   const titles = [
     contextTitle,
     product?.titleRu,
@@ -228,57 +254,25 @@ export function resolveProductPremiumEmoji(
     product?.code,
   ].filter(Boolean).join(" ");
 
-  // 1. Check brand match
   for (const b of BRAND_PREMIUM_EMOJIS) {
     if (b.match.test(titles)) {
-      const textId = (product?.premiumEmoji && OFFICIAL_TEXT_EMOJI_IDS.has(product.premiumEmoji.trim()))
-        ? product.premiumEmoji.trim()
-        : b.id;
-      const buttonIcon = product?.premiumEmoji?.trim() || b.id;
+      const char = (rawEmoji && rawEmoji !== "✨") ? rawEmoji : b.char;
       return {
-        id: textId,
-        char: b.char,
-        textTag: `<tg-emoji emoji-id="${textId}">${b.char}</tg-emoji>`,
-        buttonIcon,
+        id: b.id,
+        char,
+        textTag: `<tg-emoji emoji-id="${b.id}">${char}</tg-emoji>`,
+        buttonIcon: b.id,
       };
     }
   }
 
-  // 2. Check product emoji character match
-  const rawEmoji = (product?.emoji || "").trim();
-  if (rawEmoji && EMOJI_CHAR_TO_PREMIUM[rawEmoji]) {
-    const matched = EMOJI_CHAR_TO_PREMIUM[rawEmoji];
-    const textId = (product?.premiumEmoji && OFFICIAL_TEXT_EMOJI_IDS.has(product.premiumEmoji.trim()))
-      ? product.premiumEmoji.trim()
-      : matched.id;
-    const buttonIcon = product?.premiumEmoji?.trim() || matched.id;
-    return {
-      id: textId,
-      char: matched.char,
-      textTag: `<tg-emoji emoji-id="${textId}">${matched.char}</tg-emoji>`,
-      buttonIcon,
-    };
-  }
-
-  // 3. If product has an explicit premiumEmoji
-  if (product?.premiumEmoji && product.premiumEmoji.trim()) {
-    const id = product.premiumEmoji.trim();
-    const char = rawEmoji || "✨";
-    const textId = OFFICIAL_TEXT_EMOJI_IDS.has(id) ? id : (EMOJI_CHAR_TO_PREMIUM[char]?.id || "5278711610775457808");
-    const textChar = OFFICIAL_TEXT_EMOJI_IDS.has(id) ? char : (EMOJI_CHAR_TO_PREMIUM[char]?.char || "✨");
-    return {
-      id: textId,
-      char: textChar,
-      textTag: `<tg-emoji emoji-id="${textId}">${textChar}</tg-emoji>`,
-      buttonIcon: id,
-    };
-  }
-
-  // 4. Default fallback: Sparkles
+  // 4. Default fallback: Sparkles or configured emoji
+  const fallbackChar = rawEmoji || "✨";
+  const fallbackId = EMOJI_CHAR_TO_PREMIUM[fallbackChar]?.id || "5278711610775457808";
   return {
-    id: "5278711610775457808",
-    char: rawEmoji || "✨",
-    textTag: `<tg-emoji emoji-id="5278711610775457808">${rawEmoji || "✨"}</tg-emoji>`,
-    buttonIcon: "5278711610775457808",
+    id: fallbackId,
+    char: fallbackChar,
+    textTag: `<tg-emoji emoji-id="${fallbackId}">${fallbackChar}</tg-emoji>`,
+    buttonIcon: fallbackId,
   };
 }

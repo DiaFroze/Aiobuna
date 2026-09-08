@@ -63,7 +63,10 @@ export default async function BotProductEditPage({ params }: { params: { id: str
           <div className="flex gap-2">
             <form action={retranslateProductAction}>
               <input type="hidden" name="id" value={product.id} />
-              <button className="btn-primary text-sm">🌍 Перевести (RU/EN/UZ)</button>
+              <button className="btn-primary text-sm flex items-center gap-1.5">
+                <span>✨</span>
+                <span>Оформить через ИИ (Gemini)</span>
+              </button>
             </form>
             <Link href="/admin/bot-products" className="btn-ghost text-sm">← Назад</Link>
           </div>
@@ -71,8 +74,7 @@ export default async function BotProductEditPage({ params }: { params: { id: str
       />
 
       <div className="card p-3 text-xs text-muted">
-        Описание переводится на 3 языка через Gemini при импорте. Нажмите «🌍 Перевести», чтобы (пере)создать
-        аккуратные RU/EN/UZ версии из текущего текста.
+        💡 <b>AI-оформление:</b> Нажмите «✨ Оформить через ИИ (Gemini)» для автоматического создания красивого описания с анимированными Telegram Premium эмодзи на русском и узбекском языках.
       </div>
 
       <form action={updateBotProductAction} className="card p-5 space-y-4">
