@@ -9,6 +9,8 @@ import {
   tgHtml,
   stripRichText,
   safeTruncateHtml,
+  resolveProductPremiumEmoji,
+  sanitizeTextCustomEmojis,
 } from "@/lib/emoji/rich-text";
 
 const base: EmojiConfig = {
@@ -161,6 +163,118 @@ describe("safeTruncateHtml", () => {
     const truncated = safeTruncateHtml(input, 20);
     expect(truncated).not.toContain('<tg-emoji');
     expect(truncated.endsWith('…')).toBe(true);
+  });
+});
+
+describe("resolveProductPremiumEmoji", () => {
+  it("resolves CapCut Pro correctly to official cinema/video emoji 5375464961822695044", () => {
+    const pe = resolveProductPremiumEmoji({
+      titleRu: "CapCut Pro — 1 месяц",
+      titleUz: "CapCut Pro — 1 oylik obuna",
+      emoji: "🖤",
+    });
+    expect(pe.id).toBe("5375464961822695044");
+    expect(pe.char).toBe("🎬");
+    expect(pe.textTag).toBe('<tg-emoji emoji-id="5375464961822695044">🎬</tg-emoji>');
+    expect(pe.buttonIcon).toBe("5375464961822695044");
+  });
+
+  it("keeps custom button icon if admin set a custom emoji for CapCut, while ensuring text uses official emoji", () => {
+    const pe = resolveProductPremiumEmoji({
+      titleRu: "CapCut Pro",
+      emoji: "🖤",
+      premiumEmoji: "9999999999999999999", // Unofficial custom sticker pack ID
+    });
+    // In text, must use official ID to prevent Telegram 400 rejection
+    expect(pe.id).toBe("5375464961822695044");
+    expect(pe.textTag).toBe('<tg-emoji emoji-id="5375464961822695044">🎬</tg-emoji>');
+    // For inline button, keeps the custom ID
+    expect(pe.buttonIcon).toBe("9999999999999999999");
+  });
+
+  it("resolves ChatGPT / OpenAI to brain emoji 5927026418616636353", () => {
+    const pe = resolveProductPremiumEmoji({
+      titleRu: "ChatGPT Plus (GPT-4o)",
+      emoji: "🧠",
+    });
+    expect(pe.id).toBe("5927026418616636353");
+    expect(pe.char).toBe("🧠");
+    expect(pe.textTag).toBe('<tg-emoji emoji-id="5927026418616636353">🧠</tg-emoji>');
+  });
+
+  it("resolves Telegram Premium to star emoji 5359512328003941083", () => {
+    const pe = resolveProductPremiumEmoji({
+      titleRu: "Telegram Premium",
+      emoji: "⭐",
+    });
+    expect(pe.id).toBe("5359512328003941083");
+    expect(pe.char).toBe("⭐");
+    expect(pe.textTag).toBe('<tg-emoji emoji-id="5359512328003941083">⭐</tg-emoji>');
+  });
+
+  it("resolves Telegram Stars to star emoji 5895708410447401643", () => {
+    const pe = resolveProductPremiumEmoji({
+      titleRu: "Telegram Stars",
+      emoji: "🌟",
+    });
+    expect(pe.id).toBe("5895708410447401643");
+    expect(pe.char).toBe("🌟");
+    expect(pe.textTag).toBe('<tg-emoji emoji-id="5895708410447401643">🌟</tg-emoji>');
+  });
+
+  it("resolves Gemini Pro to diamond emoji 5255920066171537833", () => {
+    const pe = resolveProductPremiumEmoji({
+      titleRu: "План Gemini AI Pro 18m",
+      emoji: "✨",
+    });
+    expect(pe.id).toBe("5255920066171537833");
+    expect(pe.char).toBe("💎");
+    expect(pe.textTag).toBe('<tg-emoji emoji-id="5255920066171537833">💎</tg-emoji>');
+  });
+
+  it("resolves SUBHUB AI Kurs to graduation cap emoji 5467512909909214089", () => {
+    const pe = resolveProductPremiumEmoji({
+      titleRu: "SUBHUB AI Kurs — 20 практических уроков",
+      emoji: "🎓",
+    });
+    expect(pe.id).toBe("5467512909909214089");
+    expect(pe.char).toBe("🎓");
+    expect(pe.textTag).toBe('<tg-emoji emoji-id="5467512909909214089">🎓</tg-emoji>');
+  });
+
+  it("resolves by unicode emoji character when no brand matches", () => {
+    const pe = resolveProductPremiumEmoji({
+      titleRu: "Unknown VPN Service",
+      emoji: "🛡",
+    });
+    expect(pe.id).toBe("5197288647275071607");
+    expect(pe.char).toBe("🛡");
+  });
+});
+
+describe("sanitizeTextCustomEmojis", () => {
+  it("preserves official Telegram custom emoji tags in text", () => {
+    const text = '<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> <b>Super Fast</b>';
+    expect(sanitizeTextCustomEmojis(text)).toBe(text);
+  });
+
+  it("maps unofficial custom emoji IDs with known fallback emojis to official IDs", () => {
+    const text = '<tg-emoji emoji-id="999999999999">🚀</tg-emoji> Start now';
+    expect(sanitizeTextCustomEmojis(text)).toBe(
+      '<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> Start now',
+    );
+  });
+
+  it("maps unofficial custom emoji with black heart to official cinema emoji", () => {
+    const text = '<tg-emoji emoji-id="888888888888">🖤</tg-emoji> CapCut Video';
+    expect(sanitizeTextCustomEmojis(text)).toBe(
+      '<tg-emoji emoji-id="5375464961822695044">🎬</tg-emoji> CapCut Video',
+    );
+  });
+
+  it("strips unrecognized tags into clean character without causing 400 errors", () => {
+    const text = '<tg-emoji emoji-id="777777777777">XYZ</tg-emoji> Description';
+    expect(sanitizeTextCustomEmojis(text)).toBe("XYZ Description");
   });
 });
 

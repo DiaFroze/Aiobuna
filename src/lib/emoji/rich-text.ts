@@ -103,3 +103,182 @@ export function safeTruncateHtml(html: string, maxLen: number): string {
   if (plain.length <= maxLen) return html;
   return escHtml(plain.slice(0, maxLen - 1).trim()) + "…";
 }
+
+/**
+ * Official public animated Telegram custom emoji IDs that bots are permitted
+ * to send in message text/captions without triggering 400 "can't use custom emoji".
+ */
+export const OFFICIAL_TEXT_EMOJI_IDS = new Set<string>([
+  "5255920066171537833", // Gemini / AI / Diamond
+  "5256251637646787356", // Canva / Art / Palette
+  "5375464961822695044", // CapCut / Video / Cinema
+  "5927026418616636353", // ChatGPT / OpenAI / Claude / Brain
+  "5359512328003941083", // Telegram Premium Star / Pay Star
+  "5895708410447401643", // Telegram Stars
+  "5467512909909214089", // Course / Cap / Student
+  "5197288647275071607", // Shield / VPN / Security
+  "5256131095094652290", // Target / Goals
+  "5235837920081887219", // Camera / Photo
+  "5278711610775457808", // Sparkles
+  "5424972470023104089", // Blue Diamond
+  "5372917041193828849", // Rocket
+  "6283073379184415506", // Gift
+  "5231102735817918643", // Down arrow
+  "5416081784641168838", // Bookmark / Tag
+  "5472164874886846427", // Fire / Hot
+  "5458466632400412271", // Bell / Notification
+  "5188481279963715781", // Film / Video
+  "5771449161123631882", // Pay arrow
+  "5289682726775967230", // Flash pct
+  "5382194935057372936", // Flash timer
+]);
+
+/**
+ * Mapping of unicode emoji characters to official animated Telegram custom emojis.
+ */
+export const EMOJI_CHAR_TO_PREMIUM: Record<string, { id: string; char: string }> = {
+  "🚀": { id: "5372917041193828849", char: "🚀" },
+  "🎓": { id: "5467512909909214089", char: "🎓" },
+  "🧠": { id: "5927026418616636353", char: "🧠" },
+  "📸": { id: "5235837920081887219", char: "📸" },
+  "🎯": { id: "5256131095094652290", char: "🎯" },
+  "🎬": { id: "5375464961822695044", char: "🎬" },
+  "🎥": { id: "5375464961822695044", char: "🎬" },
+  "📹": { id: "5375464961822695044", char: "🎬" },
+  "🖤": { id: "5375464961822695044", char: "🎬" }, // CapCut / dark theme
+  "🎁": { id: "6283073379184415506", char: "🎁" },
+  "🛡": { id: "5197288647275071607", char: "🛡" },
+  "🛡️": { id: "5197288647275071607", char: "🛡" },
+  "👇": { id: "5231102735817918643", char: "👇" },
+  "💎": { id: "5424972470023104089", char: "💎" },
+  "⭐": { id: "5359512328003941083", char: "⭐" },
+  "🌟": { id: "5895708410447401643", char: "🌟" },
+  "✨": { id: "5278711610775457808", char: "✨" },
+  "🎨": { id: "5256251637646787356", char: "🎨" },
+  "🔥": { id: "5472164874886846427", char: "🔥" },
+  "🔖": { id: "5416081784641168838", char: "🔖" },
+  "🔔": { id: "5458466632400412271", char: "🔔" },
+  "⚡": { id: "5372917041193828849", char: "⚡" },
+};
+
+/**
+ * Brand-to-premium-emoji matching table.
+ */
+export const BRAND_PREMIUM_EMOJIS: Array<{ match: RegExp; id: string; char: string }> = [
+  { match: /gemini/i, id: "5255920066171537833", char: "💎" },
+  { match: /canva/i, id: "5256251637646787356", char: "🎨" },
+  { match: /capcut/i, id: "5375464961822695044", char: "🎬" },
+  { match: /(?:chatgpt|openai|gpt|claude|midjourney|deepseek|perplexity)/i, id: "5927026418616636353", char: "🧠" },
+  { match: /telegram\s*premium/i, id: "5359512328003941083", char: "⭐" },
+  { match: /(?:telegram\s*stars|stars|звезд|yulduz)/i, id: "5895708410447401643", char: "🌟" },
+  { match: /(?:kurs|course|darslik|subhub)/i, id: "5467512909909214089", char: "🎓" },
+  { match: /vpn/i, id: "5197288647275071607", char: "🛡" },
+  { match: /(?:youtube|netflix|cinema|kino)/i, id: "5375464961822695044", char: "🎬" },
+  { match: /(?:spotify|music|apple)/i, id: "5424972470023104089", char: "🎵" },
+  { match: /(?:steam|game|discord)/i, id: "5372917041193828849", char: "🚀" },
+];
+
+/**
+ * Normalizes and sanitizes custom emoji tags inside message text or captions.
+ * Telegram Bot API only allows official animated custom emoji IDs in message text.
+ * Any unofficial ID is mapped by fallback character to an official ID, or stripped to plain char.
+ */
+export function sanitizeTextCustomEmojis(text: string): string {
+  if (!text) return "";
+  return text.replace(/<tg-emoji\s+(?:emoji-)?id=["']?(\d+)["']?\s*>([\s\S]*?)<\/tg-emoji>/gi, (_m, id, inner) => {
+    const cleanChar = (inner || "").trim() || "✨";
+    if (OFFICIAL_TEXT_EMOJI_IDS.has(id)) {
+      return `<tg-emoji emoji-id="${id}">${cleanChar}</tg-emoji>`;
+    }
+    if (EMOJI_CHAR_TO_PREMIUM[cleanChar]) {
+      const mapped = EMOJI_CHAR_TO_PREMIUM[cleanChar];
+      return `<tg-emoji emoji-id="${mapped.id}">${mapped.char}</tg-emoji>`;
+    }
+    return cleanChar;
+  });
+}
+
+export interface ResolvedPremiumEmoji {
+  id: string;
+  char: string;
+  textTag: string; // '<tg-emoji emoji-id="...">char</tg-emoji>'
+  buttonIcon: string; // emoji ID for .icon(...)
+}
+
+/**
+ * Resolves the appropriate animated Telegram premium custom emoji for a product,
+ * taking into account brand keywords, configured unicode emoji, and custom emoji IDs.
+ */
+export function resolveProductPremiumEmoji(
+  product?: {
+    titleRu?: string | null;
+    titleUz?: string | null;
+    titleEn?: string | null;
+    emoji?: string | null;
+    premiumEmoji?: string | null;
+    code?: string | null;
+  } | null,
+  contextTitle?: string | null,
+): ResolvedPremiumEmoji {
+  const titles = [
+    contextTitle,
+    product?.titleRu,
+    product?.titleUz,
+    product?.titleEn,
+    product?.code,
+  ].filter(Boolean).join(" ");
+
+  // 1. Check brand match
+  for (const b of BRAND_PREMIUM_EMOJIS) {
+    if (b.match.test(titles)) {
+      const textId = (product?.premiumEmoji && OFFICIAL_TEXT_EMOJI_IDS.has(product.premiumEmoji.trim()))
+        ? product.premiumEmoji.trim()
+        : b.id;
+      const buttonIcon = product?.premiumEmoji?.trim() || b.id;
+      return {
+        id: textId,
+        char: b.char,
+        textTag: `<tg-emoji emoji-id="${textId}">${b.char}</tg-emoji>`,
+        buttonIcon,
+      };
+    }
+  }
+
+  // 2. Check product emoji character match
+  const rawEmoji = (product?.emoji || "").trim();
+  if (rawEmoji && EMOJI_CHAR_TO_PREMIUM[rawEmoji]) {
+    const matched = EMOJI_CHAR_TO_PREMIUM[rawEmoji];
+    const textId = (product?.premiumEmoji && OFFICIAL_TEXT_EMOJI_IDS.has(product.premiumEmoji.trim()))
+      ? product.premiumEmoji.trim()
+      : matched.id;
+    const buttonIcon = product?.premiumEmoji?.trim() || matched.id;
+    return {
+      id: textId,
+      char: matched.char,
+      textTag: `<tg-emoji emoji-id="${textId}">${matched.char}</tg-emoji>`,
+      buttonIcon,
+    };
+  }
+
+  // 3. If product has an explicit premiumEmoji
+  if (product?.premiumEmoji && product.premiumEmoji.trim()) {
+    const id = product.premiumEmoji.trim();
+    const char = rawEmoji || "✨";
+    const textId = OFFICIAL_TEXT_EMOJI_IDS.has(id) ? id : (EMOJI_CHAR_TO_PREMIUM[char]?.id || "5278711610775457808");
+    const textChar = OFFICIAL_TEXT_EMOJI_IDS.has(id) ? char : (EMOJI_CHAR_TO_PREMIUM[char]?.char || "✨");
+    return {
+      id: textId,
+      char: textChar,
+      textTag: `<tg-emoji emoji-id="${textId}">${textChar}</tg-emoji>`,
+      buttonIcon: id,
+    };
+  }
+
+  // 4. Default fallback: Sparkles
+  return {
+    id: "5278711610775457808",
+    char: rawEmoji || "✨",
+    textTag: `<tg-emoji emoji-id="5278711610775457808">${rawEmoji || "✨"}</tg-emoji>`,
+    buttonIcon: "5278711610775457808",
+  };
+}

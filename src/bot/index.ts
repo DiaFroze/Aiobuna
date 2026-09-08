@@ -29,7 +29,18 @@ import { STARS_RATE_CARRIER_AMOUNT, minQtyForStars } from "../lib/domain/stars-p
 import { lowStockCount, parseLowStockThreshold } from "../lib/domain/low-stock";
 import { approveTopUp, APPROVABLE_STATUSES } from "../lib/domain/topup-approval";
 import { renderDeliveryGoods, formatStockPayloadForFile } from "../lib/domain/stock-payload";
-import { formatRichText, tgHtml, escHtml, stripRichText, safeTruncateHtml, stripHtml } from "../lib/emoji/rich-text";
+import {
+  formatRichText,
+  tgHtml,
+  escHtml,
+  stripRichText,
+  safeTruncateHtml,
+  stripHtml,
+  resolveProductPremiumEmoji,
+  sanitizeTextCustomEmojis,
+  OFFICIAL_TEXT_EMOJI_IDS,
+  EMOJI_CHAR_TO_PREMIUM,
+} from "../lib/emoji/rich-text";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -356,16 +367,11 @@ const stripTags = stripHtml;
 const stripLeadEmoji = (s: string) =>
   s.replace(/^[\p{Extended_Pictographic}\u2700-\u27BF\u2600-\u26FF✦⭐✨🔥⚡🎁💎🧾💰🤝👤📖🛒🛍️]️?\s*/u, "");
 
-// Brand premium emoji for gift items, matched on the product name. Falls back
-// to whatever premium emoji the admin set on the product itself, then to null
-// (caller then uses a plain emoji). Add a line here for each new brand.
-const GIFT_PREMIUM_EMOJI: Array<{ match: RegExp; id: string }> = [
-  { match: /canva/i, id: "5256251637646787356" },
-  { match: /gemini/i, id: "5255920066171537833" },
-];
+// Brand premium emoji for gift items and products, matched on the product name.
+// Resolves to official animated custom emoji, or product's configured premium emoji.
 function giftPremiumEmoji(productName: string, fallback?: string | null): string | null {
-  for (const e of GIFT_PREMIUM_EMOJI) if (e.match.test(productName)) return e.id;
-  return fallback ?? null;
+  const pe = resolveProductPremiumEmoji({ premiumEmoji: fallback }, productName);
+  return pe.buttonIcon || fallback || null;
 }
 
 function formatItemTitle(productName: string, variantName: string): string {
@@ -385,7 +391,11 @@ function formatItemTitle(productName: string, variantName: string): string {
 }
 function emojiIcon(emoji: string, premiumCode: string | null | undefined): string {
   const e = esc(emoji || "✨");
-  return premiumCode ? `<tg-emoji emoji-id="${premiumCode}">${e}</tg-emoji>` : e;
+  if (!premiumCode) return e;
+  const safeId = OFFICIAL_TEXT_EMOJI_IDS.has(premiumCode)
+    ? premiumCode
+    : (EMOJI_CHAR_TO_PREMIUM[emoji]?.id || "5278711610775457808");
+  return `<tg-emoji emoji-id="${safeId}">${e}</tg-emoji>`;
 }
 const nextSort = (s: Sort): Sort => SORTS[(SORTS.indexOf(s) + 1) % SORTS.length];
 const soumToStars = (soum: number) => Math.max(1, Math.round((soum * STARS_PER_USDT) / UZS_PER_USDT));
@@ -1269,7 +1279,17 @@ async function buildMenu(lang: string, page: number, sort: Sort, userId: number,
       const minPrice = prices.length ? Math.min(...prices) : 0;
       const st = variants.reduce((s, v) => s + stOf(v), 0);
       const hasFree = variants.some((v) => priceOf(v) <= 0 && stOf(v) > 0);
-      return { id: p.id, emoji: p.emoji || "✨", premiumEmoji: p.premiumEmoji ?? null, title: await pick3(p.titleRu, p.titleEn, p.titleUz, lang), minPrice, stock: st, hasFree };
+      const title = await pick3(p.titleRu, p.titleEn, p.titleUz, lang);
+      const pe = resolveProductPremiumEmoji(p, title);
+      return {
+        id: p.id,
+        emoji: p.emoji || pe.char || "✨",
+        premiumEmoji: p.premiumEmoji || pe.buttonIcon,
+        title,
+        minPrice,
+        stock: st,
+        hasFree,
+      };
     }),
   );
 
@@ -1394,6 +1414,10 @@ async function showProduct(ctx: Context, id: number, back: string) {
   }
   const overrides = await priceOverridesFor(user.id, variants.map((v) => v.id));
   const availablePoints = await availableReferralPoints(user);
+  const pt = await pick3(p.titleRu, p.titleEn, p.titleUz, lang);
+  const cleanPt = stripLeadEmoji(pt);
+  const pe = resolveProductPremiumEmoji(p, cleanPt);
+
   const kb = new InlineKeyboard();
   for (const v of variants) {
     const st = await availableStock(v);
@@ -1405,18 +1429,18 @@ async function showProduct(ctx: Context, id: number, back: string) {
     // nonsense — the stars do not expire.
     const dur = v.durationDays > 0 && v.fragmentKind !== "stars" ? ` · ${v.durationDays}д` : "";
     const vt = await locName(v.titleRu, v.titleUz, lang);
-    kb.text(`${vt} — ${price}${dur}`, `b:${v.id}:${back}`).icon("5424972470023104089").row();
+    const variantIcon = pe.buttonIcon || "5424972470023104089";
+    kb.text(`${vt} — ${price}${dur}`, `b:${v.id}:${back}`).icon(variantIcon).row();
     // Referrals-price row: shown only when admin set a pointsCost for this
     // variant. Label mentions the user's own available points so they see
     // whether they can afford it without extra taps.
     if (v.pointsCost > 0 && st > 0) {
       const canAfford = availablePoints >= v.pointsCost;
-      const premium = giftPremiumEmoji(p.titleRu, p.premiumEmoji);
       const rbBtn = kb.text(
-        `${premium ? "" : canAfford ? "🎁 " : "⏳ "}${vt} — ${v.pointsCost} реф. (у вас: ${availablePoints})`,
+        `${pe.buttonIcon ? "" : canAfford ? "🎁 " : "⏳ "}${vt} — ${v.pointsCost} реф. (у вас: ${availablePoints})`,
         `rb:${v.id}:${back}`,
       );
-      if (premium) rbBtn.icon(premium);
+      if (pe.buttonIcon) rbBtn.icon(pe.buttonIcon);
       kb.row();
     }
   }
@@ -1431,93 +1455,37 @@ async function showProduct(ctx: Context, id: number, back: string) {
   }
   kb.text(t(lang, "back_to_list"), `m:${back}`).row();
 
-  const pt = await pick3(p.titleRu, p.titleEn, p.titleUz, lang);
   const pd = await pick3(p.descRu ?? "", p.descEn, p.descUz, lang);
-  const plainDesc = pd?.trim() ? stripRichText(pd.trim()) : "";
-  const emojiStr = p.emoji || "✨";
+  const rawFormatted = pd?.trim() ? tgHtml(formatRichText(pd.trim())) : "";
+  const formattedDesc = rawFormatted ? sanitizeTextCustomEmojis(rawFormatted) : "";
 
-  let text = "";
-  const entities: MessageEntity[] = [];
-
-  // 1. Header (emoji + title)
-  text += `${emojiStr} ${pt}`;
-  if (p.premiumEmoji) {
-    entities.push({
-      type: "custom_emoji",
-      offset: 0,
-      length: emojiStr.length,
-      custom_emoji_id: p.premiumEmoji,
-    });
-  }
-  entities.push({
-    type: "bold",
-    offset: emojiStr.length + 1,
-    length: pt.length,
-  });
-
-  // 2. Description
-  if (plainDesc) {
-    text += `\n\n${plainDesc}`;
+  let text = `${pe.textTag} <b>${esc(cleanPt)}</b>`;
+  if (formattedDesc) {
+    text += `\n\n${formattedDesc}`;
   }
 
-  // 3. Stock levels
+  // Stock levels
   if (variants.length > 0) {
-    const stockHeaderOffset = text.length + 2; // \n\n
-    text += `\n\n🛍 В наличии:`;
-    entities.push({
-      type: "bold",
-      offset: stockHeaderOffset,
-      length: `🛍 В наличии:`.length,
-    });
-
+    const isUz = lang === "uz";
+    text += `\n\n🛍 <b>${isUz ? "Mavjud:" : "В наличии:"}</b>`;
     const premiumStockEmojiId = "5416081784641168838";
     for (const v of variants) {
       const st = await availableStock(v);
       const vt = await locName(v.titleRu, v.titleUz, lang);
-
-      text += `\n• ${vt}: `;
-      const emojiOffset = text.length;
-      text += "🔖";
-      entities.push({
-        type: "custom_emoji",
-        offset: emojiOffset,
-        length: "🔖".length,
-        custom_emoji_id: premiumStockEmojiId,
-      });
-
-      const boldStart = text.length;
-      const stLabel = st >= STOCK_UNLIMITED ? "♾" : `${st} шт.`;
-      text += ` ${stLabel}`;
-      entities.push({
-        type: "bold",
-        offset: boldStart + 1, // skip the leading space
-        length: stLabel.length,
-      });
+      const stLabel = st >= STOCK_UNLIMITED ? "♾" : `${st} ${isUz ? "dona" : "шт."}`;
+      text += `\n• ${esc(vt)}: <tg-emoji emoji-id="${premiumStockEmojiId}">🔖</tg-emoji> <b>${esc(stLabel)}</b>`;
     }
   }
 
-  // 4. Plan chooser suffix
+  // Plan chooser suffix
   const suffix = `\n\n${t(lang, "choose_plan")}`;
   text += suffix;
 
-  // The per-product video now lives on the buy card (buildQtyChooser), so the
-  // multi-variant plan list stays text-only — showing the video here too would
-  // play it twice (plan list + buy card).
-
-  // Product card uses message entities (custom_emoji/bold), not HTML — so the
-  // parse_mode-based sendOrEdit doesn't apply here. Try in-place text edit
-  // first (fast, no flicker); if the source was a photo message (catalog
-  // banner), delete it and post fresh so the entities render correctly.
-  try {
-    await ctx.editMessageText(text, { reply_markup: kb, entities });
-  } catch {
-    await ctx.deleteMessage().catch(() => {});
-    try {
-      await ctx.reply(text, { reply_markup: kb, entities });
-    } catch {
-      await ctx.reply(`${emojiStr} ${pt}${plainDesc ? `\n\n${plainDesc}` : ""}${suffix}`, { reply_markup: kb }).catch(() => {});
-    }
-  }
+  const photo = resolveProductBanner(p.bannerFileId);
+  await sendOrEdit(ctx, text, {
+    photo,
+    reply_markup: kb,
+  });
   await ctx.answerCallbackQuery().catch(() => {});
 }
 
@@ -1605,14 +1573,11 @@ async function buildQtyChooser(
   // formatItemTitle drops the duplicate when product and variant names repeat
   // ("Gemini AI Pro 18 Oy — Gemini AI Pro 18m" → "Gemini AI Pro 18m").
   const title = formatItemTitle(pt, vt);
-  const brandEmoji = giftPremiumEmoji(pt);
+  const cleanTitle = stripLeadEmoji(title);
+  const pe = resolveProductPremiumEmoji(v.plan.product, cleanTitle);
   const head = course
     ? '<tg-emoji emoji-id="5467512909909214089">🎓</tg-emoji>'
-    : brandEmoji
-    ? `<tg-emoji emoji-id="${brandEmoji}">💎</tg-emoji>`
-    : v.plan.product.premiumEmoji
-    ? `<tg-emoji emoji-id="${v.plan.product.premiumEmoji}">${v.plan.product.emoji || "✨"}</tg-emoji>`
-    : "🧾";
+    : pe.textTag;
   const max = await availableStock(v);
   if (max <= 0) return null;
   // Fragment refuses anything under 50 stars, so the ± buttons must not be able
@@ -1629,7 +1594,7 @@ async function buildQtyChooser(
   // Referral discount (same rule as doBuy): eligible product + enough referrals.
   const disc = v.plan.product.refDiscount && !v.needsUsername ? bestRefDiscount(await availableReferralPoints(user)) : null;
   const payTotal = disc ? Math.round(total * (100 - disc.pct) / 100) : total;
-  const label = qty > 1 ? `${title} ×${qty}` : title;
+  const label = qty > 1 ? `${cleanTitle} ×${qty}` : cleanTitle;
 
   // Flash sale (from /promo): auto % off + a live countdown, shown as a badge
   // button and in the caption.
@@ -1680,7 +1645,8 @@ async function buildQtyChooser(
   const hasMedia = Boolean(photo || v.plan.product.videoFileId);
 
   const pd = await pick3(v.plan.product.descRu ?? "", v.plan.product.descEn, v.plan.product.descUz, lang);
-  const formattedDesc = pd?.trim() ? tgHtml(formatRichText(pd.trim())) : "";
+  const rawFormatted = pd?.trim() ? tgHtml(formatRichText(pd.trim())) : "";
+  const formattedDesc = rawFormatted ? sanitizeTextCustomEmojis(rawFormatted) : "";
   let desc = "";
   if (course) {
     desc = formattedDesc || (lang === "uz" ? COURSE_DESC_UZ : lang === "ru" ? COURSE_DESC_RU : COURSE_DESC_EN);
@@ -1698,7 +1664,7 @@ async function buildQtyChooser(
     : "";
 
   const text =
-    `${head} <b>${esc(title)}</b>\n` +
+    `${head} <b>${esc(cleanTitle)}</b>\n` +
     (desc ? `\n${desc}\n` : "") +
     (flashBlock ? `\n${flashBlock}` : "") +
     (vipLabel ? `\n💎 <b>${esc(vipLabel)}</b>` : "") +
@@ -4986,13 +4952,13 @@ async function buildPromoSetupView(draft: PromoDraft) {
 // before the broadcast rather than per recipient — and it is never invented.
 function promoMessage(name: string, oldPrice: number, newPrice: number, hours: number, variantId: number, left: number | null = null): { text: string; kb: InlineKeyboard } {
   const pct = oldPrice > newPrice ? Math.round((oldPrice - newPrice) / oldPrice * 100) : 0;
-  // Brand premium emoji (e.g. 🤖 for Gemini) instead of a generic 💎.
-  const pe = giftPremiumEmoji(name);
-  const brand = pe ? `<tg-emoji emoji-id="${pe}">💎</tg-emoji>` : "💎";
-  const kb = new InlineKeyboard().text(`🛒 Ulgurib qoling −${pct}%`, `b:${variantId}:0:all`);
+  const cleanName = stripLeadEmoji(name);
+  const pe = resolveProductPremiumEmoji(null, cleanName);
+  const brand = pe.textTag;
+  const kb = new InlineKeyboard().text(`🛒 Ulgurib qoling −${pct}%`, `b:${variantId}:0:all`).icon(pe.buttonIcon);
   const text =
     `<tg-emoji emoji-id="${FLASH_PCT_EMOJI}">🔺</tg-emoji> <b>FLASH SALE −${pct}%</b>\n\n` +
-    `${brand} <b>${esc(name)}</b>\n` +
+    `${brand} <b>${esc(cleanName)}</b>\n` +
     `<s>${money(oldPrice, "uz")}</s> → <b>${money(newPrice, "uz")}</b>\n\n` +
     `<tg-emoji emoji-id="${FLASH_TIME_EMOJI}">⏱</tg-emoji> Chegirma ${hours} soat davom etadi — ulgurib qoling!` +
     (left !== null ? `\n\n${t("uz", "low_stock", { n: left })}` : "");
