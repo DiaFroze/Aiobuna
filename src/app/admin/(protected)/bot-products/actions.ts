@@ -325,26 +325,30 @@ export async function updateBotProductAction(formData: FormData) {
 
   const titleRu = str(formData.get("titleRu"));
   const descRu = str(formData.get("descRu"));
+  const titleUzInput = str(formData.get("titleUz"));
+  const descUzInput = str(formData.get("descUz"));
+  const descEnInput = str(formData.get("descEn"));
+  const bannerFileId = str(formData.get("bannerFileId")) || null;
 
   let tRu = titleRu;
-  let tUz = str(formData.get("titleUz")) || titleRu;
-  let tEn = titleRu;
+  let tUz = titleUzInput || titleRu;
+  let tEn = str(formData.get("titleEn")) || titleRu;
   let dRu = descRu;
-  let dUz = str(formData.get("descUz"));
-  let dEn = "";
+  let dUz = descUzInput;
+  let dEn = descEnInput;
 
-  try {
-    const loc = await geminiLocalize(titleRu, descRu || dUz || "");
-    if (loc) {
-      tRu = loc.titleRu || tRu;
-      tUz = loc.titleUz || tUz;
-      tEn = loc.titleEn || tEn;
-      dRu = loc.descRu || dRu;
-      dUz = loc.descUz || dUz;
-      dEn = loc.descEn || dEn;
+  // Only auto-translate with Gemini if Uzbek description is completely empty:
+  if (!dUz && dRu) {
+    try {
+      const loc = await geminiLocalize(titleRu, descRu);
+      if (loc) {
+        if (!titleUzInput && loc.titleUz) tUz = loc.titleUz;
+        if (loc.descUz) dUz = loc.descUz;
+        if (!dEn && loc.descEn) dEn = loc.descEn;
+      }
+    } catch (err) {
+      console.error("Gemini localization failed on update:", err);
     }
-  } catch (err) {
-    console.error("Gemini localization failed on update:", err);
   }
 
   await botDb.product.update({
@@ -355,6 +359,7 @@ export async function updateBotProductAction(formData: FormData) {
       titleEn: tEn,
       emoji: em.emoji,
       premiumEmoji: em.premium, // string custom_emoji_id, precision-safe
+      bannerFileId,
       descRu: dRu,
       descUz: dUz,
       descEn: dEn,
@@ -368,7 +373,7 @@ export async function updateBotProductAction(formData: FormData) {
     action: "bot.product.update",
     entityType: "BotProduct",
     entityId: String(id),
-    metadata: { premiumEmoji: premiumEmoji || null },
+    metadata: { premiumEmoji: premiumEmoji || null, bannerFileId },
   });
   revalidatePath(`/admin/bot-products/${id}`);
   revalidatePath("/admin/bot-products");

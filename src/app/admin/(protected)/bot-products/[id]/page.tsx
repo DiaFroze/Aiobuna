@@ -6,6 +6,8 @@ import {
   updateBotProductAction,
   retranslateProductAction,
   testEmojiAction,
+  uploadBannerAction,
+  deleteBannerAction,
   addVariantAction,
   updateVariantAction,
   deleteVariantAction,
@@ -13,6 +15,7 @@ import {
   addStockAction,
   clearStockAction,
 } from "../actions";
+import { ProductDescriptionEditor } from "@/components/admin/ProductDescriptionEditor";
 
 export const dynamic = "force-dynamic";
 
@@ -83,15 +86,25 @@ export default async function BotProductEditPage({ params }: { params: { id: str
           </div>
         </div>
 
-        <div className="grid md:grid-cols-2 gap-4">
-          <div>
-            <label className="text-sm text-muted">Описание (RU)</label>
-            <textarea name="descRu" defaultValue={product.descRu} rows={4} className="input mt-1 text-sm" />
-          </div>
-          <div>
-            <label className="text-sm text-muted">Описание (UZ)</label>
-            <textarea name="descUz" defaultValue={product.descUz} rows={4} className="input mt-1 text-sm" />
-          </div>
+        {/* Rich Description Editor with Premium Emoji toolbar */}
+        <ProductDescriptionEditor
+          initialDescRu={product.descRu}
+          initialDescUz={product.descUz}
+          initialDescEn={product.descEn}
+        />
+
+        {/* Banner file_id or URL */}
+        <div className="pt-2 border-t">
+          <label className="text-sm font-medium text-foreground">Баннер товара (Telegram file_id или URL)</label>
+          <input
+            name="bannerFileId"
+            defaultValue={product.bannerFileId ?? ""}
+            className="input mt-1 font-mono text-sm"
+            placeholder="file_id (напр. AgACAgIAAxkDA...) или https://example.com/banner.jpg"
+          />
+          <p className="text-xs text-muted mt-1">
+            Если указан — бот отправляет карточку товара с этим графическим баннером сверху сообщения.
+          </p>
         </div>
 
         <label className="flex items-center gap-2 text-sm">
@@ -108,6 +121,34 @@ export default async function BotProductEditPage({ params }: { params: { id: str
           <button className="btn-primary">Сохранить</button>
         </div>
       </form>
+
+      {/* Banner Upload / Management card */}
+      <div className="card p-5 space-y-3">
+        <h3 className="font-semibold">📷 Графический баннер товара</h3>
+        <p className="text-sm text-muted">
+          Баннер крепится сверху сообщения при открытии карточки в Telegram-боте.
+        </p>
+        {product.bannerFileId ? (
+          <div className="flex items-center justify-between p-3 rounded-lg border bg-surface-2/40">
+            <div>
+              <div className="text-xs font-semibold text-success">✅ Баннер прикреплён</div>
+              <div className="text-xs font-mono text-muted break-all mt-0.5">{product.bannerFileId}</div>
+            </div>
+            <form action={deleteBannerAction}>
+              <input type="hidden" name="productId" value={product.id} />
+              <button className="btn-danger text-xs px-3">Удалить баннер</button>
+            </form>
+          </div>
+        ) : (
+          <div className="text-xs text-muted">Баннер пока не загружен. Можно загрузить файл ниже или ввести file_id в форме выше.</div>
+        )}
+
+        <form action={uploadBannerAction} className="flex flex-wrap items-center gap-2 pt-2 border-t">
+          <input type="hidden" name="productId" value={product.id} />
+          <input type="file" name="file" accept="image/*" required className="text-xs" />
+          <button className="btn-primary text-xs px-3">Загрузить файл баннера</button>
+        </form>
+      </div>
 
       {/* Premium emoji preview: send a real message to Telegram */}
       <form action={testEmojiAction} className="card p-5 space-y-3">

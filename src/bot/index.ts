@@ -28,6 +28,7 @@ import { STARS_RATE_CARRIER_AMOUNT, minQtyForStars } from "../lib/domain/stars-p
 import { lowStockCount, parseLowStockThreshold } from "../lib/domain/low-stock";
 import { approveTopUp, APPROVABLE_STATUSES } from "../lib/domain/topup-approval";
 import { renderDeliveryGoods, formatStockPayloadForFile } from "../lib/domain/stock-payload";
+import { formatRichText, tgHtml, escHtml, stripRichText, safeTruncateHtml, stripHtml } from "../lib/emoji/rich-text";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -39,13 +40,22 @@ import path from "node:path";
 const mediaAssetCache = new Map<string, Buffer>();
 function mediaAssetFile(filename: string): InputFile | null {
   let buf = mediaAssetCache.get(filename);
-  if (buf === undefined) {
-    try {
-      buf = fs.readFileSync(path.join(__dirname, "assets", filename));
-    } catch {
-      buf = Buffer.alloc(0);
+  if (buf === undefined || buf.length === 0) {
+    const candidates = [
+      path.join(__dirname, "assets", filename),
+      path.join(process.cwd(), "src", "bot", "assets", filename),
+      path.join(process.cwd(), "assets", filename),
+    ];
+    for (const c of candidates) {
+      try {
+        if (fs.existsSync(c)) {
+          buf = fs.readFileSync(c);
+          break;
+        }
+      } catch {}
     }
-    mediaAssetCache.set(filename, buf);
+    if (!buf) buf = Buffer.alloc(0);
+    if (buf.length > 0) mediaAssetCache.set(filename, buf);
   }
   return buf.length > 0 ? new InputFile(buf, filename) : null;
 }
@@ -131,7 +141,8 @@ async function sendOrEdit(ctx: Context, text: string, opts: SendOrEditOpts = {})
       .then((msg) => {
         opts.onPhotoSent?.(msg);
       })
-      .catch(async () => {
+      .catch(async (err) => {
+        console.error("[bot] replyWithPhoto failed, falling back to text:", (err as Error)?.message || err);
         await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
       });
     return;
@@ -308,14 +319,8 @@ const bot = new Bot(token, {
 // ---------- helpers ----------
 const money = (n: number, lang: string | null | undefined) =>
   `${Math.round(n).toLocaleString("ru-RU")} ${CUR[normalizeLang(lang)]}`;
-const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-const TG_TAGS = ["b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "code", "pre", "blockquote"];
-function tgHtml(s: string): string {
-  let out = esc(s);
-  for (const tag of TG_TAGS) out = out.replace(new RegExp(`&lt;(/?${tag})&gt;`, "gi"), "<$1>");
-  return out;
-}
-const stripTags = (s: string) => s.replace(/<[^>]*>/g, "");
+const esc = escHtml;
+const stripTags = stripHtml;
 // Drop a leading standard or decorative emoji (+ optional variation selector + spaces) — used
 // when a premium emoji icon replaces the plain one on a button.
 const stripLeadEmoji = (s: string) =>
@@ -607,56 +612,179 @@ async function configuredCourseChannel(): Promise<string> {
   return (process.env.COURSE_CHANNEL_ID ?? await setting(COURSE_CHANNEL_SETTING, "")).trim();
 }
 
-const COURSE_DESC_UZ = `Sun'iy intellekt yordamida noldan professional darajada kontent, rasm va video yaratish bo'yicha to'liq amaliy kurs!
+const COURSE_DESC_UZ = `<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> <b>G‘oyadan — tayyor kontentgacha ✨</b>
+Sun’iy intellekt bilan noldan kontent, rasm, video va musiqa yaratishni o‘rganing!
 
-📌 <b>Kursda nimalar o'rganasiz (20 ta darslik):</b>
-1. AI bilan tanishuv | 2. Eng kuchli AI ilovalar
-3. G'oyalar xazinasi | 4. Prompt engineering
-5. Poza va rakurslar | 6. Formatlar siri
-7. AI fotosessiya | 8. Multfilm olami
-9. Instagram profili | 10. To'g'ri auditoriya
-11. Gem bot yaratish | 12. Flow AI video
-13. Gapiruvchi buyumlar | 14. Multfilm videolari
-15. Reklama videolari | 16. CapCut montaj
-17. Instagramga yuklash | 18. Retro rasmlarni tiklash
-19. AI musiqa | 20. Portfolio & narx
+<tg-emoji emoji-id="5467512909909214089">🎓</tg-emoji> <b>20 ta darsdan iborat amaliy kurs:</b>
+<tg-emoji emoji-id="5927026418616636353">🧠</tg-emoji> <b>AI ASOSLARI:</b> 01. AI bilan tanishuv • 02. Eng kuchli ilovalar • 03. G‘oyalar xazinasi • 04. Prompt engineering
+<tg-emoji emoji-id="5235837920081887219">📸</tg-emoji> <b>RASM & VIZUAL:</b> 05. Poza va rakurslar • 06. Formatlar siri • 07. AI fotosessiya • 08. Multfilm olami
+<tg-emoji emoji-id="5256131095094652290">🎯</tg-emoji> <b>AUDITORIYA:</b> 09. Instagram profili • 10. To‘g‘ri auditoriya
+<tg-emoji emoji-id="5375464961822695044">🎬</tg-emoji> <b>AI VIDEO:</b> 11. Gem bot • 12. Flow AI video • 13. Gapiruvchi buyumlar • 14. Multfilm videolari • 15. Reklama roliklari
+<tg-emoji emoji-id="5188481279963715781">🚀</tg-emoji> <b>MONTAJ & DAROMAD:</b> 16. CapCut montaj • 17. Instagramga yuklash • 18. Retro rasmlar • 19. AI musiqa • 20. Portfolio va narx
 
-🎁 <b>Bonus:</b> 18 oylik <b>Gemini AI Pro</b> (5 TB) sovg'a!
-🔒 Yopiq kanalga bir martalik havola to'lovdan so'ng darhol beriladi.`;
+<tg-emoji emoji-id="6283073379184415506">🎁</tg-emoji> <b>BONUS:</b> 18 oylik <b>Gemini AI Pro</b> (5 TB) sovg‘a!
+<tg-emoji emoji-id="5197288647275071607">🛡</tg-emoji> <b>KURS:</b> Yopiq kanalga havola to‘lovdan so‘ng darhol beriladi.`;
 
-const COURSE_DESC_RU = `Полный практический курс по созданию контента, фото и видео с помощью нейросетей от А до Я!
+const COURSE_DESC_RU = `<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> <b>От идеи — до готового контента ✨</b>
+Научитесь создавать фото, видео, музыку и рекламу с помощью нейросетей от А до Я!
 
-📌 <b>Чему вы научитесь на курсе (20 уроков):</b>
-1. Знакомство с ИИ | 2. Топ AI-приложения
-3. Банк идей | 4. Промпт-инжиниринг
-5. Позы и ракурсы | 6. Секреты форматов
-7. AI-фотосессия | 8. Мир анимации
-9. Профиль Instagram | 10. Целевая аудитория
-11. Создание Gem-бота | 12. Flow AI видео
-13. Говорящие предметы | 14. Мультфильмы
-15. Рекламные ролики | 16. Монтаж в CapCut
-17. Публикация в Instagram | 18. Реставрация фото
-19. AI-музыка | 20. Портфолио и прайс
+<tg-emoji emoji-id="5467512909909214089">🎓</tg-emoji> <b>Практический курс из 20 уроков:</b>
+<tg-emoji emoji-id="5927026418616636353">🧠</tg-emoji> <b>ОСНОВЫ И ИДЕИ:</b> 01. Знакомство с ИИ • 02. Топ AI-приложения • 03. Банк идей • 04. Промпт-инжиниринг
+<tg-emoji emoji-id="5235837920081887219">📸</tg-emoji> <b>ФОТО И ВИЗУАЛ:</b> 05. Позы и ракурсы • 06. Секреты форматов • 07. AI-фотосессия • 08. Мир анимации
+<tg-emoji emoji-id="5256131095094652290">🎯</tg-emoji> <b>АУДИТОРИЯ:</b> 09. Профиль Instagram • 10. Целевая аудитория
+<tg-emoji emoji-id="5375464961822695044">🎬</tg-emoji> <b>AI ВИДЕО:</b> 11. Gem-бот • 12. Flow AI видео • 13. Говорящие предметы • 14. Мультфильмы • 15. Рекламные ролики
+<tg-emoji emoji-id="5188481279963715781">🚀</tg-emoji> <b>МОНТАЖ И ПРАЙС:</b> 16. Монтаж в CapCut • 17. Публикация в Instagram • 18. Реставрация фото • 19. AI-музыка • 20. Портфолио и заработок
 
-🎁 <b>Бонус:</b> <b>Gemini AI Pro на 18 месяцев</b> (5 ТБ облака) в подарок!
-🔒 Персональная ссылка в закрытый канал выдаётся сразу после оплаты.`;
+<tg-emoji emoji-id="6283073379184415506">🎁</tg-emoji> <b>БОНУС:</b> <b>Gemini AI Pro на 18 месяцев</b> (5 ТБ облака) в подарок!
+<tg-emoji emoji-id="5197288647275071607">🛡</tg-emoji> <b>ВЫДАЧА:</b> Ссылка в закрытый канал выдаётся сразу после оплаты.`;
 
-const COURSE_DESC_EN = `Comprehensive hands-on course on creating content, photos, and videos with AI from scratch!
+const COURSE_DESC_EN = `<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> <b>From Idea to Ready Content ✨</b>
+Learn to create photos, videos, music, and ads using AI from scratch!
 
-📌 <b>What you will learn (20 Lessons):</b>
-1. AI Intro | 2. Top AI Apps
-3. Idea Generation | 4. Prompt Engineering
-5. Poses & Angles | 6. Format Secrets
-7. AI Photoshoot | 8. Animation World
-9. Instagram Profile | 10. Target Audience
-11. Gem Bot Creation | 12. Flow AI Video
-13. Talking Objects | 14. Cartoon Videos
-15. Commercial Ads | 16. CapCut Editing
-17. Instagram Upload | 18. Photo Restoration
-19. AI Music | 20. Portfolio & Pricing
+<tg-emoji emoji-id="5467512909909214089">🎓</tg-emoji> <b>20-Lesson Hands-on Course:</b>
+<tg-emoji emoji-id="5927026418616636353">🧠</tg-emoji> <b>AI BASICS:</b> 01. Intro to AI • 02. Top AI Apps • 03. Idea Treasury • 04. Prompt Engineering
+<tg-emoji emoji-id="5235837920081887219">📸</tg-emoji> <b>VISUAL CREATION:</b> 05. Poses & Angles • 06. Format Secrets • 07. AI Photoshoot • 08. Animation World
+<tg-emoji emoji-id="5256131095094652290">🎯</tg-emoji> <b>AUDIENCE:</b> 09. Instagram Profile • 10. Target Audience
+<tg-emoji emoji-id="5375464961822695044">🎬</tg-emoji> <b>AI VIDEO:</b> 11. Gem Bot • 12. Flow AI Video • 13. Talking Objects • 14. Cartoon Videos • 15. Commercial Ads
+<tg-emoji emoji-id="5188481279963715781">🚀</tg-emoji> <b>EDITING & PRICING:</b> 16. CapCut Editing • 17. Instagram Upload • 18. Photo Restoration • 19. AI Music • 20. Portfolio & Pricing
 
-🎁 <b>Bonus:</b> 18 Months of <b>Gemini AI Pro</b> (5TB cloud) included!
-🔒 Private channel invite link is delivered instantly upon payment.`;
+<tg-emoji emoji-id="6283073379184415506">🎁</tg-emoji> <b>BONUS:</b> 18 Months of <b>Gemini AI Pro</b> (5TB Cloud) included!
+<tg-emoji emoji-id="5197288647275071607">🛡</tg-emoji> <b>DELIVERY:</b> Private channel invite link delivered instantly upon payment.`;
+
+const COURSE_DESC_FULL_UZ = `<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> <b>SUBHUB AI KURS</b>
+G‘oyadan — tayyor kontentgacha ✨
+
+Sun’iy intellekt yordamida rasm, video, musiqa va reklama kontenti yaratishni o‘rganing. Boshlash uchun tajriba shart emas — hammasini noldan boshlaymiz!
+
+<tg-emoji emoji-id="5467512909909214089">🎓</tg-emoji> <b>20 ta darsdan iborat amaliy kurs:</b>
+
+<tg-emoji emoji-id="5927026418616636353">🧠</tg-emoji> <b>AI ASOSLARI VA G‘OYALAR</b>
+01 › AI bilan tanishuv — uning imkoniyatlarini tushuning.
+02 › Eng kuchli AI ilovalar — vazifangizga mos vositani tanlang.
+03 › G‘oyalar xazinasi — kontent uchun yangi g‘oyalar toping.
+04 › Prompt engineering — AI’ga aniq topshiriq yozishni o‘rganing.
+
+<tg-emoji emoji-id="5235837920081887219">📸</tg-emoji> <b>RASM VA VIZUAL YARATISH</b>
+05 › Poza va rakurslar — kadrni chiroyli tuzing.
+06 › Formatlar siri — kontentingizga mos formatni tanlang.
+07 › AI fotosessiya — sun’iy intellekt bilan fotosuratlar yarating.
+08 › Multfilm olami — multfilm uslubidagi tasvirlar yarating.
+
+<tg-emoji emoji-id="5256131095094652290">🎯</tg-emoji> <b>INSTAGRAM VA AUDITORIYA</b>
+09 › Instagram profili — sahifangizni tartibli va jozibali bezang.
+10 › To‘g‘ri auditoriya — kontentingiz kim uchun ekanini aniqlang.
+
+<tg-emoji emoji-id="5375464961822695044">🎬</tg-emoji> <b>AI VIDEO VA ANIMATSIYA</b>
+11 › Gem bot yaratish — vazifangizga mos AI yordamchi sozlang.
+12 › Flow AI video — g‘oyangizni videoga aylantiring.
+13 › Gapiruvchi buyumlar — buyumlarga ovoz va xarakter bering.
+14 › Multfilm videolari — animatsion videolar yarating.
+15 › Reklama videolari — mahsulotni video orqali namoyish eting.
+
+<tg-emoji emoji-id="5188481279963715781">🚀</tg-emoji> <b>MONTAJDAN PORTFOLIOGACHA</b>
+16 › CapCut montaj — videoni tahrirlab, tayyor holatga keltiring.
+17 › Instagramga yuklash — tayyor kontentni joylashtiring.
+18 › Retro rasmlarni tiklash — eski suratlarga yangi hayot bering.
+19 › AI musiqa — sun’iy intellekt yordamida musiqa yarating.
+20 › Portfolio va narx — ishlaringizni jamlang va xizmatlaringizga narx belgilashni o‘rganing.
+
+<tg-emoji emoji-id="6283073379184415506">🎁</tg-emoji> <b>BONUS</b>
+18 oylik Gemini AI Pro — 5 TB bilan sovg‘a!
+
+<tg-emoji emoji-id="5197288647275071607">🛡</tg-emoji> <b>KURS QANDAY BERILADI?</b>
+Bir martalik to‘lovdan so‘ng yopiq kanalga kirish havolasini darhol olasiz.
+
+<tg-emoji emoji-id="5231102735817918643">👇</tg-emoji> O‘zingizga qulay to‘lov usulini tanlang va o‘rganishni boshlang!`;
+
+const COURSE_DESC_FULL_RU = `<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> <b>SUBHUB AI КУРС</b>
+От идеи — до готового контента ✨
+
+Научитесь создавать изображения, видео, музыку и рекламный контент с помощью нейросетей. Опыт не требуется — начинаем с нуля!
+
+<tg-emoji emoji-id="5467512909909214089">🎓</tg-emoji> <b>Практический курс из 20 уроков:</b>
+
+<tg-emoji emoji-id="5927026418616636353">🧠</tg-emoji> <b>ОСНОВЫ ИИ И ИДЕИ</b>
+01 › Знакомство с ИИ — поймите его возможности.
+02 › Лучшие AI-приложения — выберите нужный инструмент под задачу.
+03 › Сокровищница идей — находите свежие идеи для контента.
+04 › Промпт-инжиниринг — научитесь ставить точные задачи для ИИ.
+
+<tg-emoji emoji-id="5235837920081887219">📸</tg-emoji> <b>СОЗДАНИЕ ФОТО И ВИЗУАЛА</b>
+05 › Позы и ракурсы — красиво выстраивайте кадр.
+06 › Секреты форматов — подбирайте идеальный формат контента.
+07 › AI-фотосессия — создавайте фотореалистичные снимки с нейросетями.
+08 › Мир анимации — генерация изображений в стиле мультфильмов.
+
+<tg-emoji emoji-id="5256131095094652290">🎯</tg-emoji> <b>INSTAGRAM И АУДИТОРИЯ</b>
+09 › Профиль Instagram — стильное и привлекательное оформление страницы.
+10 › Целевая аудитория — определите, для кого ваш контент.
+
+<tg-emoji emoji-id="5375464961822695044">🎬</tg-emoji> <b>AI ВИДЕО И АНИМАЦИЯ</b>
+11 › Создание Gem-бота — настройте персонального AI-ассистента.
+12 › Flow AI видео — превратите свои идеи в готовое видео.
+13 › Говорящие предметы — оживите предметы голосом и характером.
+14 › Мультипликационные видео — создание анимационных роликов.
+15 › Рекламные видеоролики — презентация любого продукта через видео.
+
+<tg-emoji emoji-id="5188481279963715781">🚀</tg-emoji> <b>ОТ МОНТАЖА ДО ПОРТФОЛИО</b>
+16 › Монтаж в CapCut — финальная сборка и полировка видео.
+17 › Публикация в Instagram — правильная выгрузка без потери качества.
+18 › Реставрация ретро-фото — дарите старым снимкам новую жизнь.
+19 › AI-музыка — создание треков и мелодий с помощью нейросетей.
+20 › Портфолио и прайс — упакуйте свои работы и назначьте цену услугам.
+
+<tg-emoji emoji-id="6283073379184415506">🎁</tg-emoji> <b>БОНУС</b>
+18 месяцев Gemini AI Pro (5 ТБ облака) в подарок!
+
+<tg-emoji emoji-id="5197288647275071607">🛡</tg-emoji> <b>КАК ВЫДАЕТСЯ КУРС?</b>
+Персональная ссылка в закрытый канал выдаётся сразу после оплаты.
+
+<tg-emoji emoji-id="5231102735817918643">👇</tg-emoji> Выберите удобный способ оплаты ниже и начните обучение!`;
+
+const COURSE_DESC_FULL_EN = `<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> <b>SUBHUB AI COURSE</b>
+From Idea to Ready Content ✨
+
+Learn to create photos, videos, music, and ads using AI from scratch. No prior experience required!
+
+<tg-emoji emoji-id="5467512909909214089">🎓</tg-emoji> <b>20-Lesson Practical Course:</b>
+
+<tg-emoji emoji-id="5927026418616636353">🧠</tg-emoji> <b>AI BASICS & IDEAS</b>
+01 › Intro to AI — understand its core potential.
+02 › Top AI Apps — pick the right tool for the job.
+03 › Idea Treasury — generate fresh content concepts.
+04 › Prompt Engineering — master precise AI instructions.
+
+<tg-emoji emoji-id="5235837920081887219">📸</tg-emoji> <b>PHOTO & VISUAL CREATION</b>
+05 › Poses & Camera Angles — compose stunning shots.
+06 › Format Secrets — choose the optimal aspect ratio & format.
+07 › AI Photoshoot — generate studio-quality photos.
+08 › Animation World — craft cartoon and 3D styles.
+
+<tg-emoji emoji-id="5256131095094652290">🎯</tg-emoji> <b>INSTAGRAM & AUDIENCE</b>
+09 › Instagram Profile — organize and design an attractive profile.
+10 › Target Audience — define who your content is for.
+
+<tg-emoji emoji-id="5375464961822695044">🎬</tg-emoji> <b>AI VIDEO & ANIMATION</b>
+11 › Custom Gem Bot — set up a specialized AI assistant.
+12 › Flow AI Video — turn your imagination into dynamic motion.
+13 › Talking Objects — give voice and character to everyday objects.
+14 › Cartoon Videos — produce animated storytelling videos.
+15 › Commercial Ads — showcase products through compelling video ads.
+
+<tg-emoji emoji-id="5188481279963715781">🚀</tg-emoji> <b>FROM EDITING TO MONETIZATION</b>
+16 › CapCut Editing — edit, time, and polish your cuts.
+17 › Instagram Upload — publish high-res content without quality loss.
+18 › Vintage Photo Restoration — revive old memories with AI.
+19 › AI Music — generate soundtracks and sound design.
+20 › Portfolio & Pricing — package your works and price your services.
+
+<tg-emoji emoji-id="6283073379184415506">🎁</tg-emoji> <b>BONUS</b>
+18 Months of Gemini AI Pro (5 TB Cloud) included!
+
+<tg-emoji emoji-id="5197288647275071607">🛡</tg-emoji> <b>DELIVERY</b>
+Instant personal invite link to the private channel upon payment.
+
+<tg-emoji emoji-id="5231102735817918643">👇</tg-emoji> Choose your payment method below to get started!`;
 
 /** Create the course catalog entry once and keep its contractual price/order stable. */
 async function ensureCourseCatalog(activate = false) {
@@ -1236,7 +1364,7 @@ async function showProduct(ctx: Context, id: number, back: string) {
 
   const pt = await pick3(p.titleRu, p.titleEn, p.titleUz, lang);
   const pd = await pick3(p.descRu ?? "", p.descEn, p.descUz, lang);
-  const plainDesc = pd?.trim() ? stripTags(pd.trim()) : "";
+  const plainDesc = pd?.trim() ? stripRichText(pd.trim()) : "";
   const emojiStr = p.emoji || "✨";
 
   let text = "";
@@ -1437,6 +1565,8 @@ async function buildQtyChooser(
   const kb = new InlineKeyboard();
   if (course) {
     // Course access is sold per person and always creates exactly one link.
+    const detailsLabel = lang === "uz" ? "ℹ️ Batafsil dastur (20 ta dars)" : lang === "ru" ? "ℹ️ Подробная программа (20 уроков)" : "ℹ️ Full Curriculum (20 Lessons)";
+    kb.text(detailsLabel, `cfull:${v.id}:${back}`).row();
   } else if (starStep) {
     kb.text("−50", `q:${v.id}:${qty - 50}:${back}`)
       .text("−10", `q:${v.id}:${qty - 10}:${back}`)
@@ -1474,8 +1604,8 @@ async function buildQtyChooser(
   kb.text(t(lang, "back"), siblings > 1 ? `p:${v.plan.product.id}:${back}` : `m:${back}`);
 
   const pd = await pick3(v.plan.product.descRu ?? "", v.plan.product.descEn, v.plan.product.descUz, lang);
-  const descFull = course ? (pd?.trim() ?? "") : (pd?.trim() ? stripTags(pd.trim()) : "");
-  const desc = course ? descFull : (descFull.length > 380 ? `${descFull.slice(0, 380)}…` : descFull);
+  const formattedDesc = pd?.trim() ? tgHtml(formatRichText(pd.trim())) : "";
+  const desc = course ? formattedDesc : safeTruncateHtml(formattedDesc, 600);
   const offers = describeBulk(unitPrice, deal.tiers, deal.bonuses, (n) => money(n, lang));
 
   const flashBlock = promo && flashPct > 0
@@ -1486,7 +1616,7 @@ async function buildQtyChooser(
 
   const text =
     `${head} <b>${esc(title)}</b>\n` +
-    (desc ? `\n${course ? desc : esc(desc)}\n` : "") +
+    (desc ? `\n${desc}\n` : "") +
     (flashBlock ? `\n${flashBlock}` : "") +
     (vipLabel ? `\n💎 <b>${esc(vipLabel)}</b>` : "") +
     (course ? "" : `\n${t(lang, "price_each", { v: unitPrice > 0 ? money(unitPrice, lang) : t(lang, "free") })}`) +
@@ -5461,6 +5591,14 @@ bot.on("callback_query:data", async (ctx) => {
     if (tag === "m") { const page = Number(rest[0]) || 0; const sort = (SORTS.includes(rest[1] as Sort) ? rest[1] : "all") as Sort; await ctx.answerCallbackQuery().catch(() => {}); return showMenu(ctx, page, sort, true); }
     if (tag === "p") return showProduct(ctx, Number(rest[0]), `${Number(rest[1]) || 0}:${rest[2] ?? "all"}`);
     if (tag === "b") return showQtyChooser(ctx, Number(rest[0]), 1, `${rest[1] ?? "0"}:${rest[2] ?? "all"}`, true, true);
+    if (tag === "cfull") {
+      await ctx.answerCallbackQuery().catch(() => {});
+      const vid = Number(rest[0]);
+      const back = rest.slice(1).join(":") || "0:all";
+      const fullText = lang === "uz" ? COURSE_DESC_FULL_UZ : lang === "ru" ? COURSE_DESC_FULL_RU : COURSE_DESC_FULL_EN;
+      const fullKb = new InlineKeyboard().text(lang === "uz" ? "📷 Kartochkaga qaytish" : lang === "ru" ? "📷 Вернуться к карточке" : "📷 Back to Card", `b:${vid}:${back}`);
+      return sendOrEdit(ctx, fullText, { reply_markup: fullKb });
+    }
     if (tag === "q") return showQtyChooser(ctx, Number(rest[0]), Number(rest[1]) || 1, `${rest[2] ?? "0"}:${rest[3] ?? "all"}`, true);
     if (tag === "qi") { pending.set(String(ctx.from?.id), { type: "qty", variantId: Number(rest[0]), back: `${rest[1] ?? "0"}:${rest[2] ?? "all"}` }); await ctx.answerCallbackQuery().catch(() => {}); return ctx.reply(t(lang, "enter_qty_msg")); }
     if (tag === "bc") return doBuy(ctx, Number(rest[0]), Number(rest[1]) || 1);

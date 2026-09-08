@@ -4,6 +4,12 @@ import {
   registerEmojiProvider,
   type EmojiConfig,
 } from "@/lib/emoji/renderer";
+import {
+  formatRichText,
+  tgHtml,
+  stripRichText,
+  safeTruncateHtml,
+} from "@/lib/emoji/rich-text";
 
 const base: EmojiConfig = {
   premiumEmojiCode: null,
@@ -69,3 +75,77 @@ describe("graceful fallback (never a broken image)", () => {
     ).toBe("image");
   });
 });
+
+describe("rich-text formatting for Telegram custom emoji", () => {
+  it("converts [emoji:ID:fallback] to native <tg-emoji> tag", () => {
+    const raw = "[emoji:5372917041193828849:🚀] SUBHUB AI KURS";
+    expect(formatRichText(raw)).toBe(
+      '<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> SUBHUB AI KURS',
+    );
+  });
+
+  it("converts [emoji:ID] with default fallback ✨", () => {
+    const raw = "[emoji:5372917041193828849] Title";
+    expect(formatRichText(raw)).toBe(
+      '<tg-emoji emoji-id="5372917041193828849">✨</tg-emoji> Title',
+    );
+  });
+
+  it("converts reseller {ce:ID:fallback} tokens", () => {
+    const raw = "{ce:5467512909909214089:🎓} 20 ta dars";
+    expect(formatRichText(raw)).toBe(
+      '<tg-emoji emoji-id="5467512909909214089">🎓</tg-emoji> 20 ta dars',
+    );
+  });
+
+  it("converts compact :emoji:ID: syntax", () => {
+    const raw = ":emoji:5927026418616636353: AI Asoslari";
+    expect(formatRichText(raw)).toBe(
+      '<tg-emoji emoji-id="5927026418616636353">✨</tg-emoji> AI Asoslari',
+    );
+  });
+
+  it("normalizes <tg-emoji id='...'> to emoji-id", () => {
+    const raw = '<tg-emoji id="5235837920081887219">📸</tg-emoji>';
+    expect(formatRichText(raw)).toBe(
+      '<tg-emoji emoji-id="5235837920081887219">📸</tg-emoji>',
+    );
+  });
+});
+
+describe("tgHtml safe Telegram HTML escaping & tag preservation", () => {
+  it("escapes naked & and < while preserving <tg-emoji> and <b>", () => {
+    const input = '<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> <b>AI & Design</b> <unknown>';
+    const output = tgHtml(input);
+    expect(output).toBe(
+      '<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> <b>AI &amp; Design</b> &lt;unknown&gt;',
+    );
+  });
+
+  it("preserves links with href", () => {
+    const input = '<a href="https://t.me/subhub">SubHub Channel</a>';
+    expect(tgHtml(input)).toBe(input);
+  });
+});
+
+describe("stripRichText plain-text fallback extraction", () => {
+  it("extracts clean emojis and drops HTML tags", () => {
+    const input = '<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> <b>Course</b> [emoji:5467512909909214089:🎓]';
+    expect(stripRichText(input)).toBe("🚀 Course 🎓");
+  });
+});
+
+describe("safeTruncateHtml", () => {
+  it("does not truncate if under max length", () => {
+    const input = '<b>Short</b>';
+    expect(safeTruncateHtml(input, 50)).toBe('<b>Short</b>');
+  });
+
+  it("truncates cleanly without broken tags if over max length", () => {
+    const input = '<b>Very long description with <tg-emoji emoji-id="123">🚀</tg-emoji></b>';
+    const truncated = safeTruncateHtml(input, 20);
+    expect(truncated).not.toContain('<tg-emoji');
+    expect(truncated.endsWith('…')).toBe(true);
+  });
+});
+
