@@ -25,43 +25,55 @@ export async function saveApiSourceAction(formData: FormData) {
   if (!name || !baseUrl) return;
 
   if (id) {
-    const data: { name: string; baseUrl: string; format: string; isActive: boolean; apiKey?: string } = {
+    const data: { name: string; baseUrl: string; format: string; isActive?: boolean; apiKey?: string } = {
       name,
       baseUrl,
       format,
-      isActive,
     };
     if (apiKey) data.apiKey = apiKey; // blank = keep existing key
+    if (formData.has("isActive")) {
+      data.isActive = formData.get("isActive") === "on" || formData.get("isActive") === "1";
+    }
     await botDb.apiSource.update({ where: { id }, data });
   } else {
     let slug = slugify(str(formData.get("slug")) || name);
     const base = slug;
     let i = 1;
     while (await botDb.apiSource.findUnique({ where: { slug } })) slug = `${base}_${i++}`;
-    await botDb.apiSource.create({ data: { slug, name, baseUrl, apiKey, format, isActive } });
+    await botDb.apiSource.create({ data: { slug, name, baseUrl, apiKey, format, isActive: true } });
   }
   await audit({ adminId: admin.id, action: "bot.apisource.save", entityType: "ApiSource", entityId: String(id || name) });
   revalidatePath("/admin/bot-apis");
   revalidatePath("/admin/bot-import");
+  revalidatePath("/admin/bot-products");
 }
 
 export async function toggleApiSourceAction(formData: FormData) {
   const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
   const id = Number(formData.get("id"));
-  const active = formData.get("active") === "1";
-  await botDb.apiSource.update({ where: { id }, data: { isActive: active } });
-  await audit({ adminId: admin.id, action: "bot.apisource.toggle", entityType: "ApiSource", entityId: String(id) });
+  if (!id) return;
+  const current = await botDb.apiSource.findUnique({ where: { id } });
+  if (!current) return;
+
+  const activeRaw = formData.get("active");
+  const next = activeRaw !== null ? (activeRaw === "1" || activeRaw === "true" || activeRaw === "on") : !current.isActive;
+
+  await botDb.apiSource.update({ where: { id }, data: { isActive: next } });
+  await audit({ adminId: admin.id, action: "bot.apisource.toggle", entityType: "ApiSource", entityId: String(id), metadata: { isActive: next } });
   revalidatePath("/admin/bot-apis");
   revalidatePath("/admin/bot-import");
+  revalidatePath("/admin/bot-products");
 }
 
 export async function deleteApiSourceAction(formData: FormData) {
   const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
   const id = Number(formData.get("id"));
+  if (!id) return;
   await botDb.apiSource.delete({ where: { id } });
   await audit({ adminId: admin.id, action: "bot.apisource.delete", entityType: "ApiSource", entityId: String(id) });
   revalidatePath("/admin/bot-apis");
   revalidatePath("/admin/bot-import");
+  revalidatePath("/admin/bot-products");
 }
 
 /**

@@ -112,21 +112,34 @@ export default async function BotApisPage() {
                       />
                     </div>
                   </div>
-                  <div className="flex flex-wrap gap-2">
+                  <div>
                     <button className="btn-primary text-sm">💾 Сохранить ключ / URL</button>
-                    <form action={toggleApiSourceAction} className="inline">
-                      <input type="hidden" name="id" value={s.id} />
-                      <input type="hidden" name="active" value={s.isActive ? "0" : "1"} />
-                      <button className="btn-secondary text-sm">
-                        {s.isActive ? "⏸ Отключить" : "▶ Включить"}
-                      </button>
-                    </form>
-                    <form action={deleteApiSourceAction} className="inline">
-                      <input type="hidden" name="id" value={s.id} />
-                      <button className="btn-danger text-sm">🗑 Удалить источник</button>
-                    </form>
                   </div>
                 </form>
+
+                {/* Actions row: Toggle active & Delete (STANDALONE forms, NOT nested!) */}
+                <div className="flex flex-wrap items-center gap-2 pt-3 border-t">
+                  <form action={toggleApiSourceAction}>
+                    <input type="hidden" name="id" value={s.id} />
+                    <input type="hidden" name="active" value={s.isActive ? "0" : "1"} />
+                    <button
+                      type="submit"
+                      className={`text-sm px-3 py-1.5 rounded-lg font-medium transition-colors ${
+                        s.isActive
+                          ? "bg-warning/15 text-warning hover:bg-warning/25 border border-warning/30"
+                          : "bg-success/15 text-success hover:bg-success/25 border border-success/30"
+                      }`}
+                    >
+                      {s.isActive ? "⏸ Отключить API поставщика" : "▶ Включить API поставщика"}
+                    </button>
+                  </form>
+                  <form action={deleteApiSourceAction}>
+                    <input type="hidden" name="id" value={s.id} />
+                    <button type="submit" className="btn-danger text-sm px-3 py-1.5">
+                      🗑 Удалить источник
+                    </button>
+                  </form>
+                </div>
 
                 {/* Migrate products to another source */}
                 {otherSources.length > 0 && linkedCount > 0 && (
