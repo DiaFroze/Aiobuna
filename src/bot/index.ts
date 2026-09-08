@@ -34,7 +34,6 @@ import {
   tgHtml,
   escHtml,
   stripRichText,
-  safeTruncateHtml,
   stripHtml,
   resolveProductPremiumEmoji,
   sanitizeTextCustomEmojis,
@@ -1650,10 +1649,8 @@ async function buildQtyChooser(
   let desc = "";
   if (course) {
     desc = formattedDesc || (lang === "uz" ? COURSE_DESC_UZ : lang === "ru" ? COURSE_DESC_RU : COURSE_DESC_EN);
-  } else if (hasMedia) {
-    desc = safeTruncateHtml(formattedDesc, 650);
   } else {
-    desc = safeTruncateHtml(formattedDesc, 3000);
+    desc = formattedDesc;
   }
   const offers = describeBulk(unitPrice, deal.tiers, deal.bonuses, (n) => money(n, lang));
 

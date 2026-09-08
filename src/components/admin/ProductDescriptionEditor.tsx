@@ -30,18 +30,17 @@ export function ProductDescriptionEditor({
 }: ProductDescriptionEditorProps) {
   const [descRu, setDescRu] = useState(initialDescRu);
   const [descUz, setDescUz] = useState(initialDescUz);
-  const [descEn, setDescEn] = useState(initialDescEn);
-  const [activeLang, setActiveLang] = useState<"ru" | "uz" | "en">("uz");
+  const [descEn] = useState(initialDescEn);
+  const [activeLang, setActiveLang] = useState<"ru" | "uz">("uz");
 
   const [customId, setCustomId] = useState("");
   const [customChar, setCustomChar] = useState("✨");
 
   const ruRef = useRef<HTMLTextAreaElement>(null);
   const uzRef = useRef<HTMLTextAreaElement>(null);
-  const enRef = useRef<HTMLTextAreaElement>(null);
 
   const insertText = (snippet: string) => {
-    const targetRef = activeLang === "ru" ? ruRef : activeLang === "uz" ? uzRef : enRef;
+    const targetRef = activeLang === "ru" ? ruRef : uzRef;
     const textarea = targetRef.current;
     if (!textarea) return;
 
@@ -51,8 +50,7 @@ export function ProductDescriptionEditor({
     const nextVal = currentVal.slice(0, start) + snippet + currentVal.slice(end);
 
     if (activeLang === "ru") setDescRu(nextVal);
-    else if (activeLang === "uz") setDescUz(nextVal);
-    else setDescEn(nextVal);
+    else setDescUz(nextVal);
 
     setTimeout(() => {
       textarea.focus();
@@ -73,7 +71,7 @@ export function ProductDescriptionEditor({
   };
 
   const handleWrapTag = (tag: string) => {
-    const targetRef = activeLang === "ru" ? ruRef : activeLang === "uz" ? uzRef : enRef;
+    const targetRef = activeLang === "ru" ? ruRef : uzRef;
     const textarea = targetRef.current;
     if (!textarea) return;
 
@@ -110,15 +108,6 @@ export function ProductDescriptionEditor({
               }`}
             >
               RU
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveLang("en")}
-              className={`px-2 py-0.5 rounded text-xs font-medium transition-colors ${
-                activeLang === "en" ? "bg-primary text-primary-foreground" : "bg-surface-2 text-muted hover:text-foreground"
-              }`}
-            >
-              EN
             </button>
           </div>
         </div>
@@ -240,24 +229,8 @@ export function ProductDescriptionEditor({
         </div>
       </div>
 
-      {/* English description (optional / collapsed) */}
-      <details className="rounded-lg border bg-surface-2/20 p-3 text-xs">
-        <summary className="cursor-pointer text-muted hover:text-foreground font-medium">
-          🌐 Описание на английском (EN) — {descEn.length} симв.
-        </summary>
-        <div className="mt-2">
-          <textarea
-            ref={enRef}
-            name="descEn"
-            value={descEn}
-            onFocus={() => setActiveLang("en")}
-            onChange={(e) => setDescEn(e.target.value)}
-            rows={6}
-            className="input text-sm font-mono leading-relaxed w-full"
-            placeholder="English description..."
-          />
-        </div>
-      </details>
+      {/* Hidden input to preserve descEn if already set */}
+      <input type="hidden" name="descEn" value={descEn} />
     </div>
   );
 }
