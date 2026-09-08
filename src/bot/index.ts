@@ -118,6 +118,9 @@ function resolveProductBanner(bannerRef: string | null | undefined): string | In
   }
   const local = mediaAssetFile(ref);
   if (local) return local;
+  if (/\.(jpe?g|png|webp|gif|mp4|mov)$/i.test(ref) || ref.includes("/") || ref.includes("\\")) {
+    return null;
+  }
   return ref;
 }
 const promoInstructionsFile = () => mediaAssetFile("promo-instructions.mp4");
@@ -1597,7 +1600,7 @@ async function buildQtyChooser(
   kb.text(t(lang, "back"), siblings > 1 ? `p:${v.plan.product.id}:${back}` : `m:${back}`);
 
   const photo = course
-    ? (resolveProductBanner(v.plan.product.bannerFileId) || courseBanner())
+    ? (courseBanner() || resolveProductBanner(v.plan.product.bannerFileId))
     : resolveProductBanner(v.plan.product.bannerFileId);
   const hasMedia = Boolean(photo || v.plan.product.videoFileId);
 

@@ -128,16 +128,34 @@ export default async function BotProductEditPage({ params }: { params: { id: str
         <p className="text-sm text-muted">
           Баннер крепится сверху сообщения при открытии карточки в Telegram-боте.
         </p>
-        {product.bannerFileId ? (
-          <div className="flex items-center justify-between p-3 rounded-lg border bg-surface-2/40">
-            <div>
-              <div className="text-xs font-semibold text-success">✅ Баннер прикреплён</div>
-              <div className="text-xs font-mono text-muted break-all mt-0.5">{product.bannerFileId}</div>
+        {product.bannerFileId || product.code === "ai_darslik" ? (
+          <div className="space-y-3 p-3 rounded-lg border bg-surface-2/40">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-xs font-semibold text-success">✅ Баннер прикреплён</div>
+                <div className="text-xs font-mono text-muted break-all mt-0.5">
+                  {product.bannerFileId || "course-banner.jpg (встроенный)"}
+                </div>
+              </div>
+              {product.bannerFileId && (
+                <form action={deleteBannerAction}>
+                  <input type="hidden" name="productId" value={product.id} />
+                  <button className="btn-danger text-xs px-3">Удалить баннер</button>
+                </form>
+              )}
             </div>
-            <form action={deleteBannerAction}>
-              <input type="hidden" name="productId" value={product.id} />
-              <button className="btn-danger text-xs px-3">Удалить баннер</button>
-            </form>
+            <div className="relative rounded overflow-hidden border border-border/40 max-w-sm bg-black/20">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={
+                  product.bannerFileId?.startsWith("http")
+                    ? product.bannerFileId
+                    : `/banners/${product.bannerFileId || "course-banner.jpg"}`
+                }
+                alt="Превью баннера"
+                className="w-full h-auto object-contain max-h-48"
+              />
+            </div>
           </div>
         ) : (
           <div className="text-xs text-muted">Баннер пока не загружен. Можно загрузить файл ниже или ввести file_id в форме выше.</div>

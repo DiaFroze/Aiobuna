@@ -437,6 +437,12 @@ export async function uploadBannerAction(formData: FormData) {
   fs.writeFileSync(path.join(publicDir, filename), buffer);
   fs.writeFileSync(path.join(botAssetsDir, filename), buffer);
 
+  const p = await botDb.product.findUnique({ where: { id: productId }, select: { code: true } });
+  if (p?.code === "ai_darslik" || productId === 8) {
+    fs.writeFileSync(path.join(publicDir, "course-banner.jpg"), buffer);
+    fs.writeFileSync(path.join(botAssetsDir, "course-banner.jpg"), buffer);
+  }
+
   let fileId = filename;
 
   // Optional: Also try to upload to Telegram to get a file_id if bot credentials are valid
