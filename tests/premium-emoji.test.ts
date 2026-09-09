@@ -308,3 +308,33 @@ describe("messageEntitiesToHtml", () => {
   });
 });
 
+import { btnVariants } from "@/bot/i18n";
+
+describe("btnVariants apostrophe normalization", () => {
+  it("generates both curly and straight apostrophe variants for Uzbek shop button", () => {
+    const variants = btnVariants("btn_shop");
+    expect(variants).toContain("🛍 Do‘kon");
+    expect(variants).toContain("Do‘kon");
+    expect(variants).toContain("🛍 Do'kon");
+    expect(variants).toContain("Do'kon");
+    expect(variants).toContain("do'kon");
+    expect(variants).toContain("do‘kon");
+  });
+
+  it("generates apostrophe variants for other Uzbek buttons with apostrophes", () => {
+    const variants = btnVariants("btn_instructions");
+    expect(variants).toContain("Yo'riqnoma");
+    expect(variants).toContain("yo'riqnoma");
+    expect(variants).toContain("Yo‘riqnoma");
+  });
+
+  it("includes Russian and English button variants", () => {
+    const variants = btnVariants("btn_shop");
+    expect(variants).toContain("🛍 Магазин");
+    expect(variants).toContain("Магазин");
+    expect(variants).toContain("🛍 Shop");
+    expect(variants).toContain("Shop");
+  });
+});
+
+

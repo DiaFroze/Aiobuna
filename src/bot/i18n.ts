@@ -612,12 +612,37 @@ export const DISCLAIMER: Record<Lang, string> = {
   uz: "⚠️ <b>Diqqat:</b> narxlar past, shuning uchun barcha mahsulotlar «qanday bo‘lsa shunday» sotiladi — <b>kafolatsiz va almashtirishsiz</b>. Mahsulot olingach, pul qaytarilmaydi va e’tiroz qabul qilinmaydi.",
 };
 
+const UZ_APOSTROPHES = ["'", "‘", "’", "ʻ", "ʼ", "`"];
+
+function expandApostrophes(str: string): string[] {
+  if (!/['‘'ʻʼ`]/.test(str)) return [str];
+  const out = new Set<string>();
+  out.add(str);
+  for (const ap of UZ_APOSTROPHES) {
+    out.add(str.replace(/['‘'ʻʼ`]/g, ap));
+  }
+  return [...out];
+}
+
 // All localised variants of a reply-keyboard label (for bot.hears matching).
 // When a premium icon is attached to a button, its plain leading emoji is
 // stripped from the label — so the emoji-less form must match too, otherwise the
 // tap arrives as ordinary text and no handler fires.
+// Also covers all apostrophe permutations (' vs ‘ vs ’ vs ʻ vs ʼ) and case variations
+// so Uzbek mobile keyboard input always matches reliably.
 export function btnVariants(key: string): string[] {
   const labels = LANGS.map((l) => DICTS[l][key]).filter(Boolean);
-  const bare = labels.map((s) => s.replace(/^\p{Extended_Pictographic}️?\s*/u, ""));
-  return [...new Set([...labels, ...bare])];
+  const bare = labels.map((s) => s.replace(/^[\p{Extended_Pictographic}\u2700-\u27BF\u2600-\u26FF]️?\s*/u, ""));
+  const all = [...new Set([...labels, ...bare])];
+  const result = new Set<string>();
+  for (const item of all) {
+    result.add(item);
+    result.add(item.toLowerCase());
+    for (const v of expandApostrophes(item)) {
+      result.add(v);
+      result.add(v.toLowerCase());
+    }
+  }
+  return [...result];
 }
+

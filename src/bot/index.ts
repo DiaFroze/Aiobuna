@@ -190,23 +190,34 @@ async function sendOrEdit(ctx: Context, text: string, opts: SendOrEditOpts = {})
     return;
   }
 
-  // No media: try text edit → caption edit → delete+resend, in that order.
+  // No media: if current message has media (photo/video), Telegram cannot edit it into
+  // a text message, and editing caption would inappropriately keep an unrelated photo
+  // (or fail if length > 1024). Safely delete and reply fresh message.
   if (chatId && messageId) {
-    try {
-      await ctx.api.editMessageText(chatId, messageId, text, {
-        parse_mode: "HTML",
-        reply_markup: kb,
-        link_preview_options: opts.link_preview_options,
-      });
-      return;
-    } catch {}
-    try {
-      await ctx.api.editMessageCaption(chatId, messageId, { caption: text, parse_mode: "HTML", reply_markup: kb });
-      return;
-    } catch {}
+    const currentMsg = ctx.callbackQuery?.message;
+    const hasMedia = currentMsg && ("photo" in currentMsg || "video" in currentMsg || "document" in currentMsg);
+    if (!hasMedia) {
+      try {
+        await ctx.api.editMessageText(chatId, messageId, text, {
+          parse_mode: "HTML",
+          reply_markup: kb,
+          link_preview_options: opts.link_preview_options,
+        });
+        return;
+      } catch {}
+    }
     await ctx.api.deleteMessage(chatId, messageId).catch(() => {});
   }
-  await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: opts.link_preview_options }).catch(() => {});
+  try {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: opts.link_preview_options });
+  } catch (err) {
+    console.error("[bot] sendOrEdit HTML reply failed, falling back to plain text:", (err as Error)?.message || err);
+    try {
+      await ctx.reply(stripHtml(text), { reply_markup: kb, link_preview_options: opts.link_preview_options });
+    } catch (err2) {
+      console.error("[bot] sendOrEdit plain text reply also failed:", (err2 as Error)?.message || err2);
+    }
+  }
 }
 
 const token = process.env.TELEGRAM_BOT_TOKEN ?? "";
@@ -522,26 +533,28 @@ const ICON_TEXTS = new Set(LANGS.map((l) => t(l, "refresh"))); // 🔄 animated 
 // the premium back-arrow icon (and their plain ⬅️ stripped) in the API
 // middleware below — one place instead of ~40 call sites.
 const BACK_KEYS = ["back", "back_to_list", "to_shop"] as const;
-const BACK_TEXTS = new Set(LANGS.flatMap((l) => BACK_KEYS.map((k) => t(l, k))));
-const SUPPORT_TEXTS = new Set(LANGS.map((l) => t(l, "btn_support")));
-const REFER_TEXTS = new Set(LANGS.map((l) => t(l, "btn_refer")));
-const GIFTS_TEXTS = new Set(LANGS.map((l) => t(l, "btn_freebies")));
-const PROFILE_TEXTS = new Set(LANGS.map((l) => t(l, "btn_profile")));
-const ORDERS_TEXTS = new Set(LANGS.map((l) => t(l, "btn_orders")));
-const SHOP_TEXTS = new Set(LANGS.map((l) => t(l, "btn_shop")));
+const BACK_TEXTS = new Set(BACK_KEYS.flatMap((k) => btnVariants(k)));
+const SUPPORT_TEXTS = new Set(btnVariants("btn_support"));
+const REFER_TEXTS = new Set(btnVariants("btn_refer"));
+const GIFTS_TEXTS = new Set(btnVariants("btn_freebies"));
+const PROFILE_TEXTS = new Set(btnVariants("btn_profile"));
+const ORDERS_TEXTS = new Set(btnVariants("btn_orders"));
+const SHOP_TEXTS = new Set(btnVariants("btn_shop"));
 
 // Premium icon for a button label, or undefined if it isn't one of ours.
 // Bot API 9.4 supports `icon_custom_emoji_id` on BOTH inline and reply-keyboard
 // buttons, so this is applied to either kind in the API middleware below.
 function premiumIconFor(text: string): string | undefined {
-  if (buttonEmoji && ICON_TEXTS.has(text)) return buttonEmoji;
-  if (BACK_TEXTS.has(text)) return backButtonEmoji;
-  if (SUPPORT_TEXTS.has(text)) return supportButtonEmoji;
-  if (REFER_TEXTS.has(text)) return referButtonEmoji;
-  if (GIFTS_TEXTS.has(text)) return giftsButtonEmoji;
-  if (PROFILE_TEXTS.has(text)) return profileButtonEmoji;
-  if (ORDERS_TEXTS.has(text)) return ordersButtonEmoji;
-  if (SHOP_TEXTS.has(text)) return shopButtonEmoji;
+  const norm = text.trim();
+  const lower = norm.toLowerCase();
+  if (buttonEmoji && (ICON_TEXTS.has(norm) || ICON_TEXTS.has(lower))) return buttonEmoji;
+  if (BACK_TEXTS.has(norm) || BACK_TEXTS.has(lower)) return backButtonEmoji;
+  if (SUPPORT_TEXTS.has(norm) || SUPPORT_TEXTS.has(lower)) return supportButtonEmoji;
+  if (REFER_TEXTS.has(norm) || REFER_TEXTS.has(lower)) return referButtonEmoji;
+  if (GIFTS_TEXTS.has(norm) || GIFTS_TEXTS.has(lower)) return giftsButtonEmoji;
+  if (PROFILE_TEXTS.has(norm) || PROFILE_TEXTS.has(lower)) return profileButtonEmoji;
+  if (ORDERS_TEXTS.has(norm) || ORDERS_TEXTS.has(lower)) return ordersButtonEmoji;
+  if (SHOP_TEXTS.has(norm) || SHOP_TEXTS.has(lower)) return shopButtonEmoji;
   return undefined;
 }
 
@@ -5616,14 +5629,51 @@ async function buyMethod(ctx: Context, id: number) {
 }
 
 bot.hears(btnVariants("btn_methods"), (ctx) => showMethods(ctx));
-bot.hears(btnVariants("btn_shop"), (ctx) => showMenu(ctx, 0, "all", false));
+bot.hears(
+  [...btnVariants("btn_shop"), /^(?:🛍\s*)?(?:do['‘'ʻʼ`]kon|магазин|shop)$/i],
+  (ctx) => showMenu(ctx, 0, "all", false),
+);
 bot.hears(btnVariants("btn_freebies"), (ctx) => showGifts(ctx));
-bot.hears(btnVariants("btn_orders"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = await ordersView(u.lang, u.id); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => ctx.reply(stripTags(text), { reply_markup: kb }).catch(() => {})); });
-bot.hears(btnVariants("btn_profile"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = await profileView(u); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
-bot.hears(btnVariants("btn_instructions"), showInstructions);
-bot.hears(btnVariants("btn_refer"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = referView(ctx, u); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); });
-bot.hears(btnVariants("btn_support"), async (ctx) => { const u = await getUser(ctx); const { text, kb } = await supportView(u.lang); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } }); });
-bot.hears(btnVariants("btn_language"), (ctx) => showLangPicker(ctx, false));
+bot.hears(
+  [...btnVariants("btn_orders"), /^(?:🧾\s*)?(?:buyurtmalar|заказы|orders)$/i],
+  async (ctx) => {
+    const u = await getUser(ctx);
+    const { text, kb } = await ordersView(u.lang, u.id);
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => ctx.reply(stripTags(text), { reply_markup: kb }).catch(() => {}));
+  },
+);
+bot.hears(
+  [...btnVariants("btn_profile"), /^(?:👤\s*)?(?:profil|профиль|profile)$/i],
+  async (ctx) => {
+    const u = await getUser(ctx);
+    const { text, kb } = await profileView(u);
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+  },
+);
+bot.hears(
+  [...btnVariants("btn_instructions"), /^(?:📖\s*)?(?:yo['‘'ʻʼ`]riqnoma|инструкция|instructions)$/i],
+  showInstructions,
+);
+bot.hears(
+  [...btnVariants("btn_refer"), /^(?:🤝\s*)?(?:do['‘'ʻʼ`]stni taklif qilish|taklif qilish|пригласить|invite)$/i],
+  async (ctx) => {
+    const u = await getUser(ctx);
+    const { text, kb } = referView(ctx, u);
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+  },
+);
+bot.hears(
+  [...btnVariants("btn_support"), /^(?:🆘\s*)?(?:yordam|поддержка|support)$/i],
+  async (ctx) => {
+    const u = await getUser(ctx);
+    const { text, kb } = await supportView(u.lang);
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } });
+  },
+);
+bot.hears(
+  [...btnVariants("btn_language"), /^(?:🌐\s*)?(?:til|язык|language)$/i],
+  (ctx) => showLangPicker(ctx, false),
+);
 
 // ---------- inline callbacks ----------
 bot.on("callback_query:data", async (ctx) => {
@@ -6567,7 +6617,7 @@ function isPremiumDecorationError(error: unknown): boolean {
   const description = error && typeof error === "object" && "description" in error
     ? String((error as { description?: unknown }).description ?? "")
     : error instanceof Error ? error.message : String(error ?? "");
-  return /custom[_ ]emoji|icon_custom_emoji|button_type_invalid/i.test(description);
+  return /custom[_ ]emoji|icon_custom_emoji|button_type_invalid|can't use custom emoji|bot_restricted|can't parse.*keyboard|wrong type of the field/i.test(description);
 }
 
 function hasInputFile(obj: any): boolean {
