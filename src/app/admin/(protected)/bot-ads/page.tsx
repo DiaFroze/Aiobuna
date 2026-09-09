@@ -4,6 +4,16 @@ import { PageHeader } from "@/components/admin/ui";
 export const dynamic = "force-dynamic";
 
 export default async function BotAdsPage() {
+  // Keep the report usable during a rolling deploy even if the web process
+  // receives a request before the bot's startup schema guard has completed.
+  await botDb.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS "BotAdStart" (
+    "userId" INTEGER NOT NULL REFERENCES "BotUser"("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    "source" TEXT NOT NULL,
+    "isNewUser" BOOLEAN NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "BotAdStart_pkey" PRIMARY KEY ("userId", "source")
+  )`);
+  await botDb.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "BotAdStart_createdAt_idx" ON "BotAdStart"("createdAt")`);
   const registrations = await botDb.$queryRaw<Array<{ day: string; users: bigint }>>`
     SELECT to_char("createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Tashkent', 'YYYY-MM-DD') AS day,
       COUNT(*) AS users FROM "BotUser"
