@@ -10,6 +10,7 @@ try {
 import { Bot, InlineKeyboard, Keyboard, InputFile, type Context } from "grammy";
 import type { MessageEntity, UserFromGetMe } from "grammy/types";
 import { db } from "./db";
+import { adSource } from "../lib/domain/ad-attribution";
 import { sourceOrder, envVexSource, envBuyerSource, envQamifySource, sourceBalance, type Source } from "../lib/supplier";
 import { sortSuppliersByStrategy, type SupplierCandidate, type RoutingStrategy } from "../lib/domain/supplier-routing";
 import { geminiTranslate } from "../lib/gemini";
@@ -3678,6 +3679,15 @@ bot.command("start", async (ctx) => {
   // actually pass the subscription gate below.
   const user = await getUser(ctx, payload || undefined);
   const tgId = user.tgId;
+  const source = adSource(payload);
+  if (source) {
+    // Record an actual Telegram /start before the onboarding gates. The unique
+    // key prevents retries and repeat starts from inflating visitor counts.
+    await db.botAdStart.createMany({
+      data: [{ userId: user.id, source, isNewUser: !existing }],
+      skipDuplicates: true,
+    }).catch(() => console.error("[bot] ad attribution write failed"));
+  }
 
   // Freshly created AND attributed to someone → tell the inviter it landed, so
   // a referral that is still waiting on the channel gate looks like progress
@@ -6633,6 +6643,14 @@ bot.api.config.use(async (prev, method, payload, signal) => {
 // Prisma client itself — no CLI/shell, works with the internal DB URL at runtime.
 // DDL matches `prisma migrate diff` output. Non-fatal: logs and continues.
 async function ensureSchema() {
+  await db.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS "BotAdStart" (
+    "userId" INTEGER NOT NULL REFERENCES "BotUser"("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    "source" TEXT NOT NULL,
+    "isNewUser" BOOLEAN NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "BotAdStart_pkey" PRIMARY KEY ("userId", "source")
+  )`);
+  await db.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "BotAdStart_createdAt_idx" ON "BotAdStart"("createdAt")`);
   const statements = [
     `CREATE TABLE IF NOT EXISTS "UserVariantPrice" (
       "id" SERIAL NOT NULL,

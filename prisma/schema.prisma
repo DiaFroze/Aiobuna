@@ -720,6 +720,18 @@ model BotUser {
   topups     TopUp[]
   customPrices     UserVariantPrice[]
   promoRedemptions PromoRedemption[]
+  adStarts BotAdStart[]
+}
+
+model BotAdStart {
+  userId Int
+  source String
+  user BotUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+  isNewUser Boolean
+  createdAt DateTime @default(now())
+
+  @@id([userId, source])
+  @@index([createdAt])
 }
 
 model StockItem {

@@ -15,6 +15,7 @@ const NAV: { href: string; label: string; icon: string }[] = [
   { href: "/admin/bot-channels", label: "Подписки бота", icon: "📢" },
   { href: "/admin/bot-topups", label: "Пополнения бота", icon: "💳" },
   { href: "/admin/bot-users", label: "Пользователи бота", icon: "👤" },
+  { href: "/admin/bot-ads", label: "Реклама: запуски бота", icon: "📈" },
   { href: "/admin/bot-vip-prices", label: "Индивидуальные цены", icon: "💎" },
   { href: "/admin/bot-promo-codes", label: "Промокоды", icon: "🎟" },
   { href: "/admin/bot-promo", label: "Подарки", icon: "🎁" },
