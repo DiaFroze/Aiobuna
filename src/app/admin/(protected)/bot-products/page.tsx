@@ -1,7 +1,15 @@
 import Link from "next/link";
 import { botDb, botConfigured } from "@/lib/botDb";
 import { PageHeader, Table, EmptyState } from "@/components/admin/ui";
-import { createBotProductAction, deleteBotProductAction, toggleBotProductActiveAction, uploadBannerAction, deleteBannerAction } from "./actions";
+import {
+  createBotProductAction,
+  deleteBotProductAction,
+  toggleBotProductActiveAction,
+  uploadBannerAction,
+  deleteBannerAction,
+  moveBotProductAction,
+  deleteVideoAction,
+} from "./actions";
 
 export const dynamic = "force-dynamic";
 
@@ -35,7 +43,7 @@ export default async function BotProductsPage({
     <div className="space-y-6">
       <PageHeader
         title="Товары бота"
-        subtitle="Каталог, который показывается в Telegram-боте. Изменения применяются в боте сразу."
+        subtitle="Каталог, который показывается в Telegram-боте. Очередь (порядок) и медиа применяются в боте сразу."
       />
 
       {errorMsg && (
@@ -88,40 +96,78 @@ export default async function BotProductsPage({
       {products.length === 0 ? (
         <EmptyState>В боте нет товаров. Добавьте товар вручную формой выше.</EmptyState>
       ) : (
-        <Table head={["", "Название", "Код", "Карточка", "Вариантов", "Активен", ""]}>
-          {products.map((p) => {
+        <Table head={["Очередь", "", "Название", "Код", "Медиа (фото/видео)", "Вариантов", "Активен", ""]}>
+          {products.map((p, idx) => {
             const variants = p.plans.flatMap((pl) => pl.variants);
             const active = variants.filter((v) => v.isActive).length;
             return (
               <tr key={p.id} className="border-b last:border-0">
+                <td className="px-4 py-3">
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-mono text-xs text-muted w-6 font-bold">#{idx + 1}</span>
+                    <div className="flex flex-col gap-0.5">
+                      <form action={moveBotProductAction}>
+                        <input type="hidden" name="id" value={p.id} />
+                        <input type="hidden" name="direction" value="up" />
+                        <button
+                          type="submit"
+                          disabled={idx === 0}
+                          className="px-1.5 py-0.5 text-xs rounded hover:bg-surface-2 disabled:opacity-20 transition"
+                          title="Переместить выше в каталоге"
+                        >
+                          ▲
+                        </button>
+                      </form>
+                      <form action={moveBotProductAction}>
+                        <input type="hidden" name="id" value={p.id} />
+                        <input type="hidden" name="direction" value="down" />
+                        <button
+                          type="submit"
+                          disabled={idx === products.length - 1}
+                          className="px-1.5 py-0.5 text-xs rounded hover:bg-surface-2 disabled:opacity-20 transition"
+                          title="Переместить ниже в каталоге"
+                        >
+                          ▼
+                        </button>
+                      </form>
+                    </div>
+                  </div>
+                </td>
                 <td className="px-4 py-3 text-lg">{p.emoji}</td>
                 <td className="px-4 py-3 font-medium">{p.titleRu}</td>
                 <td className="px-4 py-3 font-mono text-xs text-muted">{p.code}</td>
                 <td className="px-4 py-3">
-                  {p.bannerFileId ? (
-                    <div className="flex items-center gap-2">
-                      <span className="badge bg-success/10 text-success">✅ Есть</span>
-                      <form action={deleteBannerAction}>
+                  <div className="flex flex-col gap-1.5">
+                    {p.bannerFileId ? (
+                      <div className="flex items-center gap-2">
+                        <span className="badge bg-success/10 text-success text-xs">📷 Баннер</span>
+                        <form action={deleteBannerAction}>
+                          <input type="hidden" name="productId" value={p.id} />
+                          <button className="text-danger text-xs hover:underline" title="Удалить баннер">✕</button>
+                        </form>
+                      </div>
+                    ) : (
+                      <form action={uploadBannerAction} encType="multipart/form-data" className="flex items-center gap-1">
                         <input type="hidden" name="productId" value={p.id} />
-                        <button className="text-danger text-xs hover:underline">✕</button>
+                        <input type="file" name="file" accept="image/*" className="text-xs w-20" />
+                        <button className="btn-ghost text-xs" title="Загрузить баннер">📤</button>
                       </form>
-                    </div>
-                  ) : (
-                    <form action={uploadBannerAction} encType="multipart/form-data" className="flex items-center gap-1">
-                      <input type="hidden" name="productId" value={p.id} />
-                      <input type="file" name="file" accept="image/*" className="text-xs w-24" />
-                      <button className="btn-ghost text-xs">📤</button>
-                    </form>
-                  )}
+                    )}
+                    {p.videoFileId && (
+                      <div className="flex items-center gap-2">
+                        <span className="badge bg-primary/10 text-primary text-xs">🎬 Видео</span>
+                        <form action={deleteVideoAction}>
+                          <input type="hidden" name="productId" value={p.id} />
+                          <button className="text-danger text-xs hover:underline" title="Удалить видео">✕</button>
+                        </form>
+                      </div>
+                    )}
+                  </div>
                 </td>
                 <td className="px-4 py-3">
                   {active}/{variants.length}
                 </td>
                 <td className="px-4 py-3">
-                  {/* One click to hide or show the product in the bot. Kept on the
-                      list because this is the lever you reach for in a hurry —
-                      a supplier is down, a wallet is empty — and hunting through
-                      the edit form for a checkbox is too slow for that. */}
                   <form action={toggleBotProductActiveAction}>
                     <input type="hidden" name="id" value={p.id} />
                     <button

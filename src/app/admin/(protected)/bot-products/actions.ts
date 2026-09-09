@@ -497,6 +497,11 @@ export async function updateBotProductAction(formData: FormData) {
     }
   }
 
+  const sortOrderRaw = formData.get("sortOrder");
+  const sortOrder = sortOrderRaw !== null && sortOrderRaw !== undefined ? Math.round(num(sortOrderRaw)) : undefined;
+  const videoFileIdRaw = formData.get("videoFileId");
+  const videoFileId = videoFileIdRaw !== null && videoFileIdRaw !== undefined ? str(videoFileIdRaw) || null : undefined;
+
   await botDb.product.update({
     where: { id },
     data: {
@@ -511,6 +516,8 @@ export async function updateBotProductAction(formData: FormData) {
       descEn: dEn,
       isActive: formData.get("isActive") === "on",
       refDiscount: formData.get("refDiscount") === "on",
+      ...(sortOrder !== undefined ? { sortOrder } : {}),
+      ...(videoFileId !== undefined ? { videoFileId } : {}),
     },
   });
 
@@ -519,7 +526,7 @@ export async function updateBotProductAction(formData: FormData) {
     action: "bot.product.update",
     entityType: "BotProduct",
     entityId: String(id),
-    metadata: { premiumEmoji: premiumEmoji || null, bannerFileId },
+    metadata: { premiumEmoji: premiumEmoji || null, bannerFileId, videoFileId, sortOrder },
   });
   revalidatePath(`/admin/bot-products/${id}`);
   revalidatePath("/admin/bot-products");
@@ -644,3 +651,65 @@ export async function deleteBannerAction(formData: FormData) {
   revalidatePath(`/admin/bot-products/${productId}`);
   revalidatePath("/admin/bot-products");
 }
+
+/** Move a product up or down in the catalog ordering. */
+export async function moveBotProductAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.PRODUCTS_WRITE);
+  const id = Number(formData.get("id"));
+  const direction = str(formData.get("direction")); // "up" | "down"
+  if (!id || (direction !== "up" && direction !== "down")) return;
+
+  const all = await botDb.product.findMany({
+    orderBy: { sortOrder: "asc" },
+    select: { id: true, sortOrder: true },
+  });
+
+  const idx = all.findIndex((p) => p.id === id);
+  if (idx === -1) return;
+
+  const targetIdx = direction === "up" ? idx - 1 : idx + 1;
+  if (targetIdx < 0 || targetIdx >= all.length) return;
+
+  const current = all[idx];
+  const target = all[targetIdx];
+
+  let currentSort = current.sortOrder;
+  let targetSort = target.sortOrder;
+
+  // If sort orders collide, re-index all with a clean stride
+  if (currentSort === targetSort) {
+    for (let i = 0; i < all.length; i++) {
+      all[i].sortOrder = (i + 1) * 10;
+      await botDb.product.update({ where: { id: all[i].id }, data: { sortOrder: all[i].sortOrder } });
+    }
+    currentSort = (idx + 1) * 10;
+    targetSort = (targetIdx + 1) * 10;
+  }
+
+  await botDb.$transaction([
+    botDb.product.update({ where: { id: current.id }, data: { sortOrder: targetSort } }),
+    botDb.product.update({ where: { id: target.id }, data: { sortOrder: currentSort } }),
+  ]);
+
+  await audit({
+    adminId: admin.id,
+    action: `bot.product.move_${direction}`,
+    entityType: "BotProduct",
+    entityId: String(id),
+  });
+
+  revalidatePath("/admin/bot-products");
+}
+
+/** Delete the video attached to a product. */
+export async function deleteVideoAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.PRODUCTS_WRITE);
+  const productId = Number(formData.get("productId"));
+  if (!productId) return;
+
+  await botDb.product.update({ where: { id: productId }, data: { videoFileId: null } });
+  await audit({ adminId: admin.id, action: "product.video.delete", entityType: "BotProduct", entityId: String(productId) });
+  revalidatePath(`/admin/bot-products/${productId}`);
+  revalidatePath("/admin/bot-products");
+}
+

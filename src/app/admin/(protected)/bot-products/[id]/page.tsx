@@ -17,6 +17,7 @@ import {
   addVariantSupplierAction,
   updateVariantSupplierAction,
   deleteVariantSupplierAction,
+  deleteVideoAction,
 } from "../actions";
 import { ProductDescriptionEditor } from "@/components/admin/ProductDescriptionEditor";
 
@@ -117,6 +118,35 @@ export default async function BotProductEditPage({ params }: { params: { id: str
           initialDescEn={product.descEn}
         />
 
+        {/* Sort order & Video file_id */}
+        <div className="grid md:grid-cols-2 gap-4 pt-2 border-t">
+          <div>
+            <label className="text-sm font-medium text-foreground">Позиция в очереди (№ по порядку)</label>
+            <input
+              type="number"
+              name="sortOrder"
+              defaultValue={product.sortOrder}
+              className="input mt-1 font-mono text-sm"
+              placeholder="0"
+            />
+            <p className="text-xs text-muted mt-1">
+              Меньшее число — товар отображается раньше (1-й, 2-й, 3-й...).
+            </p>
+          </div>
+          <div>
+            <label className="text-sm font-medium text-foreground">Видео товара (Telegram file_id)</label>
+            <input
+              name="videoFileId"
+              defaultValue={product.videoFileId ?? ""}
+              className="input mt-1 font-mono text-sm"
+              placeholder="BAACAgIAAxkDA..."
+            />
+            <p className="text-xs text-muted mt-1">
+              Показывается в карточке товара и при выдаче заказа. Можно задать прямо из Telegram: /pvideo
+            </p>
+          </div>
+        </div>
+
         {/* Banner file_id or URL */}
         <div className="pt-2 border-t">
           <label className="text-sm font-medium text-foreground">Баннер товара (Telegram file_id или URL)</label>
@@ -190,6 +220,37 @@ export default async function BotProductEditPage({ params }: { params: { id: str
           <input type="file" name="file" accept="image/*" required className="text-xs" />
           <button className="btn-primary text-xs px-3">Загрузить файл баннера</button>
         </form>
+      </div>
+
+      {/* Video Management card */}
+      <div className="card p-5 space-y-3">
+        <h3 className="font-semibold">🎬 Видео товара</h3>
+        <p className="text-sm text-muted">
+          Видео показывается в карточке товара и отправляется в одном сообщении вместе с заказом при выдаче.
+        </p>
+        {product.videoFileId ? (
+          <div className="space-y-3 p-3 rounded-lg border bg-surface-2/40">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-xs font-semibold text-primary">✅ Видео прикреплено</div>
+                <div className="text-xs font-mono text-muted break-all mt-0.5">
+                  {product.videoFileId}
+                </div>
+              </div>
+              <form action={deleteVideoAction}>
+                <input type="hidden" name="productId" value={product.id} />
+                <button className="btn-danger text-xs px-3">Удалить видео</button>
+              </form>
+            </div>
+          </div>
+        ) : (
+          <div className="p-3 rounded-lg border bg-surface-2/20 text-xs text-muted space-y-1">
+            <p>Видео пока не прикреплено.</p>
+            <p>
+              💡 <b>Как загрузить видео:</b> Откройте бот с аккаунта администратора и отправьте команду <code className="bg-surface-2 px-1 py-0.5 rounded font-bold text-foreground">/pvideo</code> или <code className="bg-surface-2 px-1 py-0.5 rounded font-bold text-foreground">/pmedia</code>. Выберите этот товар и отправьте видео в чат!
+            </p>
+          </div>
+        )}
       </div>
 
       {/* Premium emoji preview: send a real message to Telegram */}

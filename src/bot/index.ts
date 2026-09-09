@@ -160,8 +160,17 @@ async function sendOrEdit(ctx: Context, text: string, opts: SendOrEditOpts = {})
 
   if (video) {
     if (chatId && messageId) await ctx.api.deleteMessage(chatId, messageId).catch(() => {});
-    await ctx.replyWithVideo(video, { caption: text, parse_mode: "HTML", reply_markup: kb }).catch(async () => {
-      await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+    if (text.length <= 1024) {
+      try {
+        await ctx.replyWithVideo(video, { caption: text, parse_mode: "HTML", reply_markup: kb });
+        return;
+      } catch (err) {
+        console.warn("[bot] replyWithVideo with caption failed, falling back to separate video + text:", (err as Error)?.message || err);
+      }
+    }
+    await ctx.replyWithVideo(video).catch(() => null);
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: opts.link_preview_options }).catch((err) => {
+      console.error("[bot] reply text failed after video:", (err as Error)?.message || err);
     });
     return;
   }
@@ -1502,8 +1511,10 @@ async function showProduct(ctx: Context, id: number, back: string) {
   text += suffix;
 
   const photo = resolveProductBanner(p.bannerFileId);
+  const video = p.videoFileId ?? null;
   await sendOrEdit(ctx, text, {
     photo,
+    video,
     reply_markup: kb,
   });
   await ctx.answerCallbackQuery().catch(() => {});
@@ -2255,8 +2266,19 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
     // of stacking a separate video on top of it).
     const u = await db.botUser.findUnique({ where: { id: user.id } });
     const isLargeOrder = deliveredQty > 5;
-    // Per-product video (set via /pvideo) wins; else the global how-to-activate.
-    const activateVideo: string | InputFile | null = v.plan.product.videoFileId || howToActivateFile();
+    // Per-product video wins; else per-product photo/banner; else global tutorial video.
+    const productVideo: string | null = v.plan.product.videoFileId ?? null;
+    const productPhoto: string | InputFile | null = resolveProductBanner(v.plan.product.bannerFileId);
+    const globalVideo: InputFile | null = howToActivateFile();
+
+    const deliveryMedia = productVideo
+      ? { type: "video" as const, file: productVideo }
+      : productPhoto
+      ? { type: "photo" as const, file: productPhoto }
+      : globalVideo
+      ? { type: "video" as const, file: globalVideo }
+      : null;
+
     // "Я получил" comes first: the customer confirms the goods actually work
     // before anything is asked of them. Tapping it is what triggers the review
     // prompt — a review from someone who has not yet checked their purchase is
@@ -2270,16 +2292,22 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
       : `${t(lang, "charged", { v: money(total, lang) })}`;
 
     if (isLargeOrder) {
-      // Large order: confirmation (+ video if any) first, links follow as a .txt file.
+      // Large order: confirmation (+ video/photo if any) first, links follow as a .txt file.
       const confirmText =
         `${t(lang, "order_paid", { id: reserve.orderId })}\n\n` +
         `${esc(label)}\n${chargeLine}\n` +
         `\n✅ <b>Файл со ссылками отправляется...</b>`;
-      if (activateVideo) {
+      if (deliveryMedia) {
         if (procMsg) await bot.api.deleteMessage(tgId, procMsg.message_id).catch(() => {});
-        await bot.api.sendVideo(tgId, activateVideo, { caption: confirmText, parse_mode: "HTML", reply_markup: deliveredKb }).catch(async () => {
-          await bot.api.sendMessage(tgId, confirmText, { parse_mode: "HTML", reply_markup: deliveredKb }).catch(() => {});
-        });
+        if (deliveryMedia.type === "video") {
+          await bot.api.sendVideo(tgId, deliveryMedia.file, { caption: confirmText, parse_mode: "HTML", reply_markup: deliveredKb }).catch(async () => {
+            await bot.api.sendMessage(tgId, confirmText, { parse_mode: "HTML", reply_markup: deliveredKb }).catch(() => {});
+          });
+        } else {
+          await bot.api.sendPhoto(tgId, deliveryMedia.file, { caption: confirmText, parse_mode: "HTML", reply_markup: deliveredKb }).catch(async () => {
+            await bot.api.sendMessage(tgId, confirmText, { parse_mode: "HTML", reply_markup: deliveredKb }).catch(() => {});
+          });
+        }
       } else if (procMsg) {
         await bot.api.editMessageText(tgId, procMsg.message_id, confirmText, { parse_mode: "HTML", reply_markup: deliveredKb }).catch(() => {});
       }
@@ -2289,18 +2317,42 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
         caption: `📄 ${esc(label)} (${deliveredQty} шт.)`,
       }).catch(() => {});
     } else {
-      // Small order: the delivered goods themselves are the caption.
+      // Small order: the delivered goods themselves are in the caption with the video/photo in one message.
       const confirmText =
         `${t(lang, "order_paid", { id: reserve.orderId })}\n\n` +
         `${esc(label)}\n${chargeLine}\n\n` +
         renderDeliveryGoods(finalPayload, lang);
-      if (activateVideo) {
+
+      if (deliveryMedia) {
         if (procMsg) await bot.api.deleteMessage(tgId, procMsg.message_id).catch(() => {});
-        await bot.api.sendVideo(tgId, activateVideo, { caption: confirmText, parse_mode: "HTML", reply_markup: deliveredKb }).catch(async () => {
+        if (confirmText.length <= 1024) {
+          if (deliveryMedia.type === "video") {
+            await bot.api.sendVideo(tgId, deliveryMedia.file, { caption: confirmText, parse_mode: "HTML", reply_markup: deliveredKb }).catch(async () => {
+              await bot.api.sendMessage(tgId, confirmText, { parse_mode: "HTML", reply_markup: deliveredKb }).catch(() => {});
+            });
+          } else {
+            await bot.api.sendPhoto(tgId, deliveryMedia.file, { caption: confirmText, parse_mode: "HTML", reply_markup: deliveredKb }).catch(async () => {
+              await bot.api.sendMessage(tgId, confirmText, { parse_mode: "HTML", reply_markup: deliveredKb }).catch(() => {});
+            });
+          }
+        } else {
+          // Caption > 1024 chars: send media with header, followed immediately by goods text
+          const header = `${t(lang, "order_paid", { id: reserve.orderId })}\n\n${esc(label)}\n${chargeLine}`;
+          if (deliveryMedia.type === "video") {
+            await bot.api.sendVideo(tgId, deliveryMedia.file, { caption: header, parse_mode: "HTML" }).catch(() => {});
+          } else {
+            await bot.api.sendPhoto(tgId, deliveryMedia.file, { caption: header, parse_mode: "HTML" }).catch(() => {});
+          }
+          await bot.api.sendMessage(tgId, renderDeliveryGoods(finalPayload, lang), { parse_mode: "HTML", reply_markup: deliveredKb }).catch(async () => {
+            await bot.api.sendMessage(tgId, stripTags(renderDeliveryGoods(finalPayload, lang)), { reply_markup: deliveredKb }).catch(() => {});
+          });
+        }
+      } else if (procMsg) {
+        await bot.api.editMessageText(tgId, procMsg.message_id, confirmText, { parse_mode: "HTML", reply_markup: deliveredKb }).catch(async () => {
           await bot.api.sendMessage(tgId, confirmText, { parse_mode: "HTML", reply_markup: deliveredKb }).catch(() => {});
         });
-      } else if (procMsg) {
-        await bot.api.editMessageText(tgId, procMsg.message_id, confirmText, { parse_mode: "HTML", reply_markup: deliveredKb }).catch(() => {});
+      } else {
+        await bot.api.sendMessage(tgId, confirmText, { parse_mode: "HTML", reply_markup: deliveredKb }).catch(() => {});
       }
     }
 
@@ -5366,15 +5418,55 @@ bot.command("terms", async (ctx) => {
   const u = await getUser(ctx);
   await sendTermsGate(ctx, u.lang);
 });
-// Set a per-product video (shown on the product card + on delivery): pick a
-// product, then send the video. 🎬 marks products that already have one.
-bot.command("pvideo", async (ctx) => {
+// Keyboard builder for catalog product ordering
+async function buildOrderKeyboard(): Promise<InlineKeyboard> {
+  const products = await db.product.findMany({
+    where: { isActive: true },
+    orderBy: { sortOrder: "asc" },
+    select: { id: true, titleRu: true, emoji: true, sortOrder: true, bannerFileId: true, videoFileId: true },
+  });
+  const kb = new InlineKeyboard();
+  for (let i = 0; i < products.length; i++) {
+    const p = products[i];
+    const mediaBadge = p.videoFileId ? "🎬" : p.bannerFileId ? "📷" : "";
+    const name = `${i + 1}. ${p.emoji || "✨"} ${p.titleRu} ${mediaBadge}`.trim();
+    kb.text(name, "noop").row();
+    if (i > 0) kb.text("▲ Вверх", `ord_m:${p.id}:up`);
+    if (i < products.length - 1) kb.text("▼ Вниз", `ord_m:${p.id}:down`);
+    kb.row();
+  }
+  kb.text("🔄 Обновить", "ord_refresh").text("❌ Закрыть", "ord_close");
+  return kb;
+}
+
+// Catalog product ordering command
+bot.command(["order", "reorder", "sortproducts", "ochered"], async (ctx) => {
   if (!isAdmin(ctx)) return;
-  const products = await db.product.findMany({ where: { isActive: true }, orderBy: { sortOrder: "asc" }, select: { id: true, titleRu: true, videoFileId: true } });
+  const kb = await buildOrderKeyboard();
+  await ctx.reply(
+    "📊 <b>Настройка очереди товаров в каталоге</b>\n\n" +
+    "Товары отображаются в боте именно в этом порядке.\n" +
+    "Используйте кнопки <b>▲ Вверх</b> и <b>▼ Вниз</b> для перемещения товаров в очереди.",
+    { parse_mode: "HTML", reply_markup: kb }
+  ).catch(() => {});
+});
+
+// Set a per-product video or banner (shown on the product card + on delivery): pick a
+// product, then send the video or photo. 🎬/📷 marks products that already have media.
+bot.command(["pvideo", "pmedia", "pbanner"], async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const products = await db.product.findMany({
+    where: { isActive: true },
+    orderBy: { sortOrder: "asc" },
+    select: { id: true, titleRu: true, emoji: true, bannerFileId: true, videoFileId: true },
+  });
   if (!products.length) return ctx.reply("Нет активных товаров.").catch(() => {});
   const kb = new InlineKeyboard();
-  for (const p of products) kb.text(`${p.videoFileId ? "🎬 " : ""}${p.titleRu}`, `pvid:${p.id}`).row();
-  await ctx.reply("🎬 Выберите товар, чтобы задать видео (🎬 = видео уже есть):", { reply_markup: kb }).catch(() => {});
+  for (const p of products) {
+    const badge = p.videoFileId ? "🎬 " : p.bannerFileId ? "📷 " : "";
+    kb.text(`${badge}${p.emoji || "✨"} ${p.titleRu}`, `pvid:${p.id}`).row();
+  }
+  await ctx.reply("🎬📷 Выберите товар, чтобы задать видео или баннер/фото:\n(🎬 = видео есть, 📷 = баннер есть)", { reply_markup: kb }).catch(() => {});
 });
 
 // Set product description with Telegram Premium Emojis directly from chat
@@ -5406,9 +5498,10 @@ bot.command("admin", async (ctx) => {
   if (!isAdmin(ctx)) return;
   const text =
     `🛠 <b>Команды администратора:</b>\n\n` +
+    `🔢 <b>/order</b> — Настройка очереди товаров в каталоге (▲/▼)\n` +
     `📝 <b>/desc</b> — Установка описания товара с премиум-эмодзи\n` +
     `🖼 <b>/banner</b> — Задать общий баннер магазина\n` +
-    `🎬 <b>/pvideo</b> — Видеоинструкция для товара\n` +
+    `🎬 <b>/pmedia</b> (/pvideo) — Видео или баннер/фото для товара\n` +
     `📢 <b>/post</b> — Рассылка сообщения пользователям\n` +
     `🎁 <b>/sendgifts</b> — Рассылка подарков рефералов\n` +
     `📊 <b>/health</b> — Диагностика базы и системы\n` +
@@ -5888,11 +5981,64 @@ bot.on("callback_query:data", async (ctx) => {
     // hand-built note here used to drop it and deliver to the buyer instead.
     if (tag === "tstar_buy") return starsInvoice(ctx, lang, Number(rest[0]), buildBuyNote(Number(rest[1]), Number(rest[2]) || 1, rest[3] || null, rest[4] || null));
     if (tag === "tman_buy") { await ctx.answerCallbackQuery().catch(() => {}); return requestTopUp(ctx, lang, Number(rest[0]), "manual", `buy:${rest[1]}:${rest[2]}${rest[3] ? `:${rest[3]}` : ""}`); }
+    if (tag === "ord_refresh") {
+      if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {});
+      const kb = await buildOrderKeyboard();
+      await ctx.editMessageReplyMarkup({ reply_markup: kb }).catch(() => {});
+      return ctx.answerCallbackQuery({ text: "Обновлено" }).catch(() => {});
+    }
+    if (tag === "ord_close") {
+      if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {});
+      await ctx.deleteMessage().catch(() => {});
+      return ctx.answerCallbackQuery().catch(() => {});
+    }
+    if (tag === "ord_m") {
+      if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {});
+      const id = Number(rest[0]);
+      const dir = rest[1]; // "up" | "down"
+      if (!id || (dir !== "up" && dir !== "down")) return ctx.answerCallbackQuery().catch(() => {});
+
+      const all = await db.product.findMany({
+        where: { isActive: true },
+        orderBy: { sortOrder: "asc" },
+        select: { id: true, sortOrder: true },
+      });
+
+      const idx = all.findIndex((p) => p.id === id);
+      if (idx !== -1) {
+        const targetIdx = dir === "up" ? idx - 1 : idx + 1;
+        if (targetIdx >= 0 && targetIdx < all.length) {
+          const current = all[idx];
+          const target = all[targetIdx];
+
+          let currentSort = current.sortOrder;
+          let targetSort = target.sortOrder;
+
+          if (currentSort === targetSort) {
+            for (let i = 0; i < all.length; i++) {
+              all[i].sortOrder = (i + 1) * 10;
+              await db.product.update({ where: { id: all[i].id }, data: { sortOrder: all[i].sortOrder } });
+            }
+            currentSort = (idx + 1) * 10;
+            targetSort = (targetIdx + 1) * 10;
+          }
+
+          await db.$transaction([
+            db.product.update({ where: { id: current.id }, data: { sortOrder: targetSort } }),
+            db.product.update({ where: { id: target.id }, data: { sortOrder: currentSort } }),
+          ]);
+        }
+      }
+
+      const kb = await buildOrderKeyboard();
+      await ctx.editMessageReplyMarkup({ reply_markup: kb }).catch(() => {});
+      return ctx.answerCallbackQuery({ text: dir === "up" ? "▲ Поднято" : "▼ Опущено" }).catch(() => {});
+    }
     if (tag === "pvid") {
       if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {});
       pending.set(String(ctx.from?.id), { type: "set_product_video", productId: Number(rest[0]) });
       await ctx.answerCallbackQuery().catch(() => {});
-      return ctx.reply("Пришлите видео для этого товара одним сообщением.\nЧтобы убрать видео — напишите: убрать").catch(() => {});
+      return ctx.reply("🎬📷 Пришлите видео или фото (баннер) для этого товара одним сообщением.\nЧтобы убрать медиа — напишите: убрать").catch(() => {});
     }
     if (tag === "setdesc") {
       if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {});
@@ -6169,10 +6315,10 @@ bot.on("message:text", async (ctx) => {
     const txt = (ctx.message.text ?? "").trim().toLowerCase();
     if (["убрать", "убери", "удалить", "-", "reset", "o‘chir", "ochirish"].includes(txt)) {
       pending.delete(key);
-      await db.product.update({ where: { id: state.productId }, data: { videoFileId: null } }).catch(() => {});
-      return ctx.reply("♻️ Видео товара убрано.");
+      await db.product.update({ where: { id: state.productId }, data: { videoFileId: null, bannerFileId: null } }).catch(() => {});
+      return ctx.reply("♻️ Медиа (видео/баннер) товара удалено.");
     }
-    return ctx.reply("Пришлите видео сообщением, либо напишите: убрать");
+    return ctx.reply("Пришлите видео или фото (баннер) сообщением, либо напишите: убрать");
   }
 
   // Username fallback for "gift Premium to someone else". A username is NOT a
@@ -6400,9 +6546,15 @@ async function handleAdminMedia(ctx: Context, fileId: string | undefined, isVide
     return true;
   }
   if (st?.type === "set_product_video") {
-    if (!isVideo) { await ctx.reply("Для товара пришлите именно видео.").catch(() => {}); return true; }
     pending.delete(key);
-    if (fileId) await saveProductVideo(ctx, st.productId, fileId);
+    if (!fileId) return true;
+    if (isVideo) {
+      await db.product.update({ where: { id: st.productId }, data: { videoFileId: fileId } }).catch(() => {});
+      await ctx.reply("✅ Видео товара сохранено — показывается в карточке и при выдаче заказа в одном сообщении.").catch(() => {});
+    } else {
+      await db.product.update({ where: { id: st.productId }, data: { bannerFileId: fileId } }).catch(() => {});
+      await ctx.reply("✅ Баннер/фото товара сохранено — показывается в карточке и при выдаче заказа в одном сообщении.").catch(() => {});
+    }
     return true;
   }
   if (st?.type === "set_product_desc") {
