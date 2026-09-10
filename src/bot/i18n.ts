@@ -200,6 +200,15 @@ const RU: Dict = {
   subs_required_toast: "⚠️ Пожалуйста, подпишитесь на каналы!",
   subs_ok_toast: "✅ Подписка подтверждена!",
   subs_missing_toast: "❌ Вы подписались не на все каналы!",
+  deal_not_found: "❌ Специальная ссылка не найдена или была удалена.",
+  deal_inactive: "⚠️ Эта акционная ссылка в данный момент неактивна.",
+  deal_expired: "⏳ Срок действия этой специальной ссылки истёк.",
+  deal_limit_reached: "⏳ <b>Лимит по акции исчерпан!</b>\n\nВсе доступные места по этой ссылке ({max} шт.) уже раскуплены.\nВы можете приобрести товар по обычной цене из каталога.",
+  deal_user_limit_reached: "⚠️ Вы уже использовали свой лимит по этой акции ({limit} шт. на пользователя).",
+  deal_card_badge: "🔥 <b>Специальное предложение по ссылке!</b>",
+  deal_remaining: "Осталось мест: {rem} из {max}",
+  deal_unlimited: "Без ограничений",
+  deal_buy_btn: "🛍 Купить за {price}",
 };
 
 const EN: Dict = {
@@ -395,6 +404,15 @@ const EN: Dict = {
   subs_required_toast: "⚠️ Please subscribe to channels!",
   subs_ok_toast: "✅ Subscription verified!",
   subs_missing_toast: "❌ You have not subscribed to all channels!",
+  deal_not_found: "❌ Special offer link not found or has been deleted.",
+  deal_inactive: "⚠️ This promo link is currently inactive.",
+  deal_expired: "⏳ This special offer link has expired.",
+  deal_limit_reached: "⏳ <b>Offer limit reached!</b>\n\nAll available items ({max} pcs) for this special link have been claimed.\nYou can purchase this product at standard catalog price.",
+  deal_user_limit_reached: "⚠️ You have already reached your limit for this offer ({limit} per user).",
+  deal_card_badge: "🔥 <b>Special offer via link!</b>",
+  deal_remaining: "Remaining: {rem} of {max}",
+  deal_unlimited: "Unlimited",
+  deal_buy_btn: "🛍 Buy for {price}",
 };
 
 const UZ: Dict = {
@@ -590,6 +608,15 @@ const UZ: Dict = {
   subs_required_toast: "⚠️ Iltimos, kanallarga a'zo bo'ling!",
   subs_ok_toast: "✅ Obuna tasdiqlandi!",
   subs_missing_toast: "❌ Siz barcha kanallarga a'zo bo'lmadingiz!",
+  deal_not_found: "❌ Maxsus havola topilmadi yoki o‘chirib tashlangan.",
+  deal_inactive: "⚠️ Ushbu aksiya havolasi hozirda faol emas.",
+  deal_expired: "⏳ Ushbu maxsus havolaning amal qilish muddati tugagan.",
+  deal_limit_reached: "⏳ <b>Aksiya limiti tugadi!</b>\n\nUshbu havola bo‘yicha barcha joylar ({max} ta) xarid qilib bo‘lindi.\nMahsulotni katalogdan odatiy narxda sotib olishingiz mumkin.",
+  deal_user_limit_reached: "⚠️ Siz ushbu aksiya bo‘yicha o‘z limitingizdan foydalangansiz (har bir foydalanuvchiga {limit} ta).",
+  deal_card_badge: "🔥 <b>Havola orqali maxsus taklif!</b>",
+  deal_remaining: "Qoldi: {max} tadan {rem} ta",
+  deal_unlimited: "Cheklovsiz",
+  deal_buy_btn: "🛍 {price} evaziga xarid qilish",
 };
 
 const DICTS: Record<Lang, Dict> = { ru: RU, en: EN, uz: UZ };

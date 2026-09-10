@@ -42,6 +42,7 @@ import {
   EMOJI_CHAR_TO_PREMIUM,
   messageEntitiesToHtml,
 } from "../lib/emoji/rich-text";
+import { validateDealEligibility, calculateDealDiscount, parseDealPayload } from "../lib/domain/deal-links";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -451,6 +452,7 @@ function maskId(s: string): string {
 }
 
 // Per-user custom prices. Returns Map<variantId, { priceUzs, label }> for the
+// Per-user custom prices. Returns Map<variantId, { priceUzs, label }> for the
 // given user (optionally scoped to variantIds). Only that user sees these prices.
 async function priceOverridesFor(userId: number, variantIds?: number[]) {
   const m = new Map<number, { priceUzs: number; label: string }>();
@@ -459,6 +461,28 @@ async function priceOverridesFor(userId: number, variantIds?: number[]) {
       where: { userId, ...(variantIds && variantIds.length ? { variantId: { in: variantIds } } : {}) },
     });
     for (const r of rows) m.set(r.variantId, { priceUzs: r.priceUzs, label: r.label });
+
+    // Also include active promotional deal link claims
+    const claims = await db.userDealClaim.findMany({
+      where: {
+        userId,
+        promoLink: {
+          isActive: true,
+          ...(variantIds && variantIds.length ? { variantId: { in: variantIds } } : {}),
+        },
+      },
+      include: { promoLink: true },
+    }).catch(() => []);
+    const now = Date.now();
+    for (const c of claims) {
+      const pl = c.promoLink;
+      if (m.has(pl.variantId)) continue; // VIP override takes precedence
+      const isExpired = pl.expiresAt && pl.expiresAt.getTime() < now;
+      const isExhausted = pl.maxUses > 0 && pl.usedCount >= pl.maxUses;
+      if (!isExpired && !isExhausted) {
+        m.set(pl.variantId, { priceUzs: pl.priceUzs, label: pl.title || "🔥 Спеццена" });
+      }
+    }
   } catch (e) {
     // Table may not exist yet (pre-migration) — fall back to base prices.
     console.error("[bot] priceOverridesFor failed (using base prices):", (e as Error).message);
@@ -466,11 +490,32 @@ async function priceOverridesFor(userId: number, variantIds?: number[]) {
   return m;
 }
 
-// Effective price + optional VIP label for one user+variant (override wins).
-async function effPriceFor(userId: number, variantId: number, basePriceUzs: number): Promise<{ price: number; label: string | null }> {
+// Effective price + optional VIP/Deal label for one user+variant (override or active deal claim wins).
+async function effPriceFor(
+  userId: number,
+  variantId: number,
+  basePriceUzs: number,
+): Promise<{ price: number; label: string | null; promoLinkId?: number }> {
   try {
     const ov = await db.userVariantPrice.findUnique({ where: { userId_variantId: { userId, variantId } } });
-    return ov ? { price: ov.priceUzs, label: ov.label || null } : { price: basePriceUzs, label: null };
+    if (ov) return { price: ov.priceUzs, label: ov.label || null };
+
+    // Check active UserDealClaim for this user & variant
+    const claim = await db.userDealClaim.findFirst({
+      where: { userId, promoLink: { variantId, isActive: true } },
+      include: { promoLink: true },
+    }).catch(() => null);
+
+    if (claim) {
+      const pl = claim.promoLink;
+      const isExpired = pl.expiresAt && pl.expiresAt.getTime() < Date.now();
+      const isExhausted = pl.maxUses > 0 && pl.usedCount >= pl.maxUses;
+      if (!isExpired && !isExhausted) {
+        return { price: pl.priceUzs, label: pl.title || "🔥 Спеццена", promoLinkId: pl.id };
+      }
+    }
+
+    return { price: basePriceUzs, label: null };
   } catch (e) {
     console.error("[bot] effPriceFor failed (using base price):", (e as Error).message);
     return { price: basePriceUzs, label: null };
@@ -2365,6 +2410,35 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
         .catch(() => {});
     }
     await notifySalesGroup(user, label, { price: total, refPoints: refPointsCost });
+
+    // If the purchase was made using a PromoLink claim, record usage and increment usedCount atomically
+    if (eff.promoLinkId) {
+      try {
+        await db.$transaction([
+          db.promoLink.update({
+            where: { id: eff.promoLinkId },
+            data: { usedCount: { increment: 1 } },
+          }),
+          db.promoLinkUsage.create({
+            data: {
+              promoLinkId: eff.promoLinkId,
+              userId: user.id,
+              orderId: reserve.orderId,
+              pricePaid: total,
+            },
+          }),
+        ]);
+        const plRow = await db.promoLink.findUnique({ where: { id: eff.promoLinkId } });
+        if (plRow && plRow.perUserLimit > 0) {
+          const userUsage = await db.promoLinkUsage.count({ where: { promoLinkId: plRow.id, userId: user.id } });
+          if (userUsage >= plRow.perUserLimit) {
+            await db.userDealClaim.deleteMany({ where: { promoLinkId: plRow.id, userId: user.id } }).catch(() => {});
+          }
+        }
+      } catch (err) {
+        console.error("[bot] failed recording promoLinkUsage:", err);
+      }
+    }
     // The review prompt is NOT sent here — it waits for the customer to tap
     // "Я получил" on the delivery message above, confirming the goods work.
   } catch (e) {
@@ -3803,8 +3877,125 @@ bot.command("start", async (ctx) => {
     if (pid > 0) return showProduct(ctx, pid, "0:all");
   }
   if (payload === "promo") return showMenu(ctx, 0, "all", false);
+  if (payload.startsWith("deal_") || payload.startsWith("offer_") || payload.startsWith("promo_")) {
+    return handleDealLinkStart(ctx, user, payload);
+  }
   await enterShop(ctx, user);
 });
+// Handler for promotional deal deep links (e.g. /start deal_xxx)
+async function handleDealLinkStart(ctx: Context, user: any, payload: string) {
+  const rawCode = parseDealPayload(payload);
+  const lang = (user.lang || "ru") as Lang;
+
+  const pl = await db.promoLink.findFirst({
+    where: {
+      OR: [
+        { code: rawCode },
+        { code: rawCode.replace(/^(deal_|offer_|promo_)/, "") },
+        { code: `deal_${rawCode.replace(/^(deal_|offer_|promo_)/, "")}` },
+      ],
+    },
+    include: {
+      variant: {
+        include: {
+          plan: {
+            include: {
+              product: true,
+            },
+          },
+        },
+      },
+    },
+  });
+
+  if (!pl || !pl.variant || !pl.variant.plan?.product) {
+    return ctx.reply(t(lang, "deal_not_found"), {
+      reply_markup: new InlineKeyboard().text(t(lang, "btn_shop"), "m:0:all"),
+    });
+  }
+
+  const v = pl.variant;
+  const p = v.plan.product;
+
+  const userUsageCount = await db.promoLinkUsage.count({
+    where: { promoLinkId: pl.id, userId: user.id },
+  });
+
+  const eligibility = validateDealEligibility(pl, userUsageCount);
+
+  if (!eligibility.valid) {
+    if (eligibility.reason === "inactive") {
+      return ctx.reply(t(lang, "deal_inactive"), {
+        reply_markup: new InlineKeyboard().text(t(lang, "btn_shop"), "m:0:all"),
+      });
+    }
+    if (eligibility.reason === "expired") {
+      return ctx.reply(t(lang, "deal_expired"), {
+        reply_markup: new InlineKeyboard().text(t(lang, "btn_shop"), "m:0:all"),
+      });
+    }
+    if (eligibility.reason === "limit_reached") {
+      return ctx.reply(t(lang, "deal_limit_reached", { max: String(pl.maxUses) }), {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text(t(lang, "btn_shop"), "m:0:all"),
+      });
+    }
+    if (eligibility.reason === "user_limit_reached") {
+      return ctx.reply(t(lang, "deal_user_limit_reached", { limit: String(pl.perUserLimit) }), {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text(t(lang, "btn_shop"), "m:0:all"),
+      });
+    }
+  }
+
+  // Claim is valid: upsert UserDealClaim
+  await db.userDealClaim.upsert({
+    where: { userId_promoLinkId: { userId: user.id, promoLinkId: pl.id } },
+    create: { userId: user.id, promoLinkId: pl.id },
+    update: {},
+  }).catch((e) => console.error("[bot] failed upserting UserDealClaim:", e));
+
+  const pt = await pick3(p.titleRu, p.titleEn, p.titleUz, lang);
+  const vt = await locName(v.titleRu, v.titleUz, lang);
+  const { discountPercent } = calculateDealDiscount(v.priceUzs, pl.priceUzs);
+
+  const remainingText =
+    pl.maxUses > 0
+      ? t(lang, "deal_remaining", { rem: String(Math.max(0, pl.maxUses - pl.usedCount)), max: String(pl.maxUses) })
+      : t(lang, "deal_unlimited");
+
+  const dealTitle = pl.title || t(lang, "deal_card_badge");
+  const cleanPt = stripLeadEmoji(pt);
+  const pe = resolveProductPremiumEmoji(p, cleanPt);
+
+  let text =
+    `${t(lang, "deal_card_badge")}\n\n` +
+    `${pe.textTag} <b>${esc(cleanPt)} — ${esc(vt)}</b>\n\n` +
+    `🏷 <b>${esc(dealTitle)}</b>\n` +
+    `💰 Цена по акции: <b>${money(pl.priceUzs, lang)}</b> <s>${money(v.priceUzs, lang)}</s>` +
+    (discountPercent > 0 ? ` <b>(-${discountPercent}%)</b>` : "") +
+    `\n👥 ${remainingText}\n`;
+
+  if (p.descRu || p.descUz) {
+    const pd = await pick3(p.descRu ?? "", p.descEn, p.descUz, lang);
+    if (pd?.trim()) {
+      const rawFormatted = tgHtml(formatRichText(pd.trim()));
+      text += `\n${sanitizeTextCustomEmojis(rawFormatted)}\n`;
+    }
+  }
+
+  const buyBtnText = t(lang, "deal_buy_btn", { price: money(pl.priceUzs, lang) });
+  const kb = new InlineKeyboard()
+    .text(buyBtnText, `b:${v.id}:0:all`)
+    .row()
+    .text(t(lang, "btn_shop"), "m:0:all");
+
+  const photo = resolveProductBanner(p.bannerFileId);
+  const video = p.videoFileId ?? null;
+
+  await sendOrEdit(ctx, text, { photo, video, reply_markup: kb });
+}
+
 bot.command("menu", (ctx) => showMenu(ctx, 0, "all", false));
 
 // Admin: /refs <tgId|@username> — list users invited by that person
@@ -5895,6 +6086,8 @@ bot.on("callback_query:data", async (ctx) => {
           if (pid > 0) await showProduct(ctx, pid, "0:all").catch(() => {});
         } else if (intent === "promo") {
           await showMenu(ctx, 0, "all", false).catch(() => {});
+        } else if (intent.startsWith("deal_") || intent.startsWith("offer_") || intent.startsWith("promo_")) {
+          await handleDealLinkStart(ctx, user, intent).catch(() => {});
         }
       }
       return;
@@ -6880,6 +7073,41 @@ async function ensureSchema() {
       CONSTRAINT "PromoCode_pkey" PRIMARY KEY ("id")
     )`,
     `CREATE UNIQUE INDEX IF NOT EXISTS "PromoCode_code_key" ON "PromoCode"("code")`,
+    `CREATE TABLE IF NOT EXISTS "PromoLink" (
+      "id" SERIAL NOT NULL,
+      "code" TEXT NOT NULL,
+      "title" TEXT NOT NULL,
+      "variantId" INTEGER NOT NULL,
+      "priceUzs" INTEGER NOT NULL,
+      "maxUses" INTEGER NOT NULL DEFAULT 0,
+      "usedCount" INTEGER NOT NULL DEFAULT 0,
+      "perUserLimit" INTEGER NOT NULL DEFAULT 1,
+      "expiresAt" TIMESTAMP(3),
+      "isActive" BOOLEAN NOT NULL DEFAULT true,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "PromoLink_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "PromoLink_code_key" ON "PromoLink"("code")`,
+    `CREATE INDEX IF NOT EXISTS "PromoLink_variantId_idx" ON "PromoLink"("variantId")`,
+    `CREATE TABLE IF NOT EXISTS "PromoLinkUsage" (
+      "id" SERIAL NOT NULL,
+      "promoLinkId" INTEGER NOT NULL,
+      "userId" INTEGER NOT NULL,
+      "orderId" INTEGER,
+      "pricePaid" INTEGER NOT NULL DEFAULT 0,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "PromoLinkUsage_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE INDEX IF NOT EXISTS "PromoLinkUsage_promoLinkId_userId_idx" ON "PromoLinkUsage"("promoLinkId", "userId")`,
+    `CREATE TABLE IF NOT EXISTS "UserDealClaim" (
+      "id" SERIAL NOT NULL,
+      "userId" INTEGER NOT NULL,
+      "promoLinkId" INTEGER NOT NULL,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "UserDealClaim_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "UserDealClaim_userId_promoLinkId_key" ON "UserDealClaim"("userId", "promoLinkId")`,
     `CREATE TABLE IF NOT EXISTS "PromoRedemption" (
       "id" SERIAL NOT NULL,
       "promoId" INTEGER NOT NULL,

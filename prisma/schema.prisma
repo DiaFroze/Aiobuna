@@ -666,6 +666,7 @@ model Variant {
 
   stockItems   StockItem[]
   customPrices UserVariantPrice[]
+  promoLinks   PromoLink[]
 
   @@unique([supplierKey, supplierExternalId])
 }
@@ -721,6 +722,8 @@ model BotUser {
   customPrices     UserVariantPrice[]
   promoRedemptions PromoRedemption[]
   adStarts BotAdStart[]
+  promoLinkUsages  PromoLinkUsage[]
+  dealClaims       UserDealClaim[]
 }
 
 model BotAdStart {
@@ -1025,4 +1028,53 @@ model PromoBroadcastMessage {
   createdAt DateTime @default(now())
 
   @@index([tgId])
+}
+
+
+// Promo/Deal links: specific custom prices on a product/variant with a max usage limit.
+// Users enter via deep link https://t.me/<bot>?start=deal_<code>.
+model PromoLink {
+  id           Int              @id @default(autoincrement())
+  code         String           @unique // slug used in ?start=code (e.g. "deal_summer10")
+  title        String           // label / name, e.g. "Скидка на Gemini 50%"
+  variantId    Int
+  variant      Variant          @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  priceUzs     Int              // Special price in UZS
+  maxUses      Int              @default(0) // 0 = unlimited total buyers
+  usedCount    Int              @default(0) // Successful purchases
+  perUserLimit Int              @default(1) // Max purchases per user (default 1)
+  expiresAt    DateTime?        // Optional expiry
+  isActive     Boolean          @default(true)
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  usages       PromoLinkUsage[]
+  claims       UserDealClaim[]
+
+  @@index([code])
+  @@index([variantId])
+}
+
+model PromoLinkUsage {
+  id          Int        @id @default(autoincrement())
+  promoLinkId Int
+  promoLink   PromoLink  @relation(fields: [promoLinkId], references: [id], onDelete: Cascade)
+  userId      Int
+  user        BotUser    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orderId     Int?
+  pricePaid   Int        @default(0)
+  createdAt   DateTime   @default(now())
+
+  @@index([promoLinkId, userId])
+}
+
+model UserDealClaim {
+  id          Int        @id @default(autoincrement())
+  userId      Int
+  user        BotUser    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  promoLinkId Int
+  promoLink   PromoLink  @relation(fields: [promoLinkId], references: [id], onDelete: Cascade)
+  createdAt   DateTime   @default(now())
+
+  @@unique([userId, promoLinkId])
+  @@index([userId])
 }
