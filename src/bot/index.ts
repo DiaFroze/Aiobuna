@@ -239,7 +239,11 @@ const UZS_PER_USDT = Number(process.env.USDT_UZS_RATE ?? 12600);
 // the bot only offers the button and builds the checkout URL. paymeReady()
 // gates the button so a half-configured merchant can never be shown.
 function isAdmin(ctx: Context) {
-  return ADMIN_ID !== "" && String(ctx.from?.id) === ADMIN_ID;
+  const senderId = String(ctx.from?.id ?? "");
+  if (!senderId) return false;
+  if (ADMIN_ID !== "" && senderId === ADMIN_ID) return true;
+  const adminIds = (process.env.ADMIN_IDS ?? "").split(/[,\s]+/).filter(Boolean);
+  return adminIds.includes(senderId);
 }
 const PAYME_ENABLED = process.env.PAYME_ENABLED === "1";
 const PAYME_MERCHANT_ID = process.env.PAYME_MERCHANT_ID ?? "";
@@ -333,6 +337,7 @@ const pending = new Map<
   | { type: "formatter_links"; startIndex: number; collectedLinks?: string[]; timeoutId?: any }
   | { type: "reject_custom_reason"; topupId: number }
   | { type: "target_username"; variantId: number; qty: number }
+  | { type: "adm_client_username"; variantId: number; qty: number }
   | { type: "set_banner" }
   | { type: "set_product_video"; productId: number }
   | { type: "course_channel" }
@@ -495,10 +500,10 @@ async function effPriceFor(
   userId: number,
   variantId: number,
   basePriceUzs: number,
-): Promise<{ price: number; label: string | null; promoLinkId?: number }> {
+): Promise<{ price: number; label: string | null; promoLinkId?: number; isVip?: boolean }> {
   try {
     const ov = await db.userVariantPrice.findUnique({ where: { userId_variantId: { userId, variantId } } });
-    if (ov) return { price: ov.priceUzs, label: ov.label || null };
+    if (ov) return { price: ov.priceUzs, label: ov.label || null, isVip: true };
 
     // Check active UserDealClaim for this user & variant
     const claim = await db.userDealClaim.findFirst({
@@ -1840,7 +1845,7 @@ async function notifySale(ctx: Context, user: { firstName: string | null; userna
 async function notifySalesGroup(
   user: { firstName: string | null; username: string | null; tgId: string },
   title: string,
-  paid: { price: number; refPoints?: number },
+  paid: { price: number; refPoints?: number; isPromo?: boolean; isVip?: boolean },
 ) {
   // Separate switch from the group id, so the feed can be paused and resumed
   // without losing the configured group.
@@ -1853,6 +1858,13 @@ async function notifySalesGroup(
   const shown = maskName(user.firstName || user.username || user.tgId);
   const isGift = (paid.refPoints ?? 0) > 0;
 
+  let priceLine = paid.price > 0 ? money(paid.price, "ru") : "бесплатно";
+  if (paid.isPromo) {
+    priceLine += " 🔥 <i>(по акции)</i>";
+  } else if (paid.isVip) {
+    priceLine += " 💎 <i>(спеццена)</i>";
+  }
+
   const text = isGift
     ? `🎁 <b>Забрал подарок за рефералов!</b>\n\n` +
       `👤 ${esc(shown)} · <code>${maskId(user.tgId)}</code>\n` +
@@ -1861,11 +1873,39 @@ async function notifySalesGroup(
     : `🛒 <b>Новая покупка!</b>\n\n` +
       `👤 ${esc(shown)} · <code>${maskId(user.tgId)}</code>\n` +
       `📦 ${esc(title)}\n` +
-      `💰 <b>${paid.price > 0 ? money(paid.price, "ru") : "бесплатно"}</b>`;
+      `💰 <b>${priceLine}</b>`;
 
   await bot.api.sendMessage(groupId, text, { parse_mode: "HTML" }).catch((e) => {
     console.error("[bot] sales group notify failed:", (e as Error).message);
   });
+}
+
+async function recordPromoUsage(promoLinkId: number, userId: number, orderId: number, pricePaid: number) {
+  try {
+    await db.$transaction([
+      db.promoLink.update({
+        where: { id: promoLinkId },
+        data: { usedCount: { increment: 1 } },
+      }),
+      db.promoLinkUsage.create({
+        data: {
+          promoLinkId,
+          userId,
+          orderId,
+          pricePaid,
+        },
+      }),
+    ]);
+    const plRow = await db.promoLink.findUnique({ where: { id: promoLinkId } });
+    if (plRow && plRow.perUserLimit > 0) {
+      const userUsage = await db.promoLinkUsage.count({ where: { promoLinkId: plRow.id, userId } });
+      if (userUsage >= plRow.perUserLimit) {
+        await db.userDealClaim.deleteMany({ where: { promoLinkId: plRow.id, userId } }).catch(() => {});
+      }
+    }
+  } catch (err) {
+    console.error("[bot] failed recording promoLinkUsage:", err);
+  }
 }
 
 // ---------- Instagram review prompt ----------
@@ -1940,8 +1980,21 @@ async function refundRefPoints(userId: number, points: number | undefined) {
   ).catch((e) => console.error("[bot] refundRefPoints failed:", (e as Error).message));
 }
 
-async function executePurchase(tgId: string, variantId: number, qty: number, refPointsCost?: number, targetUsername?: string, discountCost = 0, recipientTgId?: string, paymentMethod?: string, paymentId?: string) {
+async function executePurchase(
+  tgId: string,
+  variantId: number,
+  qty: number,
+  refPointsCost?: number,
+  targetUsername?: string,
+  discountCost = 0,
+  recipientTgId?: string,
+  paymentMethod?: string,
+  paymentId?: string,
+  adminPriceOverride?: number,
+  adminPriceMeta?: { isPromo?: boolean; isVip?: boolean; promoId?: number },
+) {
   const isRefGift = refPointsCost !== undefined && refPointsCost > 0;
+  const isAdminPay = paymentMethod === "admin";
   const user = await db.botUser.findUnique({ where: { tgId } });
   if (!user) return;
   const lang = user.lang;
@@ -1985,14 +2038,14 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
   // already paid on the pay screen (so the balance charge nets to zero), and
   // spend the referrals below once the order is committed.
   const discPct = discountCost > 0 ? refDiscountPct(discountCost) : 0;
-  const total = isRefGift ? 0 : Math.round(deal.total * (100 - discPct) / 100);
+  const total = isRefGift ? 0 : adminPriceOverride !== undefined ? adminPriceOverride : Math.round(deal.total * (100 - discPct) / 100);
   const label =
     freeQty > 0 ? `${baseTitle} ×${paidQty} +${freeQty} 🎁`
     : paidQty > 1 ? `${baseTitle} ×${paidQty}`
     : baseTitle;
 
   if (isCourseProduct(v)) {
-    return executeCoursePurchase(user, variantId, label, total, paymentMethod, paymentId);
+    return executeCoursePurchase(user, variantId, label, total, paymentMethod, paymentId ?? (isAdminPay ? `admin_${Date.now()}` : undefined));
   }
 
   // --- Manual delivery: charge, then the admin sends the goods by hand ---
@@ -2013,7 +2066,7 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
     const reserve = await db.$transaction(async (tx) => {
       const u = await tx.botUser.findUnique({ where: { id: user.id } });
       if (!u) return { error: "unavailable" as const };
-      if (!isRefGift && u.balance < total) return { error: "balance" as const };
+      if (!isRefGift && !isAdminPay && u.balance < total) return { error: "balance" as const };
       
       const freshV = await tx.variant.findUnique({ where: { id: variantId } });
       if (!freshV || !freshV.isActive) return { error: "unavailable" as const };
@@ -2026,7 +2079,7 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
         });
       }
 
-      if (!isRefGift && total > 0) {
+      if (!isRefGift && !isAdminPay && total > 0) {
         await tx.botUser.update({ where: { id: user.id }, data: { balance: { decrement: total } } });
       }
       if (discountCost > 0) {
@@ -2035,7 +2088,7 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
       const order = await tx.botOrder.create({
         data: {
           userId: user.id, variantId, titleRu: label, priceUsdt: 0, payload: "",
-          source: isRefGift ? "referral" : "manual", status: "awaiting_delivery",
+          source: isAdminPay ? "admin" : isRefGift ? "referral" : "manual", status: "awaiting_delivery",
           targetUsername: targetUsername ?? null,
           recipientTgId: isFragmentItem ? recipient : null,
           deliveryState: isFragmentItem ? "PAID" : "",
@@ -2062,13 +2115,25 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
       .row()
       .text(t(lang, "to_shop"), "m:0:all");
 
-    await bot.api.sendMessage(
-      tgId,
-      t(lang, "manual_paid", { id: reserve.orderId, code, admin: supportUser, product: label }),
-      { parse_mode: "HTML", reply_markup: kb }
-    ).catch(() => {});
+    if (isAdminPay) {
+      await bot.api.sendMessage(
+        tgId,
+        `👑 <b>Заказ #${reserve.orderId} оформлен через админ!</b>\n\n` +
+        `📦 <b>Товар:</b> ${esc(label)}\n` +
+        (targetUsername ? `👤 <b>Клиент:</b> @${esc(targetUsername)}\n` : "") +
+        `💰 <b>Сумма:</b> ${money(total, lang)}${adminPriceMeta?.isPromo ? " 🔥 <i>(по акции)</i>" : adminPriceMeta?.isVip ? " 💎 <i>(спеццена)</i>" : ""}\n\n` +
+        `ℹ️ <i>Товар требует ручной выдачи (Fragment/аккаунт). Выдайте его клиенту и отметьте через <code>/give ${reserve.orderId}</code>.</i>`,
+        { parse_mode: "HTML", reply_markup: kb }
+      ).catch(() => {});
+    } else {
+      await bot.api.sendMessage(
+        tgId,
+        t(lang, "manual_paid", { id: reserve.orderId, code, admin: supportUser, product: label }),
+        { parse_mode: "HTML", reply_markup: kb }
+      ).catch(() => {});
+    }
 
-    if (ADMIN_ID) {
+    if (ADMIN_ID && !isAdminPay) {
       // For a Fragment item the recipient is the whole job — put it on its own
       // line, copyable, with the exact quantity to buy, so it can be pasted
       // straight into Fragment without re-reading the order.
@@ -2097,7 +2162,16 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
         { parse_mode: "HTML" }
       ).catch(() => {});
     }
-    await notifySalesGroup(user, label, { price: total, refPoints: refPointsCost });
+    await notifySalesGroup(user, label, {
+      price: total,
+      refPoints: refPointsCost,
+      isPromo: adminPriceMeta?.isPromo ?? Boolean(eff.promoLinkId),
+      isVip: adminPriceMeta?.isVip ?? Boolean(eff.isVip),
+    });
+    const promoToRecord = adminPriceMeta?.promoId ?? eff.promoLinkId;
+    if (promoToRecord) {
+      await recordPromoUsage(promoToRecord, user.id, reserve.orderId, total);
+    }
     return;
   }
 
@@ -2111,8 +2185,8 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
   const reserve = await db.$transaction(async (tx) => {
     const u = await tx.botUser.findUnique({ where: { id: user.id } });
     if (!u) return { error: "unavailable" as const };
-    if (!isRefGift && u.balance < total) return { error: "balance" as const };
-    if (!isRefGift && total > 0) {
+    if (!isRefGift && !isAdminPay && u.balance < total) return { error: "balance" as const };
+    if (!isRefGift && !isAdminPay && total > 0) {
       await tx.botUser.update({ where: { id: user.id }, data: { balance: { decrement: total } } });
     }
     if (discountCost > 0) {
@@ -2125,9 +2199,11 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
         titleRu: label,
         priceUsdt: 0,
         payload: "", // populated below as we gather items
-        source: isRefGift ? "referral" : "hybrid", // stock + supplier
+        source: isAdminPay ? "admin" : isRefGift ? "referral" : "hybrid", // stock + supplier
         status: "processing",
         targetUsername: targetUsername ?? null,
+        paymentMethod: paymentMethod ?? null,
+        paymentId: paymentId ?? null,
       },
     });
     return { orderId: order.id, order };
@@ -2336,7 +2412,32 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
       ? `🎁 <b>Подарок за ${refPointsCost} реф.</b>`
       : `${t(lang, "charged", { v: money(total, lang) })}`;
 
-    if (isLargeOrder) {
+    if (isAdminPay) {
+      const adminDeliveryMsg =
+        `👑 <b>Заказ #${reserve.orderId} оформлен через админ!</b>\n\n` +
+        `📦 <b>Товар:</b> ${esc(label)}\n` +
+        (targetUsername ? `👤 <b>Клиент:</b> @${esc(targetUsername)}\n` : "") +
+        `💰 <b>Сумма:</b> ${money(total, lang)}${adminPriceMeta?.isPromo ? " 🔥 <i>(по акции)</i>" : adminPriceMeta?.isVip ? " 💎 <i>(спеццена)</i>" : ""}\n\n` +
+        `📋 <b>Данные для передачи клиенту:</b>\n\n` +
+        renderDeliveryGoods(finalPayload, lang);
+
+      if (procMsg) {
+        await bot.api.editMessageText(tgId, procMsg.message_id, adminDeliveryMsg, {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all"),
+        }).catch(async () => {
+          await bot.api.sendMessage(tgId, adminDeliveryMsg, {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all"),
+          }).catch(() => {});
+        });
+      } else {
+        await bot.api.sendMessage(tgId, adminDeliveryMsg, {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all"),
+        }).catch(() => {});
+      }
+    } else if (isLargeOrder) {
       // Large order: confirmation (+ video/photo if any) first, links follow as a .txt file.
       const confirmText =
         `${t(lang, "order_paid", { id: reserve.orderId })}\n\n` +
@@ -2401,57 +2502,41 @@ async function executePurchase(tgId: string, variantId: number, qty: number, ref
       }
     }
 
-    if (ADMIN_ID) {
+    if (ADMIN_ID && !isAdminPay) {
       const source = stockQty > 0 && supplierQty > 0 ? "склад+поставщик" : stockQty > 0 ? "склад" : "поставщик";
       await bot.api
-        .sendMessage(ADMIN_ID, `🛒 (${source}) <b>${esc(label)}</b>\n${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})\n${isRefGift ? `🎁 ${refPointsCost} реф.` : money(total, lang)} · #${reserve.orderId}`, {
+        .sendMessage(ADMIN_ID, `🛒 (${source}) <b>${esc(label)}</b>\n${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})\n${isRefGift ? `🎁 ${refPointsCost} реф.` : money(total, lang)}${adminPriceMeta?.isPromo ? " 🔥 (по акции)" : adminPriceMeta?.isVip ? " 💎 (спеццена)" : ""} · #${reserve.orderId}`, {
           parse_mode: "HTML",
         })
         .catch(() => {});
     }
-    await notifySalesGroup(user, label, { price: total, refPoints: refPointsCost });
+    await notifySalesGroup(user, label, {
+      price: total,
+      refPoints: refPointsCost,
+      isPromo: adminPriceMeta?.isPromo ?? Boolean(eff.promoLinkId),
+      isVip: adminPriceMeta?.isVip ?? Boolean(eff.isVip),
+    });
 
-    // If the purchase was made using a PromoLink claim, record usage and increment usedCount atomically
-    if (eff.promoLinkId) {
-      try {
-        await db.$transaction([
-          db.promoLink.update({
-            where: { id: eff.promoLinkId },
-            data: { usedCount: { increment: 1 } },
-          }),
-          db.promoLinkUsage.create({
-            data: {
-              promoLinkId: eff.promoLinkId,
-              userId: user.id,
-              orderId: reserve.orderId,
-              pricePaid: total,
-            },
-          }),
-        ]);
-        const plRow = await db.promoLink.findUnique({ where: { id: eff.promoLinkId } });
-        if (plRow && plRow.perUserLimit > 0) {
-          const userUsage = await db.promoLinkUsage.count({ where: { promoLinkId: plRow.id, userId: user.id } });
-          if (userUsage >= plRow.perUserLimit) {
-            await db.userDealClaim.deleteMany({ where: { promoLinkId: plRow.id, userId: user.id } }).catch(() => {});
-          }
-        }
-      } catch (err) {
-        console.error("[bot] failed recording promoLinkUsage:", err);
-      }
+    const promoToRecord = adminPriceMeta?.promoId ?? eff.promoLinkId;
+    if (promoToRecord) {
+      await recordPromoUsage(promoToRecord, user.id, reserve.orderId, total);
     }
     // The review prompt is NOT sent here — it waits for the customer to tap
     // "Я получил" on the delivery message above, confirming the goods work.
   } catch (e) {
     // Critical error: rollback whatever was charged.
-    if (!isRefGift) {
+    if (!isRefGift && !isAdminPay) {
       await db.$transaction([
         db.botUser.update({ where: { id: user.id }, data: { balance: { increment: total } } }),
         db.botOrder.update({ where: { id: reserve.orderId }, data: { status: "failed" } }),
       ]).catch((err) => console.error("[bot] balance rollback failed:", (err as Error).message));
-    } else {
+    } else if (isRefGift) {
       // GREATEST(0, …) rather than a bare decrement — a raw decrement could
       // drive spentReferrals negative and hand out points that never existed.
       await refundRefPoints(user.id, refPointsCost);
+      await db.botOrder.update({ where: { id: reserve.orderId }, data: { status: "failed" } })
+        .catch(() => {});
+    } else {
       await db.botOrder.update({ where: { id: reserve.orderId }, data: { status: "failed" } })
         .catch(() => {});
     }
@@ -2604,6 +2689,44 @@ async function showBankPicker(
     const adminText = `${label} — ${money(total, lang)}${targetUsername ? ` (@${targetUsername})` : ""}`;
     kb.url(stripLeadEmoji(t(lang, "admin_topup")), `https://t.me/${adminUser}?text=${encodeURIComponent(adminText)}`).icon(ADMIN_BTN_EMOJI).row();
   }
+
+  if (isAdmin(ctx)) {
+    const activePromo = await db.promoLink.findFirst({
+      where: {
+        variantId: v.id,
+        isActive: true,
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+      },
+      orderBy: { id: "desc" },
+    });
+    const hasActivePromo = activePromo && (activePromo.maxUses === 0 || activePromo.usedCount < activePromo.maxUses);
+
+    let clientVipPrice: number | null = null;
+    if (targetUsername) {
+      const targetClean = targetUsername.replace(/^@/, "").trim().toLowerCase();
+      const targetUser = await db.botUser.findFirst({
+        where: { username: { equals: targetClean, mode: "insensitive" } },
+      });
+      if (targetUser) {
+        const vipRow = await db.userVariantPrice.findUnique({
+          where: { userId_variantId: { userId: targetUser.id, variantId: v.id } },
+        });
+        if (vipRow && vipRow.priceUzs > 0) {
+          clientVipPrice = vipRow.priceUzs * qty;
+        }
+      }
+    }
+
+    if (hasActivePromo) {
+      kb.text(`⚡ Выдать по акции (${money(activePromo.priceUzs * qty, lang)})`, `adm_pay:${v.id}:${qty}:promo:${activePromo.id}${suffix}`).row();
+    }
+    if (clientVipPrice !== null) {
+      kb.text(`💎 Выдать по VIP-цене (${money(clientVipPrice, lang)})`, `adm_pay:${v.id}:${qty}:vip:0${suffix}`).row();
+    }
+    kb.text(`⚡ Выдать через админ (${money(total, lang)})`, `adm_pay:${v.id}:${qty}:base:0${suffix}`).row();
+    kb.text(targetUsername ? `👤 Клиент: @${targetUsername} (изменить)` : `👤 Указать @клиента (опционально)`, `adm_set_client:${v.id}:${qty}`).row();
+  }
+
   kb.text(t(lang, "back"), `q:${v.id}:${qty}:0:all`);
 
   const text =
@@ -6170,10 +6293,73 @@ bot.on("callback_query:data", async (ctx) => {
     // rest[3], when present, is the Stars/Premium recipient chosen before payment.
     if (tag === "tcheck_buy") return startReceiptPayment(ctx, lang, Number(rest[0]), `buy:${rest[1]}:${rest[2]}${rest[3] ? `:${rest[3]}` : ""}`);
     // rest[3] = username (may be empty), rest[4] = numeric recipient id. Built
-    // via buildBuyNote so the recipient survives the payment round-trip — a
-    // hand-built note here used to drop it and deliver to the buyer instead.
     if (tag === "tstar_buy") return starsInvoice(ctx, lang, Number(rest[0]), buildBuyNote(Number(rest[1]), Number(rest[2]) || 1, rest[3] || null, rest[4] || null));
     if (tag === "tman_buy") { await ctx.answerCallbackQuery().catch(() => {}); return requestTopUp(ctx, lang, Number(rest[0]), "manual", `buy:${rest[1]}:${rest[2]}${rest[3] ? `:${rest[3]}` : ""}`); }
+    if (tag === "adm_set_client") {
+      if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {});
+      const variantId = Number(rest[0]);
+      const qty = Number(rest[1]) || 1;
+      pending.set(String(ctx.from?.id), { type: "adm_client_username", variantId, qty });
+      await ctx.answerCallbackQuery().catch(() => {});
+      return ctx.reply(
+        "👤 <b>Укажите @username клиента:</b>\n\nОтправьте username в чат (например <code>@username</code>).\nЕсли нужно сбросить или не указывать, отправьте <code>/skip</code>",
+        { parse_mode: "HTML" },
+      );
+    }
+    if (tag === "adm_pay") {
+      if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {});
+      const variantId = Number(rest[0]);
+      const qty = Number(rest[1]) || 1;
+      const priceMode = rest[2]; // "promo" | "vip" | "base"
+      const promoId = Number(rest[3]) || 0;
+      const targetUsername = rest[4] || undefined;
+      const recipientTgId = rest[5] || undefined;
+
+      await ctx.answerCallbackQuery({ text: "⏳ Оформление заказа..." }).catch(() => {});
+      let adminPriceOverride: number | undefined = undefined;
+      let adminPriceMeta: { isPromo?: boolean; isVip?: boolean; promoId?: number } = {};
+
+      const v = await db.variant.findUnique({ where: { id: variantId } });
+      if (!v) return ctx.reply("❌ Товар не найден.");
+
+      if (priceMode === "promo" && promoId > 0) {
+        const promo = await db.promoLink.findUnique({ where: { id: promoId } });
+        if (promo) {
+          adminPriceOverride = promo.priceUzs * qty;
+          adminPriceMeta = { isPromo: true, promoId: promo.id };
+        }
+      } else if (priceMode === "vip" && targetUsername) {
+        const targetClean = targetUsername.replace(/^@/, "").trim().toLowerCase();
+        const targetUser = await db.botUser.findFirst({
+          where: { username: { equals: targetClean, mode: "insensitive" } },
+        });
+        if (targetUser) {
+          const vipRow = await db.userVariantPrice.findUnique({
+            where: { userId_variantId: { userId: targetUser.id, variantId: v.id } },
+          });
+          if (vipRow && vipRow.priceUzs > 0) {
+            adminPriceOverride = vipRow.priceUzs * qty;
+            adminPriceMeta = { isVip: true };
+          }
+        }
+      }
+
+      const tgId = String(ctx.from?.id ?? "");
+      await executePurchase(
+        tgId,
+        variantId,
+        qty,
+        undefined,
+        targetUsername,
+        0,
+        recipientTgId,
+        "admin",
+        undefined,
+        adminPriceOverride,
+        adminPriceMeta,
+      );
+      return;
+    }
     if (tag === "ord_refresh") {
       if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {});
       const kb = await buildOrderKeyboard();
@@ -6512,6 +6698,25 @@ bot.on("message:text", async (ctx) => {
       return ctx.reply("♻️ Медиа (видео/баннер) товара удалено.");
     }
     return ctx.reply("Пришлите видео или фото (баннер) сообщением, либо напишите: убрать");
+  }
+
+  if (state.type === "adm_client_username") {
+    if (!isAdmin(ctx)) {
+      pending.delete(key);
+      return;
+    }
+    pending.delete(key);
+    const raw = (ctx.message.text ?? "").trim();
+    let clientUname: string | undefined = undefined;
+    if (raw.toLowerCase() !== "/skip" && raw.toLowerCase() !== "skip" && raw !== "-") {
+      const res = checkUsername(raw);
+      if (res.ok) {
+        clientUname = res.username;
+      } else {
+        clientUname = raw.replace(/^@/, "").trim();
+      }
+    }
+    return doBuy(ctx, state.variantId, state.qty, clientUname);
   }
 
   // Username fallback for "gift Premium to someone else". A username is NOT a
