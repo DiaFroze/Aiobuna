@@ -238,12 +238,21 @@ const UZS_PER_USDT = Number(process.env.USDT_UZS_RATE ?? 12600);
 // Payme (пополнение баланса, UZS). The webhook lives in the Next.js app; here
 // the bot only offers the button and builds the checkout URL. paymeReady()
 // gates the button so a half-configured merchant can never be shown.
-function isAdmin(ctx: Context) {
-  const senderId = String(ctx.from?.id ?? "");
-  if (!senderId) return false;
-  if (ADMIN_ID !== "" && senderId === ADMIN_ID) return true;
+let dbAdminIdsCache: Set<string> = new Set();
+let dbAdminIdsCacheExpiry = 0;
+
+function isTgIdAdmin(tgId: string | number | null | undefined): boolean {
+  if (!tgId) return false;
+  const s = String(tgId);
+  if (ADMIN_ID !== "" && s === ADMIN_ID) return true;
   const adminIds = (process.env.ADMIN_IDS ?? "").split(/[,\s]+/).filter(Boolean);
-  return adminIds.includes(senderId);
+  if (adminIds.includes(s)) return true;
+  if (dbAdminIdsCache.has(s)) return true;
+  return false;
+}
+
+function isAdmin(ctx: Context): boolean {
+  return isTgIdAdmin(ctx.from?.id);
 }
 const PAYME_ENABLED = process.env.PAYME_ENABLED === "1";
 const PAYME_MERCHANT_ID = process.env.PAYME_MERCHANT_ID ?? "";
@@ -635,6 +644,36 @@ function langKeyboard() {
 async function setting(key: string, fallback: string): Promise<string> {
   const s = await db.setting.findUnique({ where: { key } });
   return s?.valueRu?.trim() || fallback;
+}
+
+async function refreshAdminIdsCache(): Promise<Set<string>> {
+  const set = new Set<string>();
+  if (ADMIN_ID) set.add(ADMIN_ID);
+  const envIds = (process.env.ADMIN_IDS ?? "").split(/[,\s]+/).filter(Boolean);
+  for (const id of envIds) set.add(id);
+  try {
+    const raw = (await setting("admin_ids", "")).trim();
+    if (raw) {
+      for (const id of raw.split(/[,\s]+/).filter(Boolean)) set.add(id);
+    }
+  } catch {}
+  dbAdminIdsCache = set;
+  dbAdminIdsCacheExpiry = Date.now() + 30_000;
+  return set;
+}
+
+async function isTgIdAdminAsync(tgId: string | number | null | undefined): Promise<boolean> {
+  if (!tgId) return false;
+  if (isTgIdAdmin(tgId)) return true;
+  if (Date.now() >= dbAdminIdsCacheExpiry) {
+    const set = await refreshAdminIdsCache();
+    return set.has(String(tgId));
+  }
+  return false;
+}
+
+async function isAdminAsync(ctx: Context): Promise<boolean> {
+  return isTgIdAdminAsync(ctx.from?.id);
 }
 
 async function findUser(ctx: Context) {
@@ -1619,7 +1658,18 @@ async function activePromoForVariant(variantId: number): Promise<{ originalPrice
 // buttons (a pending top-up is pre-created for the exact price); Stars is a
 // callback (an invoice message, to avoid a slow API call on every ± re-render);
 // admin opens a chat with the product pre-filled.
-async function appendCardPayButtons(kb: InlineKeyboard, userId: number, variantId: number, qty: number, label: string, total: number, refSpend: number, lang: string, bankOnly = false) {
+async function appendCardPayButtons(
+  kb: InlineKeyboard,
+  userId: number,
+  variantId: number,
+  qty: number,
+  label: string,
+  total: number,
+  refSpend: number,
+  lang: string,
+  bankOnly = false,
+  userTgId?: string,
+) {
   const note = `buy:${variantId}:${qty}`;
   const amt = money(total, lang);
   if (paymeReady()) {
@@ -1636,6 +1686,24 @@ async function appendCardPayButtons(kb: InlineKeyboard, userId: number, variantI
     kb.text(stripLeadEmoji(t(lang, "pay_stars", { n: soumToStars(total) })), `tstar_buy:${total}:${variantId}:${qty}`).icon(STARS_BTN_EMOJI).row();
     const adminUser = (await setting("support_username", "Aiobuna_support")).replace(/^@/, "");
     kb.url(stripLeadEmoji(t(lang, "admin_topup")), `https://t.me/${adminUser}?text=${encodeURIComponent(`${label} — ${money(total, lang)}`)}`).icon(ADMIN_BTN_EMOJI).row();
+  }
+
+  if (await isTgIdAdminAsync(userTgId)) {
+    const activePromo = await db.promoLink.findFirst({
+      where: {
+        variantId,
+        isActive: true,
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+      },
+      orderBy: { id: "desc" },
+    });
+    const hasActivePromo = activePromo && (activePromo.maxUses === 0 || activePromo.usedCount < activePromo.maxUses);
+
+    if (hasActivePromo) {
+      kb.text(`⚡ Выдать по акции (${money(activePromo.priceUzs * qty, lang)})`, `adm_pay:${variantId}:${qty}:promo:${activePromo.id}`).row();
+    }
+    kb.text(`⚡ Выдать через админ (${money(total, lang)})`, `adm_pay:${variantId}:${qty}:base:0`).row();
+    kb.text(`👤 Указать @клиента (опционально)`, `adm_set_client:${variantId}:${qty}`).row();
   }
 }
 
@@ -1711,8 +1779,11 @@ async function buildQtyChooser(
   // and was then delivered to the buyer instead of the intended recipient.
   if (deliversToAccount(v)) {
     kb.text(t(lang, "buy_for", { v: money(payTotal, lang) }), `bc:${v.id}:${qty}`).row();
+    if (await isTgIdAdminAsync(user.tgId)) {
+      kb.text(`⚡ Выдать через админ (${money(payTotal, lang)})`, `bc:${v.id}:${qty}`).row();
+    }
   } else {
-    await appendCardPayButtons(kb, user.id, v.id, qty, label, payTotal, disc?.cost ?? 0, lang, course);
+    await appendCardPayButtons(kb, user.id, v.id, qty, label, payTotal, disc?.cost ?? 0, lang, course, user.tgId);
   }
   // Back goes to the plan list only when there IS one; a single-variant product
   // opens this card directly (showProduct skips its page), so "back" there must
@@ -5808,10 +5879,83 @@ bot.command(["desc", "setdesc", "tavsif", "opisanie"], async (ctx) => {
   ).catch(() => {});
 });
 
+bot.command(["myid", "id", "whoami"], async (ctx) => {
+  const tgId = String(ctx.from?.id ?? "");
+  const username = ctx.from?.username ? `@${ctx.from.username}` : "нет";
+  const isAdm = await isAdminAsync(ctx);
+  await ctx.reply(
+    `🆔 <b>Ваш Telegram ID:</b> <code>${tgId}</code>\n` +
+    `👤 <b>Username:</b> ${username}\n` +
+    `👑 <b>Статус админа:</b> ${isAdm ? "✅ Да (Администратор)" : "❌ Нет (Обычный пользователь)"}\n\n` +
+    (isAdm
+      ? "Вам доступны специальные админ-кнопки при покупке любого товара и команды /admin"
+      : `Чтобы сделать этот аккаунт админом:\n1) Зайдите с главного админ-аккаунта и отправьте команду:\n<code>/addadmin ${tgId}</code>\n2) Или добавьте ID <code>${tgId}</code> в переменную TELEGRAM_ADMIN_CHAT_ID в Railway.`),
+    { parse_mode: "HTML" },
+  );
+});
+
+bot.command("addadmin", async (ctx) => {
+  if (!(await isAdminAsync(ctx))) return;
+  const arg = (ctx.match ?? "").trim();
+  if (!arg) return ctx.reply("Формат: <code>/addadmin &lt;tgId&gt;</code>\nПример: <code>/addadmin 5464638349</code>", { parse_mode: "HTML" });
+  const raw = (await setting("admin_ids", "")).trim();
+  const current = new Set(raw.split(/[,\s]+/).filter(Boolean));
+  current.add(arg);
+  await db.setting.upsert({
+    where: { key: "admin_ids" },
+    create: { key: "admin_ids", valueRu: Array.from(current).join(",") },
+    update: { valueRu: Array.from(current).join(",") },
+  });
+  dbAdminIdsCacheExpiry = 0;
+  await refreshAdminIdsCache();
+  return ctx.reply(`✅ Telegram ID <code>${arg}</code> добавлен в список администраторов!`, { parse_mode: "HTML" });
+});
+
+bot.command("deladmin", async (ctx) => {
+  if (!(await isAdminAsync(ctx))) return;
+  const arg = (ctx.match ?? "").trim();
+  if (!arg) return ctx.reply("Формат: <code>/deladmin &lt;tgId&gt;</code>", { parse_mode: "HTML" });
+  const raw = (await setting("admin_ids", "")).trim();
+  const current = new Set(raw.split(/[,\s]+/).filter(Boolean));
+  current.delete(arg);
+  await db.setting.upsert({
+    where: { key: "admin_ids" },
+    create: { key: "admin_ids", valueRu: Array.from(current).join(",") },
+    update: { valueRu: Array.from(current).join(",") },
+  });
+  dbAdminIdsCacheExpiry = 0;
+  await refreshAdminIdsCache();
+  return ctx.reply(`✅ Telegram ID <code>${arg}</code> удалён из списка администраторов.`, { parse_mode: "HTML" });
+});
+
+bot.command("admins", async (ctx) => {
+  if (!(await isAdminAsync(ctx))) return;
+  const set = await refreshAdminIdsCache();
+  const list = Array.from(set).map((id) => `• <code>${id}</code>`).join("\n");
+  return ctx.reply(`👑 <b>Список администраторов бота:</b>\n\n${list || "—"}\n\nДобавить: <code>/addadmin &lt;tgId&gt;</code>\nУдалить: <code>/deladmin &lt;tgId&gt;</code>`, { parse_mode: "HTML" });
+});
+
 bot.command("admin", async (ctx) => {
-  if (!isAdmin(ctx)) return;
+  const isAdm = await isAdminAsync(ctx);
+  if (!isAdm) {
+    const tgId = String(ctx.from?.id ?? "");
+    const username = ctx.from?.username ? `@${ctx.from.username}` : "—";
+    return ctx.reply(
+      `🔒 <b>Доступ ограничен</b>\n\n` +
+      `Ваш Telegram ID: <code>${tgId}</code>\n` +
+      `Username: ${username}\n\n` +
+      `Этот аккаунт пока не внесён в список администраторов бота.\n` +
+      `Чтобы выдать права администратора этому аккаунту:\n` +
+      `1) Отправьте с уже действующего админ-аккаунта команду:\n<code>/addadmin ${tgId}</code>\n` +
+      `2) Или добавьте этот ID в Railway в переменную TELEGRAM_ADMIN_CHAT_ID или ADMIN_IDS.`,
+      { parse_mode: "HTML" },
+    );
+  }
   const text =
     `🛠 <b>Команды администратора:</b>\n\n` +
+    `⚡ <b>Покупка:</b> Откройте любой товар в каталоге — там есть кнопки «Выдать через админ»\n` +
+    `👑 <b>/admins</b> — Список администраторов (и <code>/addadmin &lt;tgId&gt;</code>)\n` +
+    `🆔 <b>/myid</b> — Проверить свой Telegram ID и статус\n` +
     `🔢 <b>/order</b> — Настройка очереди товаров в каталоге (▲/▼)\n` +
     `📝 <b>/desc</b> — Установка описания товара с премиум-эмодзи\n` +
     `🖼 <b>/banner</b> — Задать общий баннер магазина\n` +
