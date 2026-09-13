@@ -76,9 +76,9 @@ export type ClickTopUp = {
 
 export interface ClickRepo {
   findTopUp(topUpId: number): Promise<ClickTopUp | null>;
-  savePrepare(topUpId: number, clickTransId: string): Promise<void>;
+  savePrepare(topUpId: number, clickTransId: string): Promise<void | boolean>;
   // Atomic: status pending -> approved + credit balance, exactly once.
-  complete(topUpId: number, clickTransId: string): Promise<"ok" | "already">;
+  complete(topUpId: number, clickTransId: string): Promise<"ok" | "already" | "cancelled" | "missing">;
   cancel(topUpId: number, clickTransId: string): Promise<void>;
 }
 
@@ -128,7 +128,9 @@ async function prepare(p: ClickParams, topUpId: number, repo: ClickRepo): Promis
   if (t.status === "rejected") return reply(p, ClickError.CANCELLED);
   if (!amountMatches(p.amount, t.amountSum)) return reply(p, ClickError.INVALID_AMOUNT);
 
-  await repo.savePrepare(topUpId, p.click_trans_id ?? "");
+  if (!p.click_trans_id) return reply(p, ClickError.BAD_REQUEST);
+  if (t.clickTransId && t.clickTransId !== p.click_trans_id) return reply(p, ClickError.TXN_NOT_FOUND);
+  if (await repo.savePrepare(topUpId, p.click_trans_id) === false) return reply(p, ClickError.TXN_NOT_FOUND);
   return reply(p, ClickError.SUCCESS, { merchant_prepare_id: String(topUpId) });
 }
 
@@ -148,9 +150,12 @@ async function complete(p: ClickParams, topUpId: number, repo: ClickRepo): Promi
     // Idempotent replay — money already credited once.
     return reply(p, ClickError.SUCCESS, { merchant_confirm_id: String(topUpId) });
   }
+  if (t.status !== "pending") return reply(p, ClickError.CANCELLED);
   if (!amountMatches(p.amount, t.amountSum)) return reply(p, ClickError.INVALID_AMOUNT);
 
-  await repo.complete(topUpId, p.click_trans_id ?? "");
+  const result = await repo.complete(topUpId, p.click_trans_id ?? "");
+  if (result === "cancelled") return reply(p, ClickError.CANCELLED);
+  if (result === "missing") return reply(p, ClickError.TXN_NOT_FOUND);
   return reply(p, ClickError.SUCCESS, { merchant_confirm_id: String(topUpId) });
 }
 

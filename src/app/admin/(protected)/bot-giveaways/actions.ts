@@ -55,6 +55,12 @@ export async function createGiveawayAction(formData: FormData) {
   if (!title || !variantId || !postText) {
     redirect("/admin/bot-giveaways?error=missing");
   }
+  if (![variantId, winnersCount, claimHours, reqFriends, discountPriceUzs].every(Number.isSafeInteger) ||
+      !["free", "discount"].includes(prizeType) || rawDiscount < 0 ||
+      title.length > 200 || postText.length > 4096 || winnersCount > 1000 || claimHours > 8760 ||
+      (extraChannelId && !extraChannelId.startsWith("@") && !extraChannelUrl)) {
+    redirect("/admin/bot-giveaways?error=invalid");
+  }
 
   const variant = await botDb.variant.findUnique({ where: { id: variantId } });
   if (!variant) {
@@ -103,10 +109,11 @@ export async function toggleGiveawayAction(formData: FormData) {
 
   const gw = await botDb.giveaway.findUnique({ where: { id } });
   if (!gw) return;
+  if (!["draft", "active"].includes(gw.status)) redirect("/admin/bot-giveaways?error=alreadydrawn");
 
   const newStatus = gw.status === "active" ? "draft" : "active";
-  await botDb.giveaway.update({
-    where: { id },
+  await botDb.giveaway.updateMany({
+    where: { id, status: gw.status },
     data: { status: newStatus },
   });
 
@@ -134,6 +141,7 @@ export async function publishGiveawayAction(formData: FormData) {
   if (!gw || !gw.channelTarget || !gw.postText) {
     redirect("/admin/bot-giveaways?error=nochannel");
   }
+  if (!["draft", "active"].includes(gw.status)) redirect("/admin/bot-giveaways?error=alreadydrawn");
 
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) {
@@ -143,6 +151,7 @@ export async function publishGiveawayAction(formData: FormData) {
   const botUsername = process.env.NEXT_PUBLIC_BOT_USERNAME || process.env.BOT_USERNAME || "Aiobunabot";
   const botUrl = buildGiveawayBotUrl(botUsername, gw.id);
 
+  let publishError = "";
   try {
     const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
@@ -167,13 +176,12 @@ export async function publishGiveawayAction(formData: FormData) {
     const data = await res.json();
     if (!data.ok) {
       console.error("[giveaway] telegram publish failed:", data);
-      const errMsg = encodeURIComponent(data.description || "Publish failed");
-      redirect(`/admin/bot-giveaways?error=${errMsg}`);
+      throw new Error(data.description || "Publish failed");
     }
 
     const messageId = data.result?.message_id;
-    await botDb.giveaway.update({
-      where: { id },
+    await botDb.giveaway.updateMany({
+      where: { id, status: { in: ["draft", "active"] } },
       data: {
         postedMessageId: messageId || null,
         status: "active",
@@ -189,11 +197,11 @@ export async function publishGiveawayAction(formData: FormData) {
     });
 
     revalidatePath("/admin/bot-giveaways");
-    redirect("/admin/bot-giveaways?ok=published");
   } catch (err) {
-    console.error("[giveaway] publish exception:", err);
-    redirect("/admin/bot-giveaways?error=publishexception");
+    publishError = err instanceof Error ? err.message : "publishexception";
   }
+  if (publishError) redirect(`/admin/bot-giveaways?error=${encodeURIComponent(publishError)}`);
+  redirect("/admin/bot-giveaways?ok=published");
 }
 
 /**
@@ -230,7 +238,7 @@ export async function drawGiveawayAction(formData: FormData) {
     redirect("/admin/bot-giveaways?error=notfound");
   }
 
-  if (gw.status === "completed") {
+  if (!["draft", "active"].includes(gw.status) || gw.winners.length > 0) {
     redirect("/admin/bot-giveaways?error=alreadydrawn");
   }
 
@@ -248,7 +256,14 @@ export async function drawGiveawayAction(formData: FormData) {
 
   // Create dedicated PromoLink for the winners
   const promoCode = generateDealSlug(`gw_${gw.id}`);
-  const promoLink = await botDb.promoLink.create({
+  // Commit the draw and all claims together. Only one concurrent submission wins.
+  const promoLink = await botDb.$transaction(async (tx) => {
+    const claimed = await tx.giveaway.updateMany({
+      where: { id: gw.id, status: { in: ["draft", "active"] }, winners: { none: {} } },
+      data: { status: "completed", drawnAt: new Date() },
+    });
+    if (claimed.count !== 1) return null;
+    const link = await tx.promoLink.create({
     data: {
       code: promoCode,
       title: `🏆 Победитель розыгрыша: ${gw.title}`,
@@ -259,11 +274,22 @@ export async function drawGiveawayAction(formData: FormData) {
       expiresAt: claimExpiry,
       isActive: true,
     },
-  });
+    });
+    for (const part of selected) {
+      await tx.giveawayWinner.create({ data: {
+        giveawayId: gw.id, userId: part.userId, promoLinkId: link.id,
+        expiresAt: claimExpiry, isClaimed: false,
+      } });
+      await tx.userDealClaim.create({ data: { userId: part.userId, promoLinkId: link.id } });
+    }
+    return link;
+  }, { timeout: 30_000 });
+  if (!promoLink) redirect("/admin/bot-giveaways?error=alreadydrawn");
 
   // Assign winner records and UserDealClaim
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const botUsername = process.env.NEXT_PUBLIC_BOT_USERNAME || process.env.BOT_USERNAME || "Aiobunabot";
+  let notificationFailed = !token;
   const p = gw.variant.plan.product;
   const v = gw.variant;
   const productTitle = `${p.titleRu} — ${v.titleRu}`;
@@ -281,32 +307,6 @@ export async function drawGiveawayAction(formData: FormData) {
   });
 
   for (const part of selected) {
-    // 1. Create GiveawayWinner
-    await botDb.giveawayWinner.create({
-      data: {
-        giveawayId: gw.id,
-        userId: part.userId,
-        promoLinkId: promoLink.id,
-        expiresAt: claimExpiry,
-        isClaimed: false,
-      },
-    });
-
-    // 2. Create UserDealClaim
-    await botDb.userDealClaim.upsert({
-      where: {
-        userId_promoLinkId: {
-          userId: part.userId,
-          promoLinkId: promoLink.id,
-        },
-      },
-      create: {
-        userId: part.userId,
-        promoLinkId: promoLink.id,
-      },
-      update: {},
-    });
-
     // 3. Send personal Telegram message to winner
     if (token && part.user.tgId) {
       const winnerMsg =
@@ -335,7 +335,10 @@ export async function drawGiveawayAction(formData: FormData) {
             ],
           },
         }),
-      }).catch((e) => console.warn("[giveaway] failed to notify winner:", e));
+      }).then(async (response) => {
+        const result = await response.json();
+        if (!result.ok) throw new Error(result.description || "Telegram rejected notification");
+      }).catch(() => { notificationFailed = true; });
     }
   }
 
@@ -372,17 +375,11 @@ export async function drawGiveawayAction(formData: FormData) {
           ],
         },
       }),
-    }).catch((e) => console.warn("[giveaway] failed to post results to channel:", e));
+    }).then(async (response) => {
+      const result = await response.json();
+      if (!result.ok) throw new Error(result.description || "Telegram rejected results");
+    }).catch(() => { notificationFailed = true; });
   }
-
-  // 5. Update giveaway status to completed
-  await botDb.giveaway.update({
-    where: { id: gw.id },
-    data: {
-      status: "completed",
-      drawnAt: new Date(),
-    },
-  });
 
   await audit({
     adminId: admin.id,
@@ -397,7 +394,7 @@ export async function drawGiveawayAction(formData: FormData) {
   });
 
   revalidatePath("/admin/bot-giveaways");
-  redirect("/admin/bot-giveaways?ok=drawn");
+  redirect(`/admin/bot-giveaways?ok=drawn${notificationFailed ? "&warning=notifyfailed" : ""}`);
 }
 
 /**

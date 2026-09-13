@@ -155,13 +155,20 @@ export function formatGiveawayResultsPost(params: {
   if (params.winners.length === 0) {
     lines.push("<i>Участников, выполнивших условия, не нашлось.</i>");
   } else {
-    params.winners.forEach((w, idx) => {
-      lines.push(`${idx + 1}. ${escapeTgHtml(maskUserIdentifier(w))}`);
-    });
+    for (let idx = 0; idx < params.winners.length; idx++) {
+      const line = `${idx + 1}. ${escapeTgHtml(maskUserIdentifier(params.winners[idx]))}`;
+      // Telegram sendMessage accepts at most 4096 characters. Reserve space
+      // for the footer and keep each HTML tag/entity whole.
+      if (lines.join("\n").length + line.length > 3400) {
+        lines.push(`… и ещё ${params.winners.length - idx} победителей.`);
+        break;
+      }
+      lines.push(line);
+    }
   }
 
   lines.push("");
-  lines.push("⚡ <i>Победителям отправлены персональные инструкции в боте для получения приза!</i>");
+  lines.push("⚡ <i>Победители могут открыть ссылку розыгрыша в боте для получения приза!</i>");
 
   return lines.join("\n");
 }

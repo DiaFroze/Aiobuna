@@ -1972,6 +1972,10 @@ async function recordPromoUsage(promoLinkId: number, userId: number, orderId: nu
           pricePaid,
         },
       }),
+      db.giveawayWinner.updateMany({
+        where: { promoLinkId, userId, isClaimed: false },
+        data: { isClaimed: true, claimedAt: new Date() },
+      }),
     ]);
     const plRow = await db.promoLink.findUnique({ where: { id: promoLinkId } });
     if (plRow && plRow.perUserLimit > 0) {
@@ -4263,7 +4267,7 @@ async function handleGiveawayStart(ctx: Context, user: any, payload: string) {
       });
 
       const kb = new InlineKeyboard();
-      if (!isExpired) {
+      if (!isExpired && !winner.isClaimed) {
         kb.text(t(lang, "gw_claim_btn"), `gw_claim:${giveaway.id}`).row();
       }
       kb.text(t(lang, "btn_shop"), "m:0:all");
@@ -4279,6 +4283,9 @@ async function handleGiveawayStart(ctx: Context, user: any, payload: string) {
     });
   }
 
+  if (giveaway.status !== "active" || (giveaway.endsAt && giveaway.endsAt.getTime() <= Date.now())) {
+    return ctx.reply(t(lang, "gw_ended"));
+  }
   // Check channel subscriptions if required
   const unsubscribedChannels: Array<{ name: string; url: string }> = [];
   if (giveaway.reqChannels) {
@@ -6726,6 +6733,7 @@ bot.on("callback_query:data", async (ctx) => {
         },
       });
       if (!winner) return ctx.reply(t(lang, "gw_not_found"));
+      if (winner.isClaimed || !winner.promoLink?.isActive) return ctx.reply(t(lang, "deal_expired"));
       if (winner.expiresAt.getTime() < Date.now()) {
         return ctx.reply(t(lang, "deal_expired"));
       }
@@ -8114,14 +8122,14 @@ async function maybeResetAdmins() {
 // restart mid-batch) never double-deliver. Money is never touched here.
 async function deliverPaidPaymeTopUps() {
   const pendingDelivery = await db.topUp.findMany({
-    where: { method: { in: ["payme", "click"] }, status: "approved", deliveredAt: null },
+    where: { OR: [{ method: { in: ["payme", "click"] } }, { externalId: "admin-panel" }], status: "approved", deliveredAt: null },
     take: 20,
   }).catch(() => [] as Array<{ id: number; userId: number; amount: number; note: string | null; refSpend: number }>);
 
   for (const topup of pendingDelivery) {
     // Atomic claim — only the tick that flips deliveredAt proceeds.
     const claim = await db.topUp.updateMany({
-      where: { id: topup.id, method: { in: ["payme", "click"] }, status: "approved", deliveredAt: null },
+      where: { id: topup.id, OR: [{ method: { in: ["payme", "click"] } }, { externalId: "admin-panel" }], status: "approved", deliveredAt: null },
       data: { deliveredAt: new Date() },
     }).catch(() => ({ count: 0 }));
     if (claim.count !== 1) continue;

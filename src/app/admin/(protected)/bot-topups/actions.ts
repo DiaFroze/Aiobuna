@@ -5,6 +5,7 @@ import { requirePermission } from "@/lib/auth/session";
 import { PERMISSIONS } from "@/lib/security/rbac";
 import { botDb } from "@/lib/botDb";
 import { audit } from "@/lib/security/audit";
+import { APPROVABLE_STATUSES } from "@/lib/domain/topup-approval";
 
 function str(v: FormDataEntryValue | null): string {
   return String(v ?? "").trim();
@@ -24,12 +25,17 @@ export async function approveTopUpAction(formData: FormData) {
   const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
   const id = Number(formData.get("id"));
   const topup = await botDb.topUp.findUnique({ where: { id }, include: { user: true } });
-  if (!topup || topup.status !== "pending") return;
-
-  await botDb.$transaction([
-    botDb.topUp.update({ where: { id }, data: { status: "approved" } }),
-    botDb.botUser.update({ where: { id: topup.userId }, data: { balance: { increment: topup.amount } } }),
-  ]);
+  if (!topup || ["payme", "click", "stars"].includes(topup.method)) return;
+  const won = await botDb.$transaction(async (tx) => {
+    const claimed = await tx.topUp.updateMany({
+      where: { id, status: { in: [...APPROVABLE_STATUSES] }, method: { notIn: ["payme", "click", "stars"] } },
+      data: { status: "approved", externalId: "admin-panel", deliveredAt: null },
+    });
+    if (claimed.count !== 1) return false;
+    await tx.botUser.update({ where: { id: topup.userId }, data: { balance: { increment: topup.amount } } });
+    return true;
+  });
+  if (!won) return;
   await audit({
     adminId: admin.id,
     action: "bot.topup.approve",
@@ -37,7 +43,7 @@ export async function approveTopUpAction(formData: FormData) {
     entityId: String(id),
     metadata: { amount: topup.amount },
   });
-  await notifyUser(topup.user.tgId, `✅ Ваш баланс пополнен на ${topup.amount.toFixed(2)} USDT. Спасибо!`);
+  // The bot poller notifies the user and fulfils any attached purchase.
   revalidatePath("/admin/bot-topups");
 }
 
@@ -45,9 +51,12 @@ export async function rejectTopUpAction(formData: FormData) {
   const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
   const id = Number(formData.get("id"));
   const topup = await botDb.topUp.findUnique({ where: { id }, include: { user: true } });
-  if (!topup || topup.status !== "pending") return;
-
-  await botDb.topUp.update({ where: { id }, data: { status: "rejected" } });
+  if (!topup || ["payme", "click", "stars"].includes(topup.method)) return;
+  const changed = await botDb.topUp.updateMany({
+    where: { id, status: { in: [...APPROVABLE_STATUSES] }, method: { notIn: ["payme", "click", "stars"] } },
+    data: { status: "rejected" },
+  });
+  if (changed.count !== 1) return;
   await audit({ adminId: admin.id, action: "bot.topup.reject", entityType: "BotTopUp", entityId: String(id) });
   await notifyUser(topup.user.tgId, `❌ Запрос на пополнение #${id} отклонён.`);
   revalidatePath("/admin/bot-topups");
@@ -57,7 +66,7 @@ export async function rejectTopUpAction(formData: FormData) {
  * Create a pending Payme invoice for a chosen сум amount, for Payme sandbox
  * testing. Bypasses the bot's minimum-top-up rule so any amount can be used,
  * and prints the exact tiyin value to paste into the sandbox. Attached to the
- * admin's own bot user (or any user, as a fallback) so it has an owner.
+ * admin's own bot user so tests never credit an arbitrary customer.
  */
 export async function createPaymeTestInvoiceAction(formData: FormData) {
   const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
@@ -65,9 +74,7 @@ export async function createPaymeTestInvoiceAction(formData: FormData) {
   if (!Number.isFinite(sum) || sum <= 0) return;
 
   const adminTgId = process.env.TELEGRAM_ADMIN_CHAT_ID ?? "";
-  const user =
-    (adminTgId ? await botDb.botUser.findUnique({ where: { tgId: adminTgId } }) : null) ??
-    (await botDb.botUser.findFirst());
+  const user = adminTgId ? await botDb.botUser.findUnique({ where: { tgId: adminTgId } }) : null;
   if (!user) return;
 
   await botDb.topUp.create({
@@ -100,25 +107,24 @@ export async function resetPaymeKeyAction() {
 /**
  * Reset a Payme test top-up back to "pending" so the SAME topup_id can be
  * reused across sandbox runs without reconfiguring the sandbox. Deletes its
- * PaymeTransaction, clears deliveredAt, and reverses a balance credit if the
- * top-up had been approved (only when the balance still covers it, to avoid
- * going negative).
+ * PaymeTransaction and clears deliveredAt. Only explicitly marked, uncredited
+ * test invoices are eligible; create a fresh invoice after a successful payment.
  */
 export async function resetTestTopupAction(formData: FormData) {
   const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
   const id = Number(formData.get("id"));
   const t = await botDb.topUp.findUnique({ where: { id } });
-  if (!t || t.method !== "payme") return;
+  if (!t || t.method !== "payme" || !t.note?.startsWith("payme-test by ")) return;
+  if (t.status === "approved") throw new Error("Создайте новый тестовый счёт: оплаченные счета не сбрасываются.");
 
   await botDb.$transaction(async (tx) => {
-    if (t.status === "approved") {
-      const u = await tx.botUser.findUnique({ where: { id: t.userId } });
-      if (u && u.balance >= t.amount) {
-        await tx.botUser.update({ where: { id: t.userId }, data: { balance: { decrement: t.amount } } });
-      }
-    }
+    await tx.$queryRaw`SELECT "id" FROM "PaymeTransaction" WHERE "topUpId" = ${id} FOR UPDATE`;
+    const claim = await tx.topUp.updateMany({
+      where: { id, status: { in: ["pending", "rejected"] }, note: { startsWith: "payme-test by " } },
+      data: { status: "pending", deliveredAt: null, expiresAt: new Date(Date.now() + 60 * 60_000) },
+    });
+    if (claim.count !== 1) return;
     await tx.paymeTransaction.deleteMany({ where: { topUpId: id } });
-    await tx.topUp.update({ where: { id }, data: { status: "pending", deliveredAt: null } });
   });
   await audit({ adminId: admin.id, action: "bot.payme.resettopup", entityType: "BotTopUp", entityId: String(id) });
   revalidatePath("/admin/bot-topups");
@@ -133,9 +139,13 @@ export async function manualCreditAction(formData: FormData) {
 
   const user = await botDb.botUser.findUnique({ where: { tgId } });
   if (!user) return;
-  await botDb.botUser.update({ where: { id: user.id }, data: { balance: { increment: amount } } });
-  await botDb.topUp.create({
-    data: { userId: user.id, amount, status: "approved", note: `manual by ${admin.email}` },
+  await botDb.$transaction(async (tx) => {
+    const changed = await tx.botUser.updateMany({
+      where: { id: user.id, ...(amount < 0 ? { balance: { gte: -amount } } : {}) },
+      data: { balance: { increment: amount } },
+    });
+    if (changed.count !== 1) throw new Error("Недостаточно средств для списания");
+    await tx.topUp.create({ data: { userId: user.id, amount, status: "approved", deliveredAt: new Date(), note: `manual by ${admin.email}` } });
   });
   await audit({
     adminId: admin.id,
@@ -144,6 +154,6 @@ export async function manualCreditAction(formData: FormData) {
     entityId: tgId,
     metadata: { amount },
   });
-  await notifyUser(tgId, `💰 Баланс изменён администратором на ${amount > 0 ? "+" : ""}${amount.toFixed(2)} USDT.`);
+  await notifyUser(tgId, `💰 Баланс изменён администратором на ${amount > 0 ? "+" : ""}${amount.toLocaleString("ru-RU")} сум.`);
   revalidatePath("/admin/bot-topups");
 }

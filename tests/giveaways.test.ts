@@ -207,6 +207,15 @@ describe("giveaways domain logic", () => {
       expect(post).toContain("1. @wi***_1");
     });
 
+    it("keeps a large winners announcement within Telegram's message limit", () => {
+      const post = formatGiveawayResultsPost({
+        title: "Большой конкурс", productTitle: "Приз", prizeType: "free", discountPriceUzs: 0,
+        winners: Array.from({ length: 1000 }, () => ({ firstName: "Длинное имя участника <&>", tgId: "123456789" })),
+      });
+      expect(post.length).toBeLessThanOrEqual(4096);
+      expect(post).toContain("ещё");
+      expect(post).toContain("&lt;&amp;&gt;");
+    });
     it("handles empty winners gracefully", () => {
       const post = formatGiveawayResultsPost({
         title: "Пустой конкурс",

@@ -222,6 +222,7 @@ async function performTransaction(id: Id, p: any, repo: PaymeRepo): Promise<Json
   }
 
   const done = await repo.performTxn(paymeId, repo.now());
+  if (done.state !== PaymeState.PERFORMED) return err(id, PaymeError.CANT_PERFORM);
   return ok(id, { transaction: done.id, perform_time: done.performTime, state: done.state });
 }
 
@@ -238,6 +239,12 @@ async function cancelTransaction(id: Id, p: any, repo: PaymeRepo): Promise<JsonR
 
   if (txn.state === PaymeState.CREATED) {
     const c = await repo.cancelCreated(paymeId, repo.now(), reason);
+    // A concurrent Perform may have won before the repository acquired its lock.
+    if (c.state === PaymeState.PERFORMED) {
+      const refunded = await repo.cancelPerformed(paymeId, repo.now(), reason);
+      if (!refunded) return err(id, PaymeError.CANT_CANCEL_COMPLETED);
+      return ok(id, { transaction: refunded.id, cancel_time: refunded.cancelTime, state: refunded.state });
+    }
     return ok(id, { transaction: c.id, cancel_time: c.cancelTime, state: c.state });
   }
 

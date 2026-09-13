@@ -5,7 +5,11 @@ import { requirePermission } from "@/lib/auth/session";
 import { PERMISSIONS } from "@/lib/security/rbac";
 import { botDb } from "@/lib/botDb";
 import { audit } from "@/lib/security/audit";
-import { closeDeliveryPatch } from "@/lib/domain/premium-delivery";
+import { closeDeliveryPatch, isAlreadyDelivered } from "@/lib/domain/premium-delivery";
+
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
 
 /**
  * Deliver manual order from the admin panel.
@@ -29,7 +33,7 @@ export async function deliverManualOrderAction(formData: FormData) {
     throw new Error("Заказ не найден");
   }
 
-  if (order.status !== "awaiting_delivery") {
+  if (order.status !== "awaiting_delivery" || isAlreadyDelivered(order)) {
     throw new Error("Этот заказ уже выдан или отменен");
   }
 
@@ -42,7 +46,7 @@ export async function deliverManualOrderAction(formData: FormData) {
   // "PAID", so it still counted as pending in /health AND /give would happily
   // hand the goods over a second time.
   const claimed = await botDb.botOrder.updateMany({
-    where: { id: orderId, status: "awaiting_delivery" },
+    where: { id: orderId, status: "awaiting_delivery", deliveryState: { not: "COMPLETED" } },
     data: { payload, ...closeDeliveryPatch(order) },
   });
 
@@ -65,8 +69,8 @@ export async function deliverManualOrderAction(formData: FormData) {
     const text =
       `🎁 <b>Ваш товар выдан администратором!</b>\n\n` +
       `<b>Заказ:</b> #${orderId}\n` +
-      `<b>Товар:</b> ${order.titleRu}\n\n` +
-      `<b>Данные:</b>\n<code>${payload}</code>`;
+      `<b>Товар:</b> ${escapeHtml(order.titleRu)}\n\n` +
+      `<b>Данные:</b>\n<code>${escapeHtml(payload)}</code>`;
 
     await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",

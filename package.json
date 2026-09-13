@@ -15,6 +15,7 @@
     "bot": "tsx --conditions=react-server src/bot/index.ts",
     "admin:create": "node --env-file=.env scripts/create-admin.mjs",
     "test": "vitest run",
+    "test:audit": "node scripts/test-audit.mjs",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },

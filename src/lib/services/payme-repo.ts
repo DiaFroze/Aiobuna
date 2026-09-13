@@ -61,14 +61,21 @@ export function prismaPaymeRepo(): PaymeRepo {
           SELECT "state", "topUpId" FROM "PaymeTransaction" WHERE "paymeId" = ${paymeId} FOR UPDATE`;
         const cur = locked[0];
         if (cur && cur.state === PaymeState.CREATED) {
+          const claimed = await tx.topUp.updateMany({
+            where: { id: cur.topUpId, status: "pending", method: "payme" },
+            data: { status: "approved" },
+          });
+          if (claimed.count !== 1) {
+            return toView(await tx.paymeTransaction.update({
+              where: { paymeId },
+              data: { state: PaymeState.CANCELLED, cancelTime: BigInt(performTime), reason: 4 },
+            }));
+          }
           await tx.paymeTransaction.update({
             where: { paymeId },
             data: { state: PaymeState.PERFORMED, performTime: BigInt(performTime) },
           });
-          const topup = await tx.topUp.update({
-            where: { id: cur.topUpId },
-            data: { status: "approved" },
-          });
+          const topup = await tx.topUp.findUniqueOrThrow({ where: { id: cur.topUpId } });
           await tx.botUser.update({
             where: { id: topup.userId },
             data: { balance: { increment: topup.amount } },
@@ -81,12 +88,15 @@ export function prismaPaymeRepo(): PaymeRepo {
 
     async cancelCreated(paymeId, cancelTime, reason) {
       const r = await botDb.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "PaymeTransaction" WHERE "paymeId" = ${paymeId} FOR UPDATE`;
+        const current = await tx.paymeTransaction.findUniqueOrThrow({ where: { paymeId } });
+        if (current.state !== PaymeState.CREATED) return current;
         const txn = await tx.paymeTransaction.update({
           where: { paymeId },
           data: { state: PaymeState.CANCELLED, cancelTime: BigInt(cancelTime), reason: reason ?? undefined },
         });
         // A cancelled top-up must never be delivered or re-used.
-        await tx.topUp.update({ where: { id: txn.topUpId }, data: { status: "rejected" } });
+        await tx.topUp.updateMany({ where: { id: txn.topUpId, status: "pending" }, data: { status: "rejected" } });
         return txn;
       });
       return toView(r);
@@ -98,8 +108,12 @@ export function prismaPaymeRepo(): PaymeRepo {
     // (-31007) and let it be handled by hand.
     async cancelPerformed(paymeId, cancelTime, reason) {
       return botDb.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "PaymeTransaction" WHERE "paymeId" = ${paymeId} FOR UPDATE`;
         const txn = await tx.paymeTransaction.findUnique({ where: { paymeId } });
         if (!txn) return null;
+        if (txn.state === PaymeState.CANCELLED || txn.state === PaymeState.CANCELLED_AFTER_PERFORM) return toView(txn);
+        if (txn.state !== PaymeState.PERFORMED) return null;
+        await tx.$queryRaw`SELECT "id" FROM "TopUp" WHERE "id" = ${txn.topUpId} FOR UPDATE`;
         const topup = await tx.topUp.findUnique({ where: { id: txn.topUpId } });
         if (!topup) return null;
         const locked = await tx.$queryRaw<Array<{ balance: number }>>`
@@ -117,17 +131,11 @@ export function prismaPaymeRepo(): PaymeRepo {
     },
 
     async listByRange(fromMs, toMs) {
-      // GetStatement is for reconciliation; a DB hiccup must not throw a 500 —
-      // return an empty statement, which is a valid response.
-      try {
-        const rows = await botDb.paymeTransaction.findMany({
-          where: { createTime: { gte: BigInt(Math.trunc(fromMs)), lte: BigInt(Math.trunc(toMs)) } },
-        });
-        return rows.map(toView);
-      } catch (e) {
-        console.error("[payme] listByRange failed:", (e as Error).message);
-        return [];
-      }
+      // Let the HTTP layer return a system error rather than a false empty statement.
+      const rows = await botDb.paymeTransaction.findMany({
+        where: { createTime: { gte: BigInt(Math.trunc(fromMs)), lte: BigInt(Math.trunc(toMs)) } },
+      });
+      return rows.map(toView);
     },
   };
 }

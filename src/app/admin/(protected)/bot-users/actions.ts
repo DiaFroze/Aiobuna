@@ -14,7 +14,7 @@ export async function creditUserBalanceAction(formData: FormData) {
   const userId = Number(formData.get("userId"));
   const amount = Math.abs(Number(formData.get("amount")));
   
-  if (!userId || isNaN(amount) || amount === 0) {
+  if (!userId || !Number.isFinite(amount) || amount === 0) {
     throw new Error("Неверные параметры начисления");
   }
 
@@ -23,12 +23,11 @@ export async function creditUserBalanceAction(formData: FormData) {
     throw new Error("Пользователь бота не найден");
   }
 
-  const newBalance = user.balance + amount;
-
-  await botDb.botUser.update({
+  const updated = await botDb.botUser.update({
     where: { id: userId },
-    data: { balance: newBalance },
+    data: { balance: { increment: amount } },
   });
+  const newBalance = updated.balance;
 
   await audit({
     adminId: admin.id,
@@ -37,7 +36,7 @@ export async function creditUserBalanceAction(formData: FormData) {
     entityId: user.tgId,
     metadata: {
       adjustment: amount,
-      oldBalance: user.balance,
+      oldBalance: newBalance - amount,
       newBalance,
     },
   });
@@ -64,7 +63,7 @@ export async function debitUserBalanceAction(formData: FormData) {
   const userId = Number(formData.get("userId"));
   const amount = Math.abs(Number(formData.get("amount")));
   
-  if (!userId || isNaN(amount) || amount === 0) {
+  if (!userId || !Number.isFinite(amount) || amount === 0) {
     throw new Error("Неверные параметры списания");
   }
 
@@ -73,11 +72,13 @@ export async function debitUserBalanceAction(formData: FormData) {
     throw new Error("Пользователь бота не найден");
   }
 
-  const newBalance = Math.max(0, user.balance - amount);
-
-  await botDb.botUser.update({
-    where: { id: userId },
-    data: { balance: newBalance },
+  const newBalance = await botDb.$transaction(async (tx) => {
+    const changed = await tx.botUser.updateMany({
+      where: { id: userId, balance: { gte: amount } },
+      data: { balance: { decrement: amount } },
+    });
+    if (changed.count !== 1) throw new Error("Недостаточно средств для списания");
+    return (await tx.botUser.findUniqueOrThrow({ where: { id: userId } })).balance;
   });
 
   await audit({
@@ -87,7 +88,7 @@ export async function debitUserBalanceAction(formData: FormData) {
     entityId: user.tgId,
     metadata: {
       adjustment: -amount,
-      oldBalance: user.balance,
+      oldBalance: newBalance + amount,
       newBalance,
     },
   });

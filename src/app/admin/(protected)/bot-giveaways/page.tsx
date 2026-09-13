@@ -9,6 +9,18 @@ import {
 } from "./actions";
 import { maskUserIdentifier } from "@/lib/domain/giveaways";
 
+const ERROR_MESSAGES: Record<string, string> = {
+  missing: "Заполните название, товар и текст поста.",
+  invalid: "Проверьте целые числа, длину текста и ссылку на закрытый канал.",
+  novariant: "Выбранный тариф не найден.",
+  nochannel: "Укажите канал и текст публикации.",
+  nobottoken: "Не настроен токен Telegram-бота.",
+  alreadydrawn: "Итоги уже подведены. Создайте новый розыгрыш.",
+  noparticipants: "Нет участников, выполнивших условия.",
+  notfound: "Розыгрыш не найден.",
+  publishexception: "Не удалось опубликовать пост. Проверьте права бота в канале.",
+};
+
 export const dynamic = "force-dynamic";
 
 function money(n: number) {
@@ -18,7 +30,7 @@ function money(n: number) {
 export default async function BotGiveawaysPage({
   searchParams,
 }: {
-  searchParams: { error?: string; ok?: string; view?: string };
+  searchParams: { error?: string; ok?: string; view?: string; warning?: string };
 }) {
   if (!botConfigured()) {
     return (
@@ -94,7 +106,7 @@ export default async function BotGiveawaysPage({
     <div className="space-y-6">
       <PageHeader
         title="🎉 Розыгрыши и конкурсы"
-        subtitle="Проведение розыгрышей товаров со скидкой или бесплатно, публикация постов в Telegram-канал с премиум-эмодзи и автоматическое определение победителей."
+        subtitle="Проведение розыгрышей товаров со скидкой или бесплатно, публикация постов в Telegram-канал с премиум-эмодзи. Победители выбираются случайно по кнопке «Подвести итоги»."
       />
 
       {searchParams.ok === "created" && (
@@ -109,7 +121,7 @@ export default async function BotGiveawaysPage({
       )}
       {searchParams.ok === "drawn" && (
         <div className="card p-3 border-success/30 bg-success/5 text-success text-sm">
-          🏆 Победители успешно определены! Им выдано право на покупку со спецценой, отправлены личные сообщения в боте и опубликован пост с итогами в канале.
+          🏆 Победители успешно определены! Им выдано право на покупку со спецценой.
         </div>
       )}
       {searchParams.ok === "updated" && (
@@ -123,9 +135,15 @@ export default async function BotGiveawaysPage({
         </div>
       )}
 
+      {searchParams.warning === "notifyfailed" && (
+        <div className="card p-3 border-warning/30 text-sm" role="alert">
+          Победители сохранены, но часть уведомлений Telegram не отправлена. Проверьте права бота в канале.
+          Победители могут открыть исходную ссылку розыгрыша в боте и забрать приз.
+        </div>
+      )}
       {searchParams.error && (
         <div className="card p-3 border-danger/30 bg-danger/5 text-danger text-sm">
-          ⚠️ Ошибка: {decodeURIComponent(searchParams.error)}
+          ⚠️ Ошибка: {ERROR_MESSAGES[searchParams.error] ?? searchParams.error}
         </div>
       )}
 
@@ -158,7 +176,7 @@ export default async function BotGiveawaysPage({
                   <div key={gw.id} className="card p-5 space-y-4 bg-surface border">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div>
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <span className="font-semibold text-base">{gw.title}</span>
                           <span
                             className={`badge text-xs px-2 py-0.5 rounded-full font-medium ${
@@ -261,7 +279,7 @@ export default async function BotGiveawaysPage({
                             <input type="hidden" name="id" value={gw.id} />
                             <button
                               type="submit"
-                              className="btn btn-sm btn-outline flex items-center gap-1 text-xs"
+                              className="btn-ghost flex items-center gap-1 text-xs"
                               title="Опубликовать анонс розыгрыша в канал"
                             >
                               📢 {gw.postedMessageId ? "Переопубликовать в канал" : "Опубликовать в канал"}
@@ -275,7 +293,7 @@ export default async function BotGiveawaysPage({
                             <input type="hidden" name="id" value={gw.id} />
                             <button
                               type="submit"
-                              className="btn btn-sm btn-primary flex items-center gap-1 text-xs"
+                              className="btn btn-sm btn-primary flex items-center gap-1 text-xs disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
                               disabled={eligibleCount === 0}
                               title={eligibleCount === 0 ? "Нет участников, выполнивших условия" : "Провести розыгрыш и выбрать победителей"}
                             >
@@ -317,7 +335,7 @@ export default async function BotGiveawaysPage({
         </div>
 
         {/* Right: Create giveaway form */}
-        <div className="card p-5 bg-surface border space-y-4 sticky top-6">
+        <div className="card p-5 bg-surface border space-y-4 lg:sticky lg:top-6">
           <div>
             <h2 className="text-base font-semibold">Новый розыгрыш</h2>
             <p className="text-xs text-muted">Задайте условия, выберите товар и подготовьте текст для публикации.</p>
@@ -332,14 +350,14 @@ export default async function BotGiveawaysPage({
                 name="title"
                 required
                 placeholder="например: Розыгрыш Gemini Pro 100 мест"
-                className="input input-sm w-full"
+                className="input w-full"
               />
             </div>
 
             {/* Variant selector */}
             <div>
               <label className="font-semibold block mb-1">Товар / Тариф для розыгрыша</label>
-              <select name="variantId" required className="select select-sm w-full">
+              <select name="variantId" required className="input w-full">
                 <option value="">-- Выберите тариф --</option>
                 {variantOptions.map((opt) => (
                   <option key={opt.id} value={opt.id}>
@@ -353,7 +371,7 @@ export default async function BotGiveawaysPage({
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className="font-semibold block mb-1">Тип приза</label>
-                <select name="prizeType" className="select select-sm w-full">
+                <select name="prizeType" className="input w-full">
                   <option value="discount">Скидочная цена</option>
                   <option value="free">Бесплатно (0 сум)</option>
                 </select>
@@ -367,7 +385,7 @@ export default async function BotGiveawaysPage({
                   min="0"
                   step="1000"
                   placeholder="0 для бесплатного"
-                  className="input input-sm w-full"
+                  className="input w-full"
                 />
               </div>
             </div>
@@ -382,7 +400,7 @@ export default async function BotGiveawaysPage({
                   defaultValue="100"
                   min="1"
                   required
-                  className="input input-sm w-full"
+                  className="input w-full"
                 />
               </div>
               <div>
@@ -393,7 +411,7 @@ export default async function BotGiveawaysPage({
                   defaultValue="24"
                   min="1"
                   required
-                  className="input input-sm w-full"
+                  className="input w-full"
                 />
                 <span className="text-[10px] text-muted">24 ч = 1 сутки, 48 ч = 2 суток</span>
               </div>
@@ -406,11 +424,16 @@ export default async function BotGiveawaysPage({
                 type="text"
                 name="channelTarget"
                 placeholder="@mychannel или -100123456789"
-                className="input input-sm w-full"
+                className="input w-full"
               />
               <span className="text-[10px] text-muted">Бот должен быть администратором этого канала с правом публикации.</span>
             </div>
 
+            <div>
+              <label className="font-semibold block mb-1">Ссылка для вступления в канал спонсора</label>
+              <input type="url" name="extraChannelUrl" placeholder="https://t.me/+…" className="input" />
+              <span className="text-muted">Обязательна для закрытого канала, указанного числовым ID.</span>
+            </div>
             {/* Post text */}
             <div>
               <div className="flex items-center justify-between mb-1">
@@ -422,9 +445,9 @@ export default async function BotGiveawaysPage({
                 rows={5}
                 required
                 defaultValue={
-                  "🔥 <b>МЕГА-РОЗЫГРЫШ ПОДПИСОК!</b>\n\nРазыгрываем 100 мест на <b>Gemini 1.5 Pro</b> со скидкой всего за <b>10 000 сум</b>!\n\n📌 <b>Условия участия:</b>\n1. Нажмите кнопку «🎉 Участвовать» ниже\n2. Подпишитесь на наш канал\n\nПобедители определятся автоматически! 🚀"
+                  "🔥 <b>МЕГА-РОЗЫГРЫШ ПОДПИСОК!</b>\n\nРазыгрываем 100 мест на <b>Gemini 1.5 Pro</b> со скидкой всего за <b>10 000 сум</b>!\n\n📌 <b>Условия участия:</b>\n1. Нажмите кнопку «🎉 Участвовать» ниже\n2. Подпишитесь на наш канал\n\nИтоги объявим в канале! 🚀"
                 }
-                className="textarea textarea-sm w-full font-mono text-xs leading-relaxed"
+                className="input w-full font-mono text-xs leading-relaxed"
               />
               <div className="mt-1 p-2 bg-surface-2 rounded text-[10px] text-muted space-y-1">
                 <div><b>Подсказка по Premium Emoji:</b> вставляйте тег:</div>
@@ -440,7 +463,7 @@ export default async function BotGiveawaysPage({
                 type="text"
                 name="buttonText"
                 defaultValue="🎉 Участвовать"
-                className="input input-sm w-full"
+                className="input w-full"
               />
             </div>
 
@@ -458,7 +481,7 @@ export default async function BotGiveawaysPage({
                   type="text"
                   name="extraChannelId"
                   placeholder="@sponsor_channel"
-                  className="input input-sm w-full"
+                  className="input w-full"
                 />
               </div>
 
@@ -469,7 +492,7 @@ export default async function BotGiveawaysPage({
                   name="reqFriends"
                   defaultValue="0"
                   min="0"
-                  className="input input-sm w-full"
+                  className="input w-full"
                 />
                 <span className="text-[10px] text-muted">0 = без приглашений, участие сразу после подписки.</span>
               </div>
