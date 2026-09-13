@@ -727,6 +727,7 @@ model BotUser {
   dealClaims       UserDealClaim[]
   giveawayEntries  GiveawayParticipant[]
   giveawayWins     GiveawayWinner[]
+  channelBoosts    ChannelBoost[]
 }
 
 model BotAdStart {
@@ -1157,4 +1158,25 @@ model GiveawayWinner {
   @@index([giveawayId])
   @@index([userId])
 }
+
+// ---------------------------------------------------------------------------
+// Telegram Channel Boosts
+// ---------------------------------------------------------------------------
+
+model ChannelBoost {
+  id         Int       @id @default(autoincrement())
+  chatId     String    // Channel chat ID that received the boost
+  tgId       String    // Telegram ID of user who boosted
+  boostId    String    // Unique boost ID from Telegram API
+  userId     Int?      // Link to BotUser if exists
+  user       BotUser?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+  expiresAt  DateTime  // Boost expiration timestamp
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@unique([chatId, boostId])
+  @@index([tgId])
+  @@index([expiresAt])
+}
+
 

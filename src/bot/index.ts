@@ -42,13 +42,22 @@ import {
   EMOJI_CHAR_TO_PREMIUM,
   messageEntitiesToHtml,
 } from "../lib/emoji/rich-text";
-import { validateDealEligibility, calculateDealDiscount, parseDealPayload } from "../lib/domain/deal-links";
+import { validateDealEligibility, calculateDealDiscount, parseDealPayload, generateDealSlug } from "../lib/domain/deal-links";
 import {
   parseGiveawayStartPayload,
   buildGiveawayBotUrl,
   checkParticipantEligibility,
   maskUserIdentifier,
+  formatGiveawayCountdown,
+  formatGiveawayResultsPost,
+  selectRandomWinners,
+  calculateClaimExpiry,
+  isGiveawayDueForDraw,
 } from "../lib/domain/giveaways";
+import {
+  calculateBoosterDiscount,
+  formatBoosterCardBadge,
+} from "../lib/domain/channel-boosts";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -535,11 +544,41 @@ async function effPriceFor(
       }
     }
 
+    // Check if user is an active channel booster
+    const activeBoost = await db.channelBoost.findFirst({
+      where: {
+        userId,
+        expiresAt: { gt: new Date() },
+      },
+    }).catch(() => null);
+
+    if (activeBoost) {
+      const discountPercent = await getBoosterDiscountPercent();
+      if (discountPercent > 0) {
+        const { price, discountPercent: appliedPercent } = calculateBoosterDiscount(basePriceUzs, discountPercent);
+        return {
+          price,
+          label: formatBoosterCardBadge(appliedPercent),
+          isVip: true,
+        };
+      }
+    }
+
     return { price: basePriceUzs, label: null };
   } catch (e) {
     console.error("[bot] effPriceFor failed (using base price):", (e as Error).message);
     return { price: basePriceUzs, label: null };
   }
+}
+
+let boostDiscountCache: { percent: number; until: number } = { percent: 10, until: 0 };
+async function getBoosterDiscountPercent(): Promise<number> {
+  if (Date.now() < boostDiscountCache.until) return boostDiscountCache.percent;
+  const row = await db.setting.findUnique({ where: { key: "boost_discount_percent" } }).catch(() => null);
+  const val = row ? Number(row.valueRu) : 10;
+  const percent = Number.isFinite(val) && val >= 0 && val <= 100 ? val : 10;
+  boostDiscountCache = { percent, until: Date.now() + 30_000 };
+  return percent;
 }
 
 // An invited user only counts once they have actually subscribed to the
@@ -716,6 +755,7 @@ async function getUser(ctx: Context, refParam?: string) {
   const created = await db.botUser.create({
     data: { tgId, username: from.username ?? null, firstName: from.first_name ?? null, referredBy },
   });
+  db.channelBoost.updateMany({ where: { tgId, userId: null }, data: { userId: created.id } }).catch(() => {});
   // No automatic gift here any more — the referrer earns 1 point per invite
   // and spends them explicitly in the /gifts shop when they're ready.
   return created;
@@ -4427,6 +4467,7 @@ async function handleGiveawayStart(ctx: Context, user: any, payload: string) {
     text += `🎁 Цена для победителя: <b>Бесплатно (0 сум)</b>\n`;
   }
   text += `👥 Количество победителей: <b>${giveaway.winnersCount}</b>\n`;
+  text += `${formatGiveawayCountdown(giveaway.endsAt)}\n`;
 
   if (giveaway.reqFriends > 0) {
     text += `\n👥 <b>Обязательное условие:</b> пригласить <b>${giveaway.reqFriends}</b> друзей!\n`;
@@ -4445,6 +4486,224 @@ async function handleGiveawayStart(ctx: Context, user: any, payload: string) {
   const video = p?.videoFileId ?? null;
   return sendOrEdit(ctx, text, { photo, video, reply_markup: kb });
 }
+
+// Execute full draw procedure internally (used by auto-scheduler and admin actions)
+async function executeGiveawayDrawInternal(giveawayId: number): Promise<{ ok: boolean; error?: string; winnersCount?: number }> {
+  const gw = await db.giveaway.findUnique({
+    where: { id: giveawayId },
+    include: {
+      variant: {
+        include: {
+          plan: {
+            include: {
+              product: true,
+            },
+          },
+        },
+      },
+      participants: {
+        where: { isEligible: true },
+        include: { user: true },
+      },
+      winners: true,
+    },
+  });
+
+  if (!gw) return { ok: false, error: "Giveaway not found" };
+  if (gw.status === "completed") return { ok: false, error: "Already completed" };
+
+  const eligible = gw.participants;
+  if (eligible.length === 0) {
+    await db.giveaway.update({
+      where: { id: gw.id },
+      data: { status: "completed", drawnAt: new Date() },
+    });
+    if (gw.channelTarget) {
+      const p = gw.variant.plan.product;
+      const v = gw.variant;
+      const resultsPost = formatGiveawayResultsPost({
+        title: gw.title,
+        productTitle: `${p.titleRu} — ${v.titleRu}`,
+        prizeType: gw.prizeType,
+        discountPriceUzs: gw.discountPriceUzs,
+        winners: [],
+      });
+      await bot.api.sendMessage(gw.channelTarget, resultsPost, { parse_mode: "HTML" }).catch(() => {});
+    }
+    return { ok: true, winnersCount: 0 };
+  }
+
+  const selected = selectRandomWinners(eligible, gw.winnersCount);
+  const claimExpiry = calculateClaimExpiry(new Date(), gw.claimHours || 24);
+
+  const promoCode = generateDealSlug(`gw_${gw.id}`);
+  const promoLink = await db.promoLink.create({
+    data: {
+      code: promoCode,
+      title: `🏆 Победитель розыгрыша: ${gw.title}`,
+      variantId: gw.variantId,
+      priceUzs: gw.discountPriceUzs,
+      maxUses: selected.length,
+      perUserLimit: 1,
+      expiresAt: claimExpiry,
+      isActive: true,
+    },
+  });
+
+  const p = gw.variant.plan.product;
+  const v = gw.variant;
+  const productTitle = `${p.titleRu} — ${v.titleRu}`;
+  const priceDisplay =
+    gw.discountPriceUzs === 0 || gw.prizeType === "free"
+      ? "Бесплатно (0 сум)"
+      : `${gw.discountPriceUzs.toLocaleString("ru-RU")} сум`;
+
+  const expiryDisplay = claimExpiry.toLocaleDateString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+  const botUsername = bot.botInfo?.username || process.env.BOT_USERNAME || "Aiobunabot";
+
+  for (const part of selected) {
+    await db.giveawayWinner.create({
+      data: {
+        giveawayId: gw.id,
+        userId: part.userId,
+        promoLinkId: promoLink.id,
+        expiresAt: claimExpiry,
+        isClaimed: false,
+      },
+    }).catch(() => {});
+
+    await db.userDealClaim.upsert({
+      where: { userId_promoLinkId: { userId: part.userId, promoLinkId: promoLink.id } },
+      create: { userId: part.userId, promoLinkId: promoLink.id },
+      update: {},
+    }).catch(() => {});
+
+    if (part.user.tgId) {
+      const winnerMsg =
+        `🏆 <b>ПОЗДРАВЛЯЕМ! ВЫ ПОБЕДИЛИ В РОЗЫГРЫШЕ!</b>\n\n` +
+        `🎁 Розыгрыш: <b>${esc(gw.title)}</b>\n` +
+        `📦 Товар: <b>${esc(productTitle)}</b>\n` +
+        `💰 Ваша цена: <b>${priceDisplay}</b> <s>${v.priceUzs.toLocaleString("ru-RU")} сум</s>\n` +
+        `⏳ Срок действия спеццены: <b>до ${expiryDisplay}</b>\n\n` +
+        `Нажмите кнопку ниже, чтобы забрать и оформить товар:`;
+
+      const kb = new InlineKeyboard().url("🎁 Забрать / купить приз", `https://t.me/${botUsername}?start=gw_${gw.id}`);
+      await bot.api.sendMessage(part.user.tgId, winnerMsg, { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+    }
+  }
+
+  if (gw.channelTarget) {
+    const resultsPost = formatGiveawayResultsPost({
+      title: gw.title,
+      productTitle,
+      prizeType: gw.prizeType,
+      discountPriceUzs: gw.discountPriceUzs,
+      winners: selected.map((s) => ({
+        username: s.user.username,
+        firstName: s.user.firstName,
+        tgId: s.user.tgId,
+      })),
+      botUsername,
+    });
+
+    const kb = new InlineKeyboard().url("🛍 Перейти в магазин", `https://t.me/${botUsername}`);
+    await bot.api.sendMessage(gw.channelTarget, resultsPost, { parse_mode: "HTML", reply_markup: kb }).catch((e) => {
+      console.warn("[bot] failed to send results post to channel:", e);
+    });
+  }
+
+  await db.giveaway.update({
+    where: { id: gw.id },
+    data: {
+      status: "completed",
+      drawnAt: new Date(),
+    },
+  });
+
+  console.info(`[bot] Successfully completed draw for giveaway #${gw.id} (${selected.length} winners)`);
+  return { ok: true, winnersCount: selected.length };
+}
+
+// Background scheduler: checks for giveaways reaching endsAt and executes draw
+async function checkGiveawayAutoDraw() {
+  const dueGiveaways = await db.giveaway.findMany({
+    where: {
+      status: "active",
+      endsAt: { lte: new Date() },
+    },
+    select: { id: true, title: true },
+  }).catch(() => []);
+
+  for (const gw of dueGiveaways) {
+    try {
+      console.info(`[bot] Auto-drawing giveaway #${gw.id} (${gw.title})...`);
+      await executeGiveawayDrawInternal(gw.id);
+    } catch (e) {
+      console.error(`[bot] Failed to auto-draw giveaway #${gw.id}:`, e);
+    }
+  }
+}
+
+bot.command(["giveaways", "contests"], async (ctx) => {
+  const user = await getUser(ctx);
+  const lang = (user.lang || "ru") as Lang;
+  const activeGws = await db.giveaway.findMany({
+    where: { status: "active" },
+    include: {
+      variant: {
+        include: { plan: { include: { product: true } } },
+      },
+      participants: {
+        where: { userId: user.id },
+      },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 10,
+  });
+
+  if (activeGws.length === 0) {
+    return ctx.reply("🎁 <b>Активные розыгрыши</b>\n\nНа данный момент активных розыгрышей нет. Следите за анонсами в нашем канале!", {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text(t(lang, "btn_shop"), "m:0:all"),
+    });
+  }
+
+  let text = "🎉 <b>АКТИВНЫЕ РОЗЫГРЫШИ И КОНКУРСЫ:</b>\n\n";
+  const kb = new InlineKeyboard();
+
+  for (const gw of activeGws) {
+    const p = gw.variant.plan.product;
+    const v = gw.variant;
+    const isJoined = gw.participants.length > 0;
+    const priceText =
+      gw.prizeType === "free" || gw.discountPriceUzs === 0
+        ? "🎁 Бесплатно"
+        : `${money(gw.discountPriceUzs, lang)}`;
+
+    text += `🎁 <b>${esc(gw.title)}</b>\n`;
+    text += `📦 Приз: <b>${esc(p.titleRu)} — ${esc(v.titleRu)}</b>\n`;
+    text += `💰 Цена для победителя: <b>${priceText}</b>\n`;
+    text += `👥 Победителей: <b>${gw.winnersCount}</b> чел.\n`;
+    text += `${formatGiveawayCountdown(gw.endsAt)}\n`;
+    text += `Статус: ${isJoined ? "✅ Вы участвуете" : "⚪ Вы не участвуете"}\n\n`;
+
+    kb.text(`🎉 ${gw.title}`, `gw_open:${gw.id}`).row();
+  }
+
+  kb.text(t(lang, "btn_shop"), "m:0:all");
+
+  return ctx.reply(text, {
+    parse_mode: "HTML",
+    reply_markup: kb,
+  });
+});
 
 bot.command("menu", (ctx) => showMenu(ctx, 0, "all", false));
 
@@ -6716,6 +6975,11 @@ bot.on("callback_query:data", async (ctx) => {
         reply_markup: kb,
       });
     }
+    if (tag === "gw_open") {
+      const giveawayId = Number(rest[0]);
+      await ctx.answerCallbackQuery().catch(() => {});
+      return handleGiveawayStart(ctx, user, `gw_${giveawayId}`);
+    }
     if (tag === "gw_claim") {
       const giveawayId = Number(rest[0]);
       await ctx.answerCallbackQuery().catch(() => {});
@@ -7544,6 +7808,67 @@ bot.on("chat_join_request", async (ctx) => {
   await ctx.approveChatJoinRequest(ctx.chatJoinRequest.from.id).catch((e) => console.error("[bot] auto-approve join request failed:", (e as Error).message));
 });
 
+bot.on("chat_boost", async (ctx) => {
+  try {
+    const boost = ctx.chatBoost.boost;
+    const chatId = String(ctx.chatBoost.chat.id);
+    const boostUser = (boost.source as any)?.user;
+    if (!boostUser?.id) return;
+    const tgId = String(boostUser.id);
+    const boostId = String(boost.boost_id);
+    const expiresAt = new Date(boost.expiration_date * 1000);
+
+    const user = await db.botUser.findUnique({ where: { tgId } });
+
+    await db.channelBoost.upsert({
+      where: { chatId_boostId: { chatId, boostId } },
+      create: {
+        chatId,
+        tgId,
+        boostId,
+        userId: user ? user.id : null,
+        expiresAt,
+      },
+      update: {
+        tgId,
+        userId: user ? user.id : null,
+        expiresAt,
+      },
+    });
+
+    // Notify user with thank you and discount explanation
+    const discountPercent = Number(await setting("boost_discount_percent", "10")) || 10;
+    const boostMsg = `🚀 <b>Спасибо за буст нашего канала!</b>\n\nВам начислена специальная скидка <b>${discountPercent}%</b> на все подписки и товары в магазине!\nСкидка будет действовать автоматически, пока активен ваш буст.`;
+    await bot.api.sendMessage(tgId, boostMsg, { parse_mode: "HTML" }).catch(() => {});
+  } catch (e) {
+    console.error("[bot] chat_boost handler error:", (e as Error).message);
+  }
+});
+
+bot.on("removed_chat_boost", async (ctx) => {
+  try {
+    const removed = (ctx as any).removedChatBoost;
+    if (!removed?.chat?.id || !removed?.boost_id) return;
+    const chatId = String(removed.chat.id);
+    const boostId = String(removed.boost_id);
+
+    const record = await db.channelBoost.findUnique({
+      where: { chatId_boostId: { chatId, boostId } },
+    });
+
+    if (record) {
+      await db.channelBoost.delete({
+        where: { chatId_boostId: { chatId, boostId } },
+      }).catch(() => {});
+
+      const lossMsg = `ℹ️ <b>Ваш буст канала завершился или был снят.</b>\n\nСкидка бустера деактивирована. Вы можете снова забустить канал в любое время, чтобы вернуть скидку!`;
+      await bot.api.sendMessage(record.tgId, lossMsg, { parse_mode: "HTML" }).catch(() => {});
+    }
+  } catch (e) {
+    console.error("[bot] removed_chat_boost handler error:", (e as Error).message);
+  }
+});
+
 // ---------- payments ----------
 bot.on("pre_checkout_query", (ctx) => ctx.answerPreCheckoutQuery(true).catch(() => {}));
 bot.on("message:successful_payment", async (ctx) => {
@@ -8007,6 +8332,20 @@ async function ensureSchema() {
     `CREATE UNIQUE INDEX IF NOT EXISTS "GiveawayWinner_giveawayId_userId_key" ON "GiveawayWinner"("giveawayId", "userId")`,
     `CREATE INDEX IF NOT EXISTS "GiveawayWinner_giveawayId_idx" ON "GiveawayWinner"("giveawayId")`,
     `CREATE INDEX IF NOT EXISTS "GiveawayWinner_userId_idx" ON "GiveawayWinner"("userId")`,
+    `CREATE TABLE IF NOT EXISTS "ChannelBoost" (
+      "id" SERIAL NOT NULL,
+      "chatId" TEXT NOT NULL,
+      "tgId" TEXT NOT NULL,
+      "boostId" TEXT NOT NULL,
+      "userId" INTEGER,
+      "expiresAt" TIMESTAMP(3) NOT NULL,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "ChannelBoost_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "ChannelBoost_chatId_boostId_key" ON "ChannelBoost"("chatId", "boostId")`,
+    `CREATE INDEX IF NOT EXISTS "ChannelBoost_tgId_idx" ON "ChannelBoost"("tgId")`,
+    `CREATE INDEX IF NOT EXISTS "ChannelBoost_expiresAt_idx" ON "ChannelBoost"("expiresAt")`,
   ];
   for (const sql of statements) {
     try {
@@ -8185,12 +8524,13 @@ async function bootstrap() {
     deliverPaidPaymeTopUps().catch(() => {});
     retryPendingCourseOrders().catch(() => {});
     checkPromoExpiry().catch(() => {});
+    checkGiveawayAutoDraw().catch(() => {});
   }, 12_000);
   const pollingOptions = {
     drop_pending_updates: false,
     allowed_updates: [
       "message", "callback_query", "chat_member", "chat_join_request",
-      "pre_checkout_query",
+      "pre_checkout_query", "chat_boost", "removed_chat_boost",
     ],
     onStart: async (me: UserFromGetMe) => {
       buttonEmoji = await setting("button_emoji", "");
@@ -8204,6 +8544,7 @@ async function bootstrap() {
       await bot.api.setMyCommands([
         { command: "start", description: "🛍 Магазин / Menu" },
         { command: "shop", description: "🛍 Магазин" },
+        { command: "giveaways", description: "🎉 Розыгрыши" },
         { command: "freebies", description: "🎁 Акции" },
         { command: "orders", description: "🧾 Заказы" },
         { command: "profile", description: "👤 Профиль" },

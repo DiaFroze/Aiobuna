@@ -7,6 +7,9 @@ import {
   selectRandomWinners,
   maskUserIdentifier,
   formatGiveawayResultsPost,
+  formatGiveawayCountdown,
+  isGiveawayDueForDraw,
+  generateSampleWinnersPost,
 } from "../src/lib/domain/giveaways";
 
 describe("giveaways domain logic", () => {
@@ -226,6 +229,70 @@ describe("giveaways domain logic", () => {
       });
 
       expect(post).toContain("не нашлось");
+    });
+  });
+
+  describe("formatGiveawayCountdown", () => {
+    it("formats countdown with days and hours remaining", () => {
+      const now = new Date("2026-09-13T12:00:00Z");
+      const endsAt = new Date("2026-09-15T16:00:00Z"); // +2 days 4 hours
+      const formatted = formatGiveawayCountdown(endsAt, now);
+      expect(formatted).toContain("осталось: <b>2 дн. 4 ч.</b>");
+      expect(formatted).toContain("Итоги розыгрыша:");
+    });
+
+    it("formats countdown with hours and minutes remaining", () => {
+      const now = new Date("2026-09-13T12:00:00Z");
+      const endsAt = new Date("2026-09-13T15:30:00Z"); // +3 hours 30 mins
+      const formatted = formatGiveawayCountdown(endsAt, now);
+      expect(formatted).toContain("осталось: <b>3 ч. 30 мин.</b>");
+    });
+
+    it("handles past endsAt date", () => {
+      const now = new Date("2026-09-13T12:00:00Z");
+      const endsAt = new Date("2026-09-12T12:00:00Z");
+      const formatted = formatGiveawayCountdown(endsAt, now);
+      expect(formatted).toContain("Розыгрыш завершён");
+    });
+
+    it("handles null or undefined endsAt", () => {
+      expect(formatGiveawayCountdown(null)).toContain("по решению организатора");
+      expect(formatGiveawayCountdown(undefined)).toContain("по решению организатора");
+    });
+  });
+
+  describe("isGiveawayDueForDraw", () => {
+    it("returns true when active and endsAt has arrived", () => {
+      const now = new Date("2026-09-13T12:00:00Z");
+      const past = new Date("2026-09-13T11:59:00Z");
+      expect(isGiveawayDueForDraw({ status: "active", endsAt: past }, now)).toBe(true);
+    });
+
+    it("returns false when endsAt is in the future", () => {
+      const now = new Date("2026-09-13T12:00:00Z");
+      const future = new Date("2026-09-13T13:00:00Z");
+      expect(isGiveawayDueForDraw({ status: "active", endsAt: future }, now)).toBe(false);
+    });
+
+    it("returns false when status is not active", () => {
+      const now = new Date("2026-09-13T12:00:00Z");
+      const past = new Date("2026-09-13T11:00:00Z");
+      expect(isGiveawayDueForDraw({ status: "draft", endsAt: past }, now)).toBe(false);
+      expect(isGiveawayDueForDraw({ status: "completed", endsAt: past }, now)).toBe(false);
+    });
+  });
+
+  describe("generateSampleWinnersPost", () => {
+    it("generates a preview post with sample winners and test badge", () => {
+      const post = generateSampleWinnersPost({
+        title: "Тестовый конкурс",
+        productTitle: "Gemini Pro",
+        prizeType: "discount",
+        discountPriceUzs: 10000,
+      });
+      expect(post).toContain("Тестовый конкурс");
+      expect(post).toContain("ТЕСТОВЫЙ ПРЕДПРОСМОТР");
+      expect(post).toContain("1. @jo***oe");
     });
   });
 });

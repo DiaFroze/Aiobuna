@@ -11,6 +11,8 @@ import {
   calculateClaimExpiry,
   selectRandomWinners,
   formatGiveawayResultsPost,
+  formatGiveawayCountdown,
+  generateSampleWinnersPost,
 } from "@/lib/domain/giveaways";
 import { generateDealSlug } from "@/lib/domain/deal-links";
 
@@ -418,7 +420,186 @@ export async function deleteGiveawayAction(formData: FormData) {
   redirect("/admin/bot-giveaways?ok=deleted");
 }
 
+export async function sendTestGiveawayPostAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.PRODUCTS_WRITE);
+  const id = num(formData.get("id"));
+  if (!id) return;
+
+  const gw = await botDb.giveaway.findUnique({
+    where: { id },
+    include: {
+      variant: {
+        include: { plan: { include: { product: true } } },
+      },
+    },
+  });
+  if (!gw) redirect("/admin/bot-giveaways?error=notfound");
+
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) redirect("/admin/bot-giveaways?error=nobottoken");
+
+  const targetChat = str(formData.get("targetChat")) || process.env.TELEGRAM_ADMIN_CHAT_ID;
+  if (!targetChat) redirect("/admin/bot-giveaways?error=notargetchat");
+
+  const botUsername = process.env.NEXT_PUBLIC_BOT_USERNAME || process.env.BOT_USERNAME || "Aiobunabot";
+  const botUrl = buildGiveawayBotUrl(botUsername, gw.id);
+
+  let postText = gw.postText;
+  if (gw.endsAt && !postText.includes("Итоги")) {
+    postText += `\n\n${formatGiveawayCountdown(gw.endsAt)}`;
+  }
+  postText += "\n\n<i>🧪 [ТЕСТОВЫЙ ПРЕДПРОСМОТР ПОСТА]</i>";
+
+  let testError = "";
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: targetChat,
+        text: postText,
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: gw.buttonText || "🎉 Участвовать",
+                url: botUrl,
+              },
+            ],
+          ],
+        },
+      }),
+    });
+
+    const data = await res.json();
+    if (!data.ok) {
+      throw new Error(data.description || "Telegram send failed");
+    }
+
+    await audit({
+      adminId: admin.id,
+      action: "giveaway.test_post",
+      entityType: "Giveaway",
+      entityId: String(id),
+      metadata: { targetChat },
+    });
+  } catch (err) {
+    testError = err instanceof Error ? err.message : "testpostexception";
+  }
+
+  if (testError) redirect(`/admin/bot-giveaways?error=${encodeURIComponent(testError)}`);
+  redirect("/admin/bot-giveaways?ok=test_sent");
+}
+
+export async function sendTestGiveawayResultsAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.PRODUCTS_WRITE);
+  const id = num(formData.get("id"));
+  if (!id) return;
+
+  const gw = await botDb.giveaway.findUnique({
+    where: { id },
+    include: {
+      variant: {
+        include: { plan: { include: { product: true } } },
+      },
+    },
+  });
+  if (!gw) redirect("/admin/bot-giveaways?error=notfound");
+
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) redirect("/admin/bot-giveaways?error=nobottoken");
+
+  const targetChat = str(formData.get("targetChat")) || process.env.TELEGRAM_ADMIN_CHAT_ID;
+  if (!targetChat) redirect("/admin/bot-giveaways?error=notargetchat");
+
+  const botUsername = process.env.NEXT_PUBLIC_BOT_USERNAME || process.env.BOT_USERNAME || "Aiobunabot";
+  const p = gw.variant.plan.product;
+  const v = gw.variant;
+  const productTitle = `${p.titleRu} — ${v.titleRu}`;
+
+  const resultsText = generateSampleWinnersPost({
+    title: gw.title,
+    productTitle,
+    prizeType: gw.prizeType,
+    discountPriceUzs: gw.discountPriceUzs,
+    sampleCount: Math.min(5, gw.winnersCount),
+  });
+
+  let testError = "";
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: targetChat,
+        text: resultsText,
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: "🛍 Перейти в магазин",
+                url: `https://t.me/${botUsername}`,
+              },
+            ],
+          ],
+        },
+      }),
+    });
+
+    const data = await res.json();
+    if (!data.ok) {
+      throw new Error(data.description || "Telegram send failed");
+    }
+
+    await audit({
+      adminId: admin.id,
+      action: "giveaway.test_results",
+      entityType: "Giveaway",
+      entityId: String(id),
+      metadata: { targetChat },
+    });
+  } catch (err) {
+    testError = err instanceof Error ? err.message : "testresultsexception";
+  }
+
+  if (testError) redirect(`/admin/bot-giveaways?error=${encodeURIComponent(testError)}`);
+  redirect("/admin/bot-giveaways?ok=test_results_sent");
+}
+
+export async function updateBoostSettingsAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
+  const percent = Math.min(100, Math.max(0, num(formData.get("boostDiscountPercent"))));
+
+  await botDb.botSetting.upsert({
+    where: { key: "boost_discount_percent" },
+    create: {
+      key: "boost_discount_percent",
+      valueRu: String(percent),
+      valueUz: String(percent),
+      type: "text",
+    },
+    update: {
+      valueRu: String(percent),
+      valueUz: String(percent),
+    },
+  });
+
+  await audit({
+    adminId: admin.id,
+    action: "channel_boost.settings_update",
+    entityType: "BotSetting",
+    entityId: "boost_discount_percent",
+    metadata: { percent },
+  });
+
+  revalidatePath("/admin/bot-giveaways");
+  redirect("/admin/bot-giveaways?ok=boost_updated");
+}
+
 function escapeHtml(s: string): string {
   if (!s) return "";
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
+

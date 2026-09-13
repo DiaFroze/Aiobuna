@@ -177,3 +177,95 @@ function escapeTgHtml(s: string): string {
   if (!s) return "";
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
+
+/**
+ * Formats a human-readable countdown and end date for a giveaway.
+ * E.g. "⏳ Итоги розыгрыша: 15.09.2026 18:00 (осталось: 2 дн. 4 ч.)"
+ */
+export function formatGiveawayCountdown(
+  endsAt: Date | string | null | undefined,
+  now: Date = new Date(),
+): string {
+  if (!endsAt) {
+    return "⏳ Итоги: по решению организатора";
+  }
+
+  const end = typeof endsAt === "string" ? new Date(endsAt) : endsAt;
+  if (isNaN(end.getTime())) {
+    return "⏳ Итоги: дата уточняется";
+  }
+
+  const diffMs = end.getTime() - now.getTime();
+  if (diffMs <= 0) {
+    return "🏁 Розыгрыш завершён (идёт подведение итогов)";
+  }
+
+  const totalMinutes = Math.floor(diffMs / (1000 * 60));
+  const days = Math.floor(totalMinutes / (60 * 24));
+  const hours = Math.floor((totalMinutes % (60 * 24)) / 60);
+  const minutes = totalMinutes % 60;
+
+  let remaining = "";
+  if (days > 0) {
+    remaining = `${days} дн. ${hours} ч.`;
+  } else if (hours > 0) {
+    remaining = `${hours} ч. ${minutes} мин.`;
+  } else {
+    remaining = `${Math.max(1, minutes)} мин.`;
+  }
+
+  const formattedDate = end.toLocaleDateString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+  return `⏳ Итоги розыгрыша: <b>${formattedDate}</b> (осталось: <b>${remaining}</b>)`;
+}
+
+/**
+ * Checks if an active giveaway has reached its end date and is due for automatic drawing.
+ */
+export function isGiveawayDueForDraw(
+  giveaway: { status: string; endsAt: Date | string | null },
+  now: Date = new Date(),
+): boolean {
+  if (giveaway.status !== "active") return false;
+  if (!giveaway.endsAt) return false;
+  const end = typeof giveaway.endsAt === "string" ? new Date(giveaway.endsAt) : giveaway.endsAt;
+  if (isNaN(end.getTime())) return false;
+  return now.getTime() >= end.getTime();
+}
+
+/**
+ * Generates sample results post for test preview.
+ */
+export function generateSampleWinnersPost(params: {
+  title: string;
+  productTitle: string;
+  prizeType: string;
+  discountPriceUzs: number;
+  sampleCount?: number;
+}): string {
+  const count = Math.min(5, Math.max(1, params.sampleCount || 3));
+  const sampleWinners = [
+    { username: "john_doe" },
+    { firstName: "Алишер", tgId: "123456789" },
+    { username: "crypto_expert" },
+    { firstName: "Elena", tgId: "987654321" },
+    { username: "super_winner" },
+  ].slice(0, count);
+
+  return (
+    formatGiveawayResultsPost({
+      title: params.title,
+      productTitle: params.productTitle,
+      prizeType: params.prizeType,
+      discountPriceUzs: params.discountPriceUzs,
+      winners: sampleWinners,
+    }) + "\n\n<i>🧪 [ТЕСТОВЫЙ ПРЕДПРОСМОТР ДЛЯ АДМИНИСТРАТОРА]</i>"
+  );
+}
+
