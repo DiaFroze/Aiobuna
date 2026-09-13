@@ -43,6 +43,12 @@ import {
   messageEntitiesToHtml,
 } from "../lib/emoji/rich-text";
 import { validateDealEligibility, calculateDealDiscount, parseDealPayload } from "../lib/domain/deal-links";
+import {
+  parseGiveawayStartPayload,
+  buildGiveawayBotUrl,
+  checkParticipantEligibility,
+  maskUserIdentifier,
+} from "../lib/domain/giveaways";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -4074,6 +4080,9 @@ bot.command("start", async (ctx) => {
   if (payload.startsWith("deal_") || payload.startsWith("offer_") || payload.startsWith("promo_")) {
     return handleDealLinkStart(ctx, user, payload);
   }
+  if (payload.startsWith("gw_") || payload.startsWith("giveaway_")) {
+    return handleGiveawayStart(ctx, user, payload);
+  }
   await enterShop(ctx, user);
 });
 // Handler for promotional deal deep links (e.g. /start deal_xxx)
@@ -4188,6 +4197,246 @@ async function handleDealLinkStart(ctx: Context, user: any, payload: string) {
   const video = p.videoFileId ?? null;
 
   await sendOrEdit(ctx, text, { photo, video, reply_markup: kb });
+}
+
+// Handler for giveaway / contest deep links (e.g. /start gw_123 or gw_123_456)
+async function handleGiveawayStart(ctx: Context, user: any, payload: string) {
+  const parsed = parseGiveawayStartPayload(payload);
+  const lang = (user.lang || "ru") as Lang;
+  if (!parsed) {
+    return ctx.reply(t(lang, "gw_not_found"));
+  }
+
+  const { giveawayId, refUserId } = parsed;
+  const botUsername = ctx.me?.username || process.env.BOT_USERNAME || "Aiobunabot";
+
+  const giveaway = await db.giveaway.findUnique({
+    where: { id: giveawayId },
+    include: {
+      variant: {
+        include: {
+          plan: {
+            include: {
+              product: true,
+            },
+          },
+        },
+      },
+      winners: {
+        where: { userId: user.id },
+      },
+    },
+  });
+
+  if (!giveaway) {
+    return ctx.reply(t(lang, "gw_not_found"));
+  }
+
+  const v = giveaway.variant;
+  const p = v?.plan?.product;
+  const pt = p ? await pick3(p.titleRu, p.titleEn, p.titleUz, lang) : "";
+  const vt = v ? await locName(v.titleRu, v.titleUz, lang) : "";
+  const productTitle = `${pt} — ${vt}`;
+
+  // If completed or cancelled:
+  if (giveaway.status === "completed" || giveaway.status === "cancelled") {
+    const isWinner = giveaway.winners.length > 0;
+    if (isWinner) {
+      const winner = giveaway.winners[0];
+      const isExpired = winner.expiresAt.getTime() < Date.now();
+      const expiresFormatted = winner.expiresAt.toLocaleDateString("ru-RU", {
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+      const priceText =
+        giveaway.prizeType === "free" || giveaway.discountPriceUzs === 0
+          ? t(lang, "free")
+          : money(giveaway.discountPriceUzs, lang);
+
+      const msg = t(lang, "gw_winner_card", {
+        product: productTitle,
+        price: priceText,
+        expires: expiresFormatted,
+      });
+
+      const kb = new InlineKeyboard();
+      if (!isExpired) {
+        kb.text(t(lang, "gw_claim_btn"), `gw_claim:${giveaway.id}`).row();
+      }
+      kb.text(t(lang, "btn_shop"), "m:0:all");
+
+      const photo = resolveProductBanner(p?.bannerFileId);
+      const video = p?.videoFileId ?? null;
+      return sendOrEdit(ctx, msg, { photo, video, reply_markup: kb });
+    }
+
+    return ctx.reply(`${t(lang, "gw_ended")}\n\n${t(lang, "gw_not_winner")}`, {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text(t(lang, "btn_shop"), "m:0:all"),
+    });
+  }
+
+  // Check channel subscriptions if required
+  const unsubscribedChannels: Array<{ name: string; url: string }> = [];
+  if (giveaway.reqChannels) {
+    const activeReqs = await db.requiredChannel.findMany({ where: { isActive: true }, orderBy: { id: "asc" } });
+    if (activeReqs.length > 0) {
+      const results = await Promise.all(activeReqs.map((ch) => isSubscribedTo(ctx, user.tgId, ch.chatId)));
+      activeReqs.forEach((ch, idx) => {
+        if (!results[idx]) {
+          unsubscribedChannels.push({ name: ch.name || "Канал", url: ch.url });
+        }
+      });
+    }
+  }
+
+  if (giveaway.extraChannelId) {
+    const isSub = await isSubscribedTo(ctx, user.tgId, giveaway.extraChannelId);
+    if (!isSub) {
+      const name = giveaway.extraChannelId.startsWith("@") ? giveaway.extraChannelId : "Канал спонсора";
+      const url = giveaway.extraChannelUrl || (giveaway.extraChannelId.startsWith("@") ? `https://t.me/${giveaway.extraChannelId.replace(/^@/, "")}` : "");
+      unsubscribedChannels.push({ name, url });
+    }
+  }
+
+  if (unsubscribedChannels.length > 0) {
+    const kb = new InlineKeyboard();
+    for (const ch of unsubscribedChannels) {
+      if (ch.url) {
+        kb.url(`📢 ${ch.name}`, ch.url).row();
+      }
+    }
+    kb.text(t(lang, "gw_check_subs_btn"), `gw_check:${giveaway.id}:${refUserId || 0}`).row();
+
+    let text = `${t(lang, "gw_subs_needed")}\n\n`;
+    text += `🎁 <b>${esc(giveaway.title)}</b>\n`;
+    text += `🏆 Приз: <b>${esc(productTitle)}</b>\n`;
+    return ctx.reply(text, {
+      parse_mode: "HTML",
+      reply_markup: kb,
+    });
+  }
+
+  // User has satisfied channels. Check if already joined
+  const existingParticipant = await db.giveawayParticipant.findUnique({
+    where: {
+      giveawayId_userId: {
+        giveawayId: giveaway.id,
+        userId: user.id,
+      },
+    },
+  });
+
+  if (existingParticipant) {
+    const inviteUrl = buildGiveawayBotUrl(botUsername, giveaway.id, user.id);
+    let text = `${t(lang, "gw_already_joined")}\n\n`;
+    text += `🎁 <b>${esc(giveaway.title)}</b>\n`;
+    text += `🏆 Приз: <b>${esc(productTitle)}</b>\n`;
+    if (giveaway.reqFriends > 0) {
+      text += `\n${t(lang, "gw_friends_progress", { current: existingParticipant.friendsCount, target: giveaway.reqFriends })}\n`;
+      if (existingParticipant.friendsCount < giveaway.reqFriends) {
+        const rem = giveaway.reqFriends - existingParticipant.friendsCount;
+        text += `\n⚠️ <i>Для участия вам нужно пригласить ещё ${rem} друзей!</i>\n`;
+        text += `🔗 Ваша ссылка: <code>${inviteUrl}</code>`;
+      } else {
+        text += `\n✅ <i>Все условия выполнены! Вы участвуете в розыгрыше.</i>`;
+      }
+    }
+
+    const kb = new InlineKeyboard();
+    if (giveaway.reqFriends > 0) {
+      const shareText = encodeURIComponent(`Участвуй в конкурсе «${giveaway.title}» и выигрывай призы!`);
+      kb.url(t(lang, "gw_share_btn"), `https://t.me/share/url?url=${encodeURIComponent(inviteUrl)}&text=${shareText}`).row();
+    }
+    kb.text(t(lang, "btn_shop"), "m:0:all");
+
+    const photo = resolveProductBanner(p?.bannerFileId);
+    const video = p?.videoFileId ?? null;
+    return sendOrEdit(ctx, text, { photo, video, reply_markup: kb });
+  }
+
+  // Not joined yet: register participant!
+  // If referred by someone, increment referrer friend count
+  if (refUserId && refUserId !== user.id) {
+    const referrer = await db.giveawayParticipant.findUnique({
+      where: {
+        giveawayId_userId: {
+          giveawayId: giveaway.id,
+          userId: refUserId,
+        },
+      },
+      include: {
+        user: true,
+      },
+    });
+
+    if (referrer) {
+      const newCount = referrer.friendsCount + 1;
+      const isEligible = giveaway.reqFriends <= 0 || newCount >= giveaway.reqFriends;
+      await db.giveawayParticipant.update({
+        where: { id: referrer.id },
+        data: {
+          friendsCount: newCount,
+          isEligible,
+        },
+      });
+
+      // Notify referrer
+      try {
+        let notif = `🎉 По вашей ссылке в розыгрыш «<b>${esc(giveaway.title)}</b>» зарегистрировался новый участник!\n`;
+        notif += `👥 Ваш прогресс: <b>${newCount} / ${giveaway.reqFriends}</b> друзей`;
+        if (isEligible && !referrer.isEligible) {
+          notif += `\n\n✅ <b>Поздравляем! Вы выполнили условие по приглашениям и стали полноценным участником розыгрыша!</b>`;
+        }
+        await ctx.api.sendMessage(referrer.user.tgId, notif, { parse_mode: "HTML" }).catch(() => {});
+      } catch (e) {
+        console.warn("[bot] failed to notify giveaway referrer:", (e as Error).message);
+      }
+    }
+  }
+
+  // Create participant
+  const isEligible = giveaway.reqFriends <= 0;
+  await db.giveawayParticipant.create({
+    data: {
+      giveawayId: giveaway.id,
+      userId: user.id,
+      referredById: refUserId && refUserId !== user.id ? refUserId : null,
+      friendsCount: 0,
+      isEligible,
+    },
+  });
+
+  const inviteUrl = buildGiveawayBotUrl(botUsername, giveaway.id, user.id);
+  let text = `${t(lang, "gw_joined_success")}\n\n`;
+  text += `🎁 Розыгрыш: <b>${esc(giveaway.title)}</b>\n`;
+  text += `🏆 Приз: <b>${esc(productTitle)}</b>\n`;
+  if (giveaway.prizeType === "discount" && giveaway.discountPriceUzs > 0) {
+    text += `💰 Цена для победителя: <b>${money(giveaway.discountPriceUzs, lang)}</b> <s>${money(v.priceUzs, lang)}</s>\n`;
+  } else {
+    text += `🎁 Цена для победителя: <b>Бесплатно (0 сум)</b>\n`;
+  }
+  text += `👥 Количество победителей: <b>${giveaway.winnersCount}</b>\n`;
+
+  if (giveaway.reqFriends > 0) {
+    text += `\n👥 <b>Обязательное условие:</b> пригласить <b>${giveaway.reqFriends}</b> друзей!\n`;
+    text += `🔗 Ваша ссылка для приглашения друзей:\n<code>${inviteUrl}</code>\n\n`;
+    text += `Поделитесь этой ссылкой с друзьями — когда они перейдут и подпишутся, они зачтутся в ваш счетчик!`;
+  }
+
+  const kb = new InlineKeyboard();
+  if (giveaway.reqFriends > 0) {
+    const shareText = encodeURIComponent(`Участвуй в конкурсе «${giveaway.title}» и выигрывай призы!`);
+    kb.url(t(lang, "gw_share_btn"), `https://t.me/share/url?url=${encodeURIComponent(inviteUrl)}&text=${shareText}`).row();
+  }
+  kb.text(t(lang, "btn_shop"), "m:0:all");
+
+  const photo = resolveProductBanner(p?.bannerFileId);
+  const video = p?.videoFileId ?? null;
+  return sendOrEdit(ctx, text, { photo, video, reply_markup: kb });
 }
 
 bot.command("menu", (ctx) => showMenu(ctx, 0, "all", false));
@@ -6355,6 +6604,8 @@ bot.on("callback_query:data", async (ctx) => {
           await showMenu(ctx, 0, "all", false).catch(() => {});
         } else if (intent.startsWith("deal_") || intent.startsWith("offer_") || intent.startsWith("promo_")) {
           await handleDealLinkStart(ctx, user, intent).catch(() => {});
+        } else if (intent.startsWith("gw_") || intent.startsWith("giveaway_")) {
+          await handleGiveawayStart(ctx, user, intent).catch(() => {});
         }
       }
       return;
@@ -6439,6 +6690,54 @@ bot.on("callback_query:data", async (ctx) => {
     // rest[3] = username (may be empty), rest[4] = numeric recipient id. Built
     if (tag === "tstar_buy") return starsInvoice(ctx, lang, Number(rest[0]), buildBuyNote(Number(rest[1]), Number(rest[2]) || 1, rest[3] || null, rest[4] || null));
     if (tag === "tman_buy") { await ctx.answerCallbackQuery().catch(() => {}); return requestTopUp(ctx, lang, Number(rest[0]), "manual", `buy:${rest[1]}:${rest[2]}${rest[3] ? `:${rest[3]}` : ""}`); }
+    if (tag === "gw_check") {
+      const giveawayId = Number(rest[0]);
+      const refUserId = Number(rest[1]) || 0;
+      await ctx.answerCallbackQuery().catch(() => {});
+      const payload = refUserId > 0 ? `gw_${giveawayId}_${refUserId}` : `gw_${giveawayId}`;
+      return handleGiveawayStart(ctx, user, payload);
+    }
+    if (tag === "gw_share") {
+      const giveawayId = Number(rest[0]);
+      await ctx.answerCallbackQuery().catch(() => {});
+      const botUsername = ctx.me?.username || process.env.BOT_USERNAME || "Aiobunabot";
+      const link = buildGiveawayBotUrl(botUsername, giveawayId, user.id);
+      const shareText = encodeURIComponent(`Участвуй в розыгрыше!`);
+      const kb = new InlineKeyboard().url(t(lang, "gw_share_btn"), `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${shareText}`);
+      return ctx.reply(`🔗 Ваша ссылка для приглашения друзей:\n<code>${link}</code>`, {
+        parse_mode: "HTML",
+        reply_markup: kb,
+      });
+    }
+    if (tag === "gw_claim") {
+      const giveawayId = Number(rest[0]);
+      await ctx.answerCallbackQuery().catch(() => {});
+      const winner = await db.giveawayWinner.findUnique({
+        where: { giveawayId_userId: { giveawayId, userId: user.id } },
+        include: {
+          giveaway: {
+            include: {
+              variant: {
+                include: { plan: { include: { product: true } } },
+              },
+            },
+          },
+          promoLink: true,
+        },
+      });
+      if (!winner) return ctx.reply(t(lang, "gw_not_found"));
+      if (winner.expiresAt.getTime() < Date.now()) {
+        return ctx.reply(t(lang, "deal_expired"));
+      }
+      if (winner.promoLinkId) {
+        await db.userDealClaim.upsert({
+          where: { userId_promoLinkId: { userId: user.id, promoLinkId: winner.promoLinkId } },
+          create: { userId: user.id, promoLinkId: winner.promoLinkId },
+          update: {},
+        }).catch(() => {});
+      }
+      return showQtyChooser(ctx, winner.giveaway.variantId, 1, "0:all", false);
+    }
     if (tag === "adm_set_client") {
       if (!isAdmin(ctx)) return ctx.answerCallbackQuery().catch(() => {});
       const variantId = Number(rest[0]);
@@ -7649,6 +7948,57 @@ async function ensureSchema() {
       CONSTRAINT "PromoBroadcastMessage_pkey" PRIMARY KEY ("id")
     )`,
     `CREATE INDEX IF NOT EXISTS "PromoBroadcastMessage_tgId_idx" ON "PromoBroadcastMessage"("tgId")`,
+    `CREATE TABLE IF NOT EXISTS "Giveaway" (
+      "id" SERIAL NOT NULL,
+      "title" TEXT NOT NULL,
+      "variantId" INTEGER NOT NULL,
+      "prizeType" TEXT NOT NULL DEFAULT 'discount',
+      "discountPriceUzs" INTEGER NOT NULL DEFAULT 0,
+      "winnersCount" INTEGER NOT NULL DEFAULT 1,
+      "claimHours" INTEGER NOT NULL DEFAULT 24,
+      "channelTarget" TEXT,
+      "postText" TEXT NOT NULL,
+      "buttonText" TEXT NOT NULL DEFAULT '🎉 Участвовать',
+      "postedMessageId" INTEGER,
+      "reqChannels" BOOLEAN NOT NULL DEFAULT false,
+      "extraChannelId" TEXT,
+      "extraChannelUrl" TEXT,
+      "reqFriends" INTEGER NOT NULL DEFAULT 0,
+      "status" TEXT NOT NULL DEFAULT 'draft',
+      "endsAt" TIMESTAMP(3),
+      "drawnAt" TIMESTAMP(3),
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "Giveaway_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE INDEX IF NOT EXISTS "Giveaway_status_idx" ON "Giveaway"("status")`,
+    `CREATE INDEX IF NOT EXISTS "Giveaway_variantId_idx" ON "Giveaway"("variantId")`,
+    `CREATE TABLE IF NOT EXISTS "GiveawayParticipant" (
+      "id" SERIAL NOT NULL,
+      "giveawayId" INTEGER NOT NULL,
+      "userId" INTEGER NOT NULL,
+      "joinedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "referredById" INTEGER,
+      "friendsCount" INTEGER NOT NULL DEFAULT 0,
+      "isEligible" BOOLEAN NOT NULL DEFAULT true,
+      CONSTRAINT "GiveawayParticipant_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "GiveawayParticipant_giveawayId_userId_key" ON "GiveawayParticipant"("giveawayId", "userId")`,
+    `CREATE INDEX IF NOT EXISTS "GiveawayParticipant_giveawayId_isEligible_idx" ON "GiveawayParticipant"("giveawayId", "isEligible")`,
+    `CREATE TABLE IF NOT EXISTS "GiveawayWinner" (
+      "id" SERIAL NOT NULL,
+      "giveawayId" INTEGER NOT NULL,
+      "userId" INTEGER NOT NULL,
+      "promoLinkId" INTEGER,
+      "expiresAt" TIMESTAMP(3) NOT NULL,
+      "isClaimed" BOOLEAN NOT NULL DEFAULT false,
+      "claimedAt" TIMESTAMP(3),
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "GiveawayWinner_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "GiveawayWinner_giveawayId_userId_key" ON "GiveawayWinner"("giveawayId", "userId")`,
+    `CREATE INDEX IF NOT EXISTS "GiveawayWinner_giveawayId_idx" ON "GiveawayWinner"("giveawayId")`,
+    `CREATE INDEX IF NOT EXISTS "GiveawayWinner_userId_idx" ON "GiveawayWinner"("userId")`,
   ];
   for (const sql of statements) {
     try {

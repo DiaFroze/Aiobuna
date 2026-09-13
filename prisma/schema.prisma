@@ -667,6 +667,7 @@ model Variant {
   stockItems   StockItem[]
   customPrices UserVariantPrice[]
   promoLinks   PromoLink[]
+  giveaways    Giveaway[]
 
   @@unique([supplierKey, supplierExternalId])
 }
@@ -724,6 +725,8 @@ model BotUser {
   adStarts BotAdStart[]
   promoLinkUsages  PromoLinkUsage[]
   dealClaims       UserDealClaim[]
+  giveawayEntries  GiveawayParticipant[]
+  giveawayWins     GiveawayWinner[]
 }
 
 model BotAdStart {
@@ -1049,6 +1052,7 @@ model PromoLink {
   updatedAt    DateTime         @updatedAt
   usages       PromoLinkUsage[]
   claims       UserDealClaim[]
+  giveawayWinners GiveawayWinner[]
 
   @@index([code])
   @@index([variantId])
@@ -1078,3 +1082,79 @@ model UserDealClaim {
   @@unique([userId, promoLinkId])
   @@index([userId])
 }
+
+// ---------------------------------------------------------------------------
+// Bot Giveaways / Contests
+// ---------------------------------------------------------------------------
+
+model Giveaway {
+  id               Int                   @id @default(autoincrement())
+  title            String
+  variantId        Int
+  variant          Variant               @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  
+  prizeType        String                @default("discount") // "free" | "discount"
+  discountPriceUzs Int                   @default(0)          // Winner purchase price (0 for free)
+  winnersCount     Int                   @default(1)          // Number of winners
+  claimHours       Int                   @default(24)         // Time in hours to claim/buy
+  
+  channelTarget    String?               // Target channel username (@channel) or chat ID (-100...)
+  postText         String                @db.Text             // Post text with HTML and <tg-emoji>
+  buttonText       String                @default("🎉 Участвовать")
+  postedMessageId  Int?                  // Channel message ID after publishing
+  
+  reqChannels      Boolean               @default(false)      // Check bot required channels
+  extraChannelId   String?               // Optional extra channel chat ID or username
+  extraChannelUrl  String?               // Optional extra channel invite link
+  reqFriends       Int                   @default(0)          // Number of friends required
+  
+  status           String                @default("draft")    // "draft" | "active" | "completed" | "cancelled"
+  endsAt           DateTime?             // Optional end date
+  drawnAt          DateTime?             // When drawn
+  
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+
+  participants     GiveawayParticipant[]
+  winners          GiveawayWinner[]
+
+  @@index([status])
+  @@index([variantId])
+}
+
+model GiveawayParticipant {
+  id           Int       @id @default(autoincrement())
+  giveawayId   Int
+  giveaway     Giveaway  @relation(fields: [giveawayId], references: [id], onDelete: Cascade)
+  userId       Int
+  user         BotUser   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  joinedAt     DateTime  @default(now())
+  
+  referredById Int?      // If referred by another user (BotUser.id)
+  friendsCount Int       @default(0)
+  isEligible   Boolean   @default(true) // Whether all tasks (subs, friends) are fulfilled
+
+  @@unique([giveawayId, userId])
+  @@index([giveawayId, isEligible])
+}
+
+model GiveawayWinner {
+  id           Int        @id @default(autoincrement())
+  giveawayId   Int
+  giveaway     Giveaway   @relation(fields: [giveawayId], references: [id], onDelete: Cascade)
+  userId       Int
+  user         BotUser    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  promoLinkId  Int?
+  promoLink    PromoLink? @relation(fields: [promoLinkId], references: [id], onDelete: SetNull)
+  
+  expiresAt    DateTime
+  isClaimed    Boolean    @default(false)
+  claimedAt    DateTime?
+  createdAt    DateTime   @default(now())
+
+  @@unique([giveawayId, userId])
+  @@index([giveawayId])
+  @@index([userId])
+}
+

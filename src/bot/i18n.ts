@@ -209,6 +209,18 @@ const RU: Dict = {
   deal_remaining: "Осталось мест: {rem} из {max}",
   deal_unlimited: "Без ограничений",
   deal_buy_btn: "🛍 Купить за {price}",
+  gw_not_found: "❌ Розыгрыш не найден или был удалён.",
+  gw_already_joined: "🎟 <b>Вы уже участвуете в этом розыгрыше!</b>\n\nСледите за результатами в канале и в боте.",
+  gw_joined_success: "🎉 <b>Вы успешно зарегистрированы в розыгрыше!</b>\n\nЖелаем удачи!",
+  gw_subs_needed: "📢 <b>Для участия в розыгрыше подпишитесь на каналы:</b>\n\nПосле подписки нажмите кнопку «Проверить подписку» ниже.",
+  gw_check_subs_btn: "🔄 Проверить подписку",
+  gw_share_btn: "👥 Пригласить друзей",
+  gw_friends_progress: "👥 Приглашено друзей: <b>{current} из {target}</b>",
+  gw_friends_needed_toast: "⚠️ Для участия нужно пригласить ещё {rem} друзей!",
+  gw_ended: "⏳ Этот розыгрыш уже завершён.",
+  gw_winner_card: "🏆 <b>Поздравляем! Вы победили в розыгрыше!</b>\n\nВам доступен приз по акционной цене:\nТовар: <b>{product}</b>\nЦена: <b>{price}</b>\nСрок действия скидки: <b>до {expires}</b>",
+  gw_claim_btn: "🎁 Забрать / купить приз",
+  gw_not_winner: "К сожалению, в этом розыгрыше вы не попали в число победителей. Следите за новыми розыгрышами!",
 };
 
 const EN: Dict = {
@@ -413,6 +425,18 @@ const EN: Dict = {
   deal_remaining: "Remaining: {rem} of {max}",
   deal_unlimited: "Unlimited",
   deal_buy_btn: "🛍 Buy for {price}",
+  gw_not_found: "❌ Giveaway not found or has been deleted.",
+  gw_already_joined: "🎟 <b>You are already participating in this giveaway!</b>\n\nStay tuned for results in the channel and bot.",
+  gw_joined_success: "🎉 <b>You have successfully entered the giveaway!</b>\n\nGood luck!",
+  gw_subs_needed: "📢 <b>To participate in the giveaway, please subscribe to our channels:</b>\n\nAfter subscribing, tap “Check subscription” below.",
+  gw_check_subs_btn: "🔄 Check subscription",
+  gw_share_btn: "👥 Invite friends",
+  gw_friends_progress: "👥 Friends invited: <b>{current} of {target}</b>",
+  gw_friends_needed_toast: "⚠️ You need to invite {rem} more friends to participate!",
+  gw_ended: "⏳ This giveaway has already ended.",
+  gw_winner_card: "🏆 <b>Congratulations! You won the giveaway!</b>\n\nYour prize is available at the special price:\nProduct: <b>{product}</b>\nPrice: <b>{price}</b>\nDiscount valid: <b>until {expires}</b>",
+  gw_claim_btn: "🎁 Claim / buy prize",
+  gw_not_winner: "Unfortunately, you were not among the winners this time. Stay tuned for future giveaways!",
 };
 
 const UZ: Dict = {
@@ -617,6 +641,18 @@ const UZ: Dict = {
   deal_remaining: "Qoldi: {max} tadan {rem} ta",
   deal_unlimited: "Cheklovsiz",
   deal_buy_btn: "🛍 {price} evaziga xarid qilish",
+  gw_not_found: "❌ Tanlov topilmadi yoki o‘chirib tashlangan.",
+  gw_already_joined: "🎟 <b>Siz allaqachon ushbu tanlovda ishtirok etyapsiz!</b>\n\nNatijalarni kanal va botda kuzatib boring.",
+  gw_joined_success: "🎉 <b>Siz tanlovda muvaffaqiyatli ro‘yxatdan o‘tdingiz!</b>\n\nOmad tilaymiz!",
+  gw_subs_needed: "📢 <b>Tanlovda ishtirok etish uchun kanallarga a'zo bo'ling:</b>\n\nA'zo bo'lgach, quyidagi «Obunani tekshirish» tugmasini bosing.",
+  gw_check_subs_btn: "🔄 Obunani tekshirish",
+  gw_share_btn: "👥 Do‘stlarni taklif qilish",
+  gw_friends_progress: "👥 Taklif qilingan do‘stlar: <b>{current} / {target}</b>",
+  gw_friends_needed_toast: "⚠️ Ishtirok etish uchun yana {rem} ta do‘stingizni taklif qilishingiz kerak!",
+  gw_ended: "⏳ Ushbu tanlov allaqachon yakunlangan.",
+  gw_winner_card: "🏆 <b>Tabriklaymiz! Siz tanlov g‘olibi bo‘ldingiz!</b>\n\nSizga maxsus narxdagi sovg‘a berildi:\nMahsulot: <b>{product}</b>\nNarx: <b>{price}</b>\nChegirma muddati: <b>{expires} gacha</b>",
+  gw_claim_btn: "🎁 Sovg‘ani olish / xarid qilish",
+  gw_not_winner: "Afsuski, bu safar g‘oliblar qatoriga kirmadingiz. Yangi tanlovlarni kuzatib boring!",
 };
 
 const DICTS: Record<Lang, Dict> = { ru: RU, en: EN, uz: UZ };
