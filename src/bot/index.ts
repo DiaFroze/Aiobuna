@@ -57,6 +57,8 @@ import {
 import {
   calculateBoosterDiscount,
   formatBoosterCardBadge,
+  calculateVariantBoosterPrice,
+  buildTelegramBoostUrl,
 } from "../lib/domain/channel-boosts";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
@@ -552,13 +554,25 @@ async function effPriceFor(
       },
     }).catch(() => null);
 
-    if (activeBoost) {
-      const discountPercent = await getBoosterDiscountPercent();
-      if (discountPercent > 0) {
-        const { price, discountPercent: appliedPercent } = calculateBoosterDiscount(basePriceUzs, discountPercent);
+    if (activeBoost && (await isBoosterDiscountEnabled())) {
+      const v = await db.variant.findUnique({
+        where: { id: variantId },
+        select: { boostDiscountEnabled: true, boostDiscountPercent: true, boostPriceUzs: true },
+      }).catch(() => null);
+
+      const globalPercent = await getBoosterDiscountPercent();
+      const bRes = calculateVariantBoosterPrice({
+        basePriceUzs,
+        boostDiscountEnabled: v?.boostDiscountEnabled ?? true,
+        boostDiscountPercent: v?.boostDiscountPercent,
+        boostPriceUzs: v?.boostPriceUzs,
+        globalPercent,
+      });
+
+      if (bRes.isDiscounted) {
         return {
-          price,
-          label: formatBoosterCardBadge(appliedPercent),
+          price: bRes.price,
+          label: bRes.label,
           isVip: true,
         };
       }
@@ -579,6 +593,15 @@ async function getBoosterDiscountPercent(): Promise<number> {
   const percent = Number.isFinite(val) && val >= 0 && val <= 100 ? val : 10;
   boostDiscountCache = { percent, until: Date.now() + 30_000 };
   return percent;
+}
+
+let boostEnabledCache: { enabled: boolean; until: number } = { enabled: true, until: 0 };
+async function isBoosterDiscountEnabled(): Promise<boolean> {
+  if (Date.now() < boostEnabledCache.until) return boostEnabledCache.enabled;
+  const row = await db.setting.findUnique({ where: { key: "boost_discount_enabled" } }).catch(() => null);
+  const enabled = row ? row.valueRu !== "0" && row.valueRu !== "false" : true;
+  boostEnabledCache = { enabled, until: Date.now() + 30_000 };
+  return enabled;
 }
 
 // An invited user only counts once they have actually subscribed to the
@@ -3063,9 +3086,12 @@ async function ordersView(lang: string, userId: number) {
 }
 async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
   const lang = user.lang;
-  const [ordersCount, realRefs] = await Promise.all([
+  const [ordersCount, realRefs, activeBoost] = await Promise.all([
     db.botOrder.count({ where: { userId: user.id } }),
     countVerifiedRefs(user.tgId),
+    db.channelBoost.findFirst({
+      where: { userId: user.id, expiresAt: { gt: new Date() } },
+    }).catch(() => null),
   ]);
   const refCount = realRefs + (user.bonusReferrals || 0);
   // The gifts screen shows points left to spend, the profile used to show the
@@ -3078,6 +3104,7 @@ async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
   // Professional profile layout with all actions
   const kb = new InlineKeyboard();
   kb.text(t(lang, "btn_refer"), "ref").row()
+    .text("🚀 Скидка за буст канала", "hub_boost").row()
     .text(stripLeadEmoji(t(lang, "p_orders")), "ord").icon(ordersButtonEmoji)
     .text(t(lang, "btn_support"), "support_show").row()
     .text(t(lang, "btn_language"), "lang_pick").row()
@@ -3091,6 +3118,11 @@ async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
     `${emojiIcon("🤝", referButtonEmoji)} ${t(lang, "p_invited")}: ${refCount}` +
     (spentRefs > 0 ? `\n➖ ${t(lang, "p_ref_spent")}: ${spentRefs}` : "") +
     `\n🎁 <b>${t(lang, "p_ref_available")}: ${availableRefs}</b>`;
+
+  if (activeBoost) {
+    const expDate = activeBoost.expiresAt.toLocaleDateString("ru-RU");
+    text += `\n🚀 <b>Бустер канала: Активен</b> (до ${expDate})`;
+  }
   return { text, kb };
 }
 function referView(ctx: Context, user: Awaited<ReturnType<typeof getUser>>) {
@@ -4112,6 +4144,7 @@ bot.command("start", async (ctx) => {
     return showLangPicker(ctx, false);
   }
   if (payload === "gifts") return showGifts(ctx, false);
+  if (payload === "boost" || payload === "booster") return showBoosterHub(ctx);
   if (payload.startsWith("buy_")) {
     const vid = Number(payload.slice(4));
     if (vid > 0) return showQtyChooser(ctx, vid, 1, "0:all", false);
@@ -4704,6 +4737,90 @@ bot.command(["giveaways", "contests"], async (ctx) => {
     reply_markup: kb,
   });
 });
+
+async function showBoosterHub(ctx: Context) {
+  const user = await getUser(ctx);
+  const lang = (user.lang || "ru") as Lang;
+  const activeBoost = await db.channelBoost.findFirst({
+    where: {
+      userId: user.id,
+      expiresAt: { gt: new Date() },
+    },
+  });
+
+  const globalPercent = await getBoosterDiscountPercent();
+  const configuredChannel = (await setting("channel_username", "")).trim() ||
+                            (await setting("extra_channel_id", "")).trim() ||
+                            "@Aiobuna";
+  const customBoostLink = (await setting("channel_boost_link", "")).trim();
+  const boostUrl = customBoostLink || buildTelegramBoostUrl(configuredChannel);
+
+  // Fetch all variants that have booster discounts enabled
+  const discountedVariants = await db.variant.findMany({
+    where: {
+      isActive: true,
+      boostDiscountEnabled: true,
+    },
+    include: {
+      plan: { include: { product: true } },
+    },
+    orderBy: { sortOrder: "asc" },
+    take: 8,
+  });
+
+  let text = "";
+  if (activeBoost) {
+    const expStr = activeBoost.expiresAt.toLocaleDateString("ru-RU", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    });
+    text += `🚀 <b>ВАШ СТАТУС БУСТЕРА: АКТИВЕН!</b>\n\n`;
+    text += `Спасибо за поддержку нашего канала! Ваш буст действует до <b>${expStr}</b>.\n`;
+    text += `Вам автоматически доступны специальные скидки на товары из списка ниже:\n\n`;
+  } else {
+    text += `🚀 <b>СКИДКА ЗА БУСТ НАШЕГО КАНАЛА!</b>\n\n`;
+    text += `Отдайте свой голос (буст) нашему Telegram-каналу, и бот мгновенно начислит вам скидку <b>${globalPercent}%</b> на подписки!\n\n`;
+    text += `📌 <b>Как получить скидку:</b>\n`;
+    text += `1. Нажмите кнопку «🚀 Забустить канал» ниже\n`;
+    text += `2. Подтвердите передачу голоса в Telegram\n`;
+    text += `3. Нажмите «🔄 Проверить статус буста» — скидка станет активна!\n\n`;
+  }
+
+  if (discountedVariants.length > 0) {
+    text += `🏷 <b>Товары со скидкой бустера:</b>\n`;
+    for (const v of discountedVariants) {
+      const p = v.plan.product;
+      const bRes = calculateVariantBoosterPrice({
+        basePriceUzs: v.priceUzs,
+        boostDiscountEnabled: v.boostDiscountEnabled,
+        boostDiscountPercent: v.boostDiscountPercent,
+        boostPriceUzs: v.boostPriceUzs,
+        globalPercent,
+      });
+      const badge = bRes.label || `-${bRes.discountPercent}%`;
+      text += `• <b>${esc(p.titleRu)} — ${esc(v.titleRu)}</b>: <b>${money(bRes.price, lang)}</b> <s>${money(v.priceUzs, lang)}</s> (${badge})\n`;
+    }
+    text += "\n";
+  }
+
+  const kb = new InlineKeyboard();
+  if (!activeBoost) {
+    kb.url("🚀 Забустить канал", boostUrl).row();
+    kb.text("🔄 Проверить статус буста", "boost_check").row();
+  } else {
+    kb.text("🛍 Перейти в магазин со скидкой", "m:0:all").row();
+  }
+  kb.text(t(lang, "btn_back"), "m:0:all");
+
+  return ctx.reply(text, {
+    parse_mode: "HTML",
+    reply_markup: kb,
+    link_preview_options: { is_disabled: true },
+  });
+}
+
+bot.command(["boost", "booster"], showBoosterHub);
 
 bot.command("menu", (ctx) => showMenu(ctx, 0, "all", false));
 
@@ -6980,6 +7097,24 @@ bot.on("callback_query:data", async (ctx) => {
       await ctx.answerCallbackQuery().catch(() => {});
       return handleGiveawayStart(ctx, user, `gw_${giveawayId}`);
     }
+    if (tag === "hub_boost") {
+      await ctx.answerCallbackQuery().catch(() => {});
+      return showBoosterHub(ctx);
+    }
+    if (tag === "boost_check") {
+      const activeBoost = await db.channelBoost.findFirst({
+        where: {
+          userId: user.id,
+          expiresAt: { gt: new Date() },
+        },
+      });
+      if (activeBoost) {
+        await ctx.answerCallbackQuery({ text: "✅ Ваш буст активен! Скидки применены в магазине.", show_alert: true }).catch(() => {});
+      } else {
+        await ctx.answerCallbackQuery({ text: "Пока не видим вашего буста. Если вы только что проголосовали, подождите пару секунд и повторите.", show_alert: true }).catch(() => {});
+      }
+      return showBoosterHub(ctx);
+    }
     if (tag === "gw_claim") {
       const giveawayId = Number(rest[0]);
       await ctx.answerCallbackQuery().catch(() => {});
@@ -8346,6 +8481,9 @@ async function ensureSchema() {
     `CREATE UNIQUE INDEX IF NOT EXISTS "ChannelBoost_chatId_boostId_key" ON "ChannelBoost"("chatId", "boostId")`,
     `CREATE INDEX IF NOT EXISTS "ChannelBoost_tgId_idx" ON "ChannelBoost"("tgId")`,
     `CREATE INDEX IF NOT EXISTS "ChannelBoost_expiresAt_idx" ON "ChannelBoost"("expiresAt")`,
+    `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "boostDiscountEnabled" BOOLEAN NOT NULL DEFAULT true`,
+    `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "boostDiscountPercent" INTEGER`,
+    `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "boostPriceUzs" INTEGER`,
   ];
   for (const sql of statements) {
     try {
@@ -8544,6 +8682,7 @@ async function bootstrap() {
       await bot.api.setMyCommands([
         { command: "start", description: "🛍 Магазин / Menu" },
         { command: "shop", description: "🛍 Магазин" },
+        { command: "boost", description: "🚀 Скидка за буст" },
         { command: "giveaways", description: "🎉 Розыгрыши" },
         { command: "freebies", description: "🎁 Акции" },
         { command: "orders", description: "🧾 Заказы" },

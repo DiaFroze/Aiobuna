@@ -15,6 +15,7 @@ import {
   generateSampleWinnersPost,
 } from "@/lib/domain/giveaways";
 import { generateDealSlug } from "@/lib/domain/deal-links";
+import { buildTelegramBoostUrl, generateBoosterAdTemplates } from "@/lib/domain/channel-boosts";
 
 function str(v: FormDataEntryValue | null): string {
   return String(v ?? "").trim();
@@ -571,6 +572,7 @@ export async function sendTestGiveawayResultsAction(formData: FormData) {
 export async function updateBoostSettingsAction(formData: FormData) {
   const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
   const percent = Math.min(100, Math.max(0, num(formData.get("boostDiscountPercent"))));
+  const channelBoostLink = str(formData.get("channelBoostLink"));
 
   await botDb.botSetting.upsert({
     where: { key: "boost_discount_percent" },
@@ -586,20 +588,210 @@ export async function updateBoostSettingsAction(formData: FormData) {
     },
   });
 
+  if (channelBoostLink) {
+    await botDb.botSetting.upsert({
+      where: { key: "channel_boost_link" },
+      create: {
+        key: "channel_boost_link",
+        valueRu: channelBoostLink,
+        valueUz: channelBoostLink,
+        type: "text",
+      },
+      update: {
+        valueRu: channelBoostLink,
+        valueUz: channelBoostLink,
+      },
+    });
+  }
+
   await audit({
     adminId: admin.id,
     action: "channel_boost.settings_update",
     entityType: "BotSetting",
     entityId: "boost_discount_percent",
-    metadata: { percent },
+    metadata: { percent, channelBoostLink },
   });
 
   revalidatePath("/admin/bot-giveaways");
   redirect("/admin/bot-giveaways?ok=boost_updated");
 }
 
+export async function toggleGlobalBoostDiscountAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
+  const current = await botDb.botSetting.findUnique({ where: { key: "boost_discount_enabled" } });
+  const isEnabled = current ? current.valueRu !== "0" && current.valueRu !== "false" : true;
+  const nextVal = isEnabled ? "0" : "1";
+
+  await botDb.botSetting.upsert({
+    where: { key: "boost_discount_enabled" },
+    create: { key: "boost_discount_enabled", valueRu: nextVal, valueUz: nextVal, type: "text" },
+    update: { valueRu: nextVal, valueUz: nextVal },
+  });
+
+  await audit({
+    adminId: admin.id,
+    action: "channel_boost.toggle_global",
+    entityType: "BotSetting",
+    entityId: "boost_discount_enabled",
+    metadata: { enabled: nextVal === "1" },
+  });
+
+  revalidatePath("/admin/bot-giveaways");
+  redirect("/admin/bot-giveaways?ok=boost_updated");
+}
+
+export async function updateVariantBoostPricingAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.PRODUCTS_WRITE);
+  const variantId = num(formData.get("variantId"));
+  if (!variantId) return;
+
+  const boostDiscountEnabled = bool(formData.get("boostDiscountEnabled"));
+  const mode = str(formData.get("pricingMode")) || "percent";
+  const rawValue = num(formData.get("pricingValue"));
+
+  let boostDiscountPercent: number | null = null;
+  let boostPriceUzs: number | null = null;
+
+  if (mode === "price") {
+    boostPriceUzs = rawValue > 0 ? Math.round(rawValue) : null;
+  } else if (mode === "percent") {
+    boostDiscountPercent = rawValue > 0 ? Math.min(100, Math.round(rawValue)) : null;
+  }
+
+  await botDb.variant.update({
+    where: { id: variantId },
+    data: {
+      boostDiscountEnabled,
+      boostDiscountPercent,
+      boostPriceUzs,
+    },
+  });
+
+  await audit({
+    adminId: admin.id,
+    action: "variant.boost_pricing_update",
+    entityType: "Variant",
+    entityId: String(variantId),
+    metadata: { boostDiscountEnabled, mode, boostDiscountPercent, boostPriceUzs },
+  });
+
+  revalidatePath("/admin/bot-giveaways");
+  redirect("/admin/bot-giveaways?ok=boost_variant_updated");
+}
+
+export async function publishBoosterAdAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.PRODUCTS_WRITE);
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) redirect("/admin/bot-giveaways?error=nobottoken");
+
+  const channelTarget = str(formData.get("channelTarget")) || (await botDb.botSetting.findUnique({ where: { key: "channel_username" } }))?.valueRu || "";
+  if (!channelTarget) redirect("/admin/bot-giveaways?error=nochannel");
+
+  const adText = str(formData.get("adText"));
+  if (!adText) redirect("/admin/bot-giveaways?error=missing");
+
+  const customBoostLink = (await botDb.botSetting.findUnique({ where: { key: "channel_boost_link" } }))?.valueRu;
+  const boostUrl = customBoostLink || buildTelegramBoostUrl(channelTarget);
+  const botUsername = process.env.NEXT_PUBLIC_BOT_USERNAME || process.env.BOT_USERNAME || "Aiobunabot";
+  const shopBoostUrl = `https://t.me/${botUsername}?start=boost`;
+
+  let publishError = "";
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: channelTarget,
+        text: adText,
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🚀 Забустить канал", url: boostUrl }],
+            [{ text: "🛍 Открыть магазин со скидкой", url: shopBoostUrl }],
+          ],
+        },
+      }),
+    });
+
+    const data = await res.json();
+    if (!data.ok) {
+      throw new Error(data.description || "Telegram rejected publish");
+    }
+
+    await audit({
+      adminId: admin.id,
+      action: "channel_boost.publish_ad",
+      entityType: "ChannelBoostAd",
+      entityId: channelTarget,
+      metadata: { messageId: data.result?.message_id },
+    });
+  } catch (err) {
+    publishError = err instanceof Error ? err.message : "publishexception";
+  }
+
+  if (publishError) redirect(`/admin/bot-giveaways?error=${encodeURIComponent(publishError)}`);
+  redirect("/admin/bot-giveaways?ok=ad_published");
+}
+
+export async function sendTestBoosterAdAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.PRODUCTS_WRITE);
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) redirect("/admin/bot-giveaways?error=nobottoken");
+
+  const targetChat = str(formData.get("targetChat")) || process.env.TELEGRAM_ADMIN_CHAT_ID;
+  if (!targetChat) redirect("/admin/bot-giveaways?error=notargetchat");
+
+  const adText = str(formData.get("adText"));
+  if (!adText) redirect("/admin/bot-giveaways?error=missing");
+
+  const channelTarget = str(formData.get("channelTarget")) || "@channel";
+  const customBoostLink = (await botDb.botSetting.findUnique({ where: { key: "channel_boost_link" } }))?.valueRu;
+  const boostUrl = customBoostLink || buildTelegramBoostUrl(channelTarget);
+  const botUsername = process.env.NEXT_PUBLIC_BOT_USERNAME || process.env.BOT_USERNAME || "Aiobunabot";
+  const shopBoostUrl = `https://t.me/${botUsername}?start=boost`;
+
+  const testText = `${adText}\n\n<i>🧪 [ТЕСТОВЫЙ ПРЕДПРОСМОТР РЕКЛАМЫ БУСТА]</i>`;
+
+  let testError = "";
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: targetChat,
+        text: testText,
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🚀 Забустить канал", url: boostUrl }],
+            [{ text: "🛍 Открыть магазин со скидкой", url: shopBoostUrl }],
+          ],
+        },
+      }),
+    });
+
+    const data = await res.json();
+    if (!data.ok) {
+      throw new Error(data.description || "Telegram rejected test send");
+    }
+
+    await audit({
+      adminId: admin.id,
+      action: "channel_boost.test_ad",
+      entityType: "ChannelBoostAd",
+      entityId: targetChat,
+    });
+  } catch (err) {
+    testError = err instanceof Error ? err.message : "testpostexception";
+  }
+
+  if (testError) redirect(`/admin/bot-giveaways?error=${encodeURIComponent(testError)}`);
+  redirect("/admin/bot-giveaways?ok=ad_test_sent");
+}
+
 function escapeHtml(s: string): string {
   if (!s) return "";
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
+
 

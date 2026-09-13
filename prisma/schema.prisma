@@ -664,6 +664,11 @@ model Variant {
   routingStrategy    String  @default("priority")
   suppliers          VariantSupplier[]
 
+  // Channel booster pricing: enable/disable per variant, custom percent or fixed price
+  boostDiscountEnabled Boolean @default(true)
+  boostDiscountPercent Int?
+  boostPriceUzs        Int?
+
   stockItems   StockItem[]
   customPrices UserVariantPrice[]
   promoLinks   PromoLink[]

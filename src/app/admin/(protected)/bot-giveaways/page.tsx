@@ -9,19 +9,28 @@ import {
   sendTestGiveawayPostAction,
   sendTestGiveawayResultsAction,
   updateBoostSettingsAction,
+  toggleGlobalBoostDiscountAction,
+  updateVariantBoostPricingAction,
+  publishBoosterAdAction,
+  sendTestBoosterAdAction,
 } from "./actions";
 import { maskUserIdentifier, formatGiveawayCountdown } from "@/lib/domain/giveaways";
+import {
+  generateBoosterAdTemplates,
+  buildTelegramBoostUrl,
+  calculateVariantBoosterPrice,
+} from "@/lib/domain/channel-boosts";
 
 const ERROR_MESSAGES: Record<string, string> = {
-  missing: "Заполните название, товар и текст поста.",
-  invalid: "Проверьте целые числа, длину текста и ссылку на закрытый канал.",
+  missing: "Заполните все обязательные поля.",
+  invalid: "Проверьте введённые данные.",
   novariant: "Выбранный тариф не найден.",
-  nochannel: "Укажите канал и текст публикации.",
+  nochannel: "Укажите канал для публикации.",
   nobottoken: "Не настроен токен Telegram-бота.",
-  notargetchat: "Не указан Telegram Chat ID для отправки теста (задайте TELEGRAM_ADMIN_CHAT_ID в .env или укажите чат в форме).",
+  notargetchat: "Не указан Telegram Chat ID для отправки теста (задайте TELEGRAM_ADMIN_CHAT_ID в .env).",
   alreadydrawn: "Итоги уже подведены. Создайте новый розыгрыш.",
   noparticipants: "Нет участников, выполнивших условия.",
-  notfound: "Розыгрыш не найден.",
+  notfound: "Запись не найдена.",
   publishexception: "Не удалось опубликовать пост. Проверьте права бота в канале.",
   testpostexception: "Ошибка при отправке тестового сообщения.",
   testresultsexception: "Ошибка при отправке тестовых итогов.",
@@ -41,7 +50,7 @@ export default async function BotGiveawaysPage({
   if (!botConfigured()) {
     return (
       <div>
-        <PageHeader title="Розыгрыши и конкурсы" />
+        <PageHeader title="Розыгрыши и бусты" />
         <EmptyState>BOT_DATABASE_URL не задан в .env.</EmptyState>
       </div>
     );
@@ -50,7 +59,16 @@ export default async function BotGiveawaysPage({
   const botUsername = process.env.NEXT_PUBLIC_BOT_USERNAME || process.env.BOT_USERNAME || "Aiobunabot";
   const defaultAdminChatId = process.env.TELEGRAM_ADMIN_CHAT_ID || "";
 
-  const [products, giveaways, totalWinnersCount, boostSetting, activeBoosters] = await Promise.all([
+  const [
+    products,
+    giveaways,
+    totalWinnersCount,
+    boostPercentSetting,
+    boostEnabledSetting,
+    boostLinkSetting,
+    channelSetting,
+    activeBoosters,
+  ] = await Promise.all([
     botDb.product.findMany({
       where: { isActive: true },
       orderBy: { sortOrder: "asc" },
@@ -95,6 +113,9 @@ export default async function BotGiveawaysPage({
     }),
     botDb.giveawayWinner.count(),
     botDb.botSetting.findUnique({ where: { key: "boost_discount_percent" } }),
+    botDb.botSetting.findUnique({ where: { key: "boost_discount_enabled" } }),
+    botDb.botSetting.findUnique({ where: { key: "channel_boost_link" } }),
+    botDb.botSetting.findUnique({ where: { key: "channel_username" } }),
     (botDb as any).channelBoost.findMany({
       where: { expiresAt: { gt: new Date() } },
       include: { user: true },
@@ -103,17 +124,35 @@ export default async function BotGiveawaysPage({
     }).catch(() => []),
   ]);
 
-  const boostDiscountPercent = Number(boostSetting?.valueRu ?? "10") || 10;
+  const boostDiscountPercent = Number(boostPercentSetting?.valueRu ?? "10") || 10;
+  const isBoostGlobalEnabled = boostEnabledSetting ? boostEnabledSetting.valueRu !== "0" && boostEnabledSetting.valueRu !== "false" : true;
+  const channelTarget = channelSetting?.valueRu || "@Aiobuna";
+  const customBoostLink = boostLinkSetting?.valueRu || "";
+  const effectiveBoostLink = customBoostLink || buildTelegramBoostUrl(channelTarget);
 
-  const variantOptions = products.flatMap((p) =>
+  const adTemplates = generateBoosterAdTemplates({
+    channelTitle: channelTarget,
+    boostLink: effectiveBoostLink,
+    defaultPercent: boostDiscountPercent,
+    botUsername,
+  });
+
+  const allVariants = products.flatMap((p) =>
     p.plans.flatMap((pl) =>
       pl.variants.map((v) => ({
-        id: v.id,
-        label: `${p.titleRu} — ${v.titleRu} (Обычная цена: ${money(v.priceUzs)})`,
-        priceUzs: v.priceUzs,
+        ...v,
+        productTitle: p.titleRu,
+        planTitle: pl.titleRu,
+        label: `${p.titleRu} — ${v.titleRu}`,
       })),
     ),
   );
+
+  const variantOptions = allVariants.map((v) => ({
+    id: v.id,
+    label: `${v.label} (Обычная цена: ${money(v.priceUzs)})`,
+    priceUzs: v.priceUzs,
+  }));
 
   const activeCount = giveaways.filter((g) => g.status === "active").length;
   const completedCount = giveaways.filter((g) => g.status === "completed").length;
@@ -122,18 +161,19 @@ export default async function BotGiveawaysPage({
   return (
     <div className="space-y-6">
       <PageHeader
-        title="🎉 Розыгрыши и конкурсы"
-        subtitle="Проведение розыгрышей товаров со скидкой или бесплатно, таймер итогов, буст-скидки для канала, превью и публикация постов в Telegram."
+        title="🎉 Розыгрыши, бусты и акции"
+        subtitle="Проведение розыгрышей, авто-итоги по таймеру, автоматические скидки за буст канала, готовые рекламные материалы и настройка спеццен по товарам."
       />
 
+      {/* Status Banners */}
       {searchParams.ok === "created" && (
         <div className="card p-3 border-success/30 bg-success/5 text-success text-sm">
-          ✅ Розыгрыш успешно создан! Вы можете протестировать или опубликовать его в канал.
+          ✅ Розыгрыш успешно создан!
         </div>
       )}
       {searchParams.ok === "published" && (
         <div className="card p-3 border-success/30 bg-success/5 text-success text-sm">
-          📢 Пост с кнопкой «Участвовать» успешно отправлен в канал! Розыгрыш переведён в статус «Активен».
+          📢 Пост с кнопкой успешно отправлен в канал!
         </div>
       )}
       {searchParams.ok === "drawn" && (
@@ -153,24 +193,38 @@ export default async function BotGiveawaysPage({
       )}
       {searchParams.ok === "test_sent" && (
         <div className="card p-3 border-success/30 bg-success/5 text-success text-sm">
-          🧪 <b>Тестовый пост анонса успешно отправлен в Telegram!</b> Проверьте личные сообщения или указанный чат.
+          🧪 <b>Тестовый пост анонса отправлен в Telegram!</b>
         </div>
       )}
       {searchParams.ok === "test_results_sent" && (
         <div className="card p-3 border-success/30 bg-success/5 text-success text-sm">
-          🧪 <b>Тестовый пост итогов успешно отправлен в Telegram!</b> Проверьте, как оформлены победители и текст.
+          🧪 <b>Тестовый пост итогов отправлен в Telegram!</b>
         </div>
       )}
       {searchParams.ok === "boost_updated" && (
         <div className="card p-3 border-success/30 bg-success/5 text-success text-sm">
-          🚀 <b>Настройки скидки за буст канала сохранены!</b>
+          🚀 <b>Настройки скидки за буст канала успешно сохранены!</b>
+        </div>
+      )}
+      {searchParams.ok === "boost_variant_updated" && (
+        <div className="card p-3 border-success/30 bg-success/5 text-success text-sm">
+          🏷 <b>Индивидуальные настройки цены бустера для тарифа сохранены!</b>
+        </div>
+      )}
+      {searchParams.ok === "ad_published" && (
+        <div className="card p-3 border-success/30 bg-success/5 text-success text-sm">
+          📢 <b>Рекламный пост для бустеров опубликован в канал с кнопкой перехода!</b>
+        </div>
+      )}
+      {searchParams.ok === "ad_test_sent" && (
+        <div className="card p-3 border-success/30 bg-success/5 text-success text-sm">
+          🧪 <b>Тестовая реклама отправлена администратору в Telegram!</b> Проверьте кнопки и оформление.
         </div>
       )}
 
       {searchParams.warning === "notifyfailed" && (
         <div className="card p-3 border-warning/30 text-sm" role="alert">
-          Победители сохранены, но часть уведомлений Telegram не отправлена. Проверьте права бота в канале.
-          Победители могут открыть исходную ссылку розыгрыша в боте и забрать приз.
+          Победители сохранены, но часть уведомлений Telegram не отправлена.
         </div>
       )}
       {searchParams.error && (
@@ -184,30 +238,53 @@ export default async function BotGiveawaysPage({
         <StatCard label="Всего конкурсов" value={String(giveaways.length)} />
         <StatCard label="Активных" value={String(activeCount)} />
         <StatCard label="Завершённых" value={String(completedCount)} />
-        <StatCard label="Участников (всего)" value={String(totalParticipants)} />
+        <StatCard label="Участников конкурсов" value={String(totalParticipants)} />
         <StatCard label="Бустеров канала" value={String(activeBoosters.length)} />
       </div>
 
-      {/* Channel Boost Discount Configuration Card */}
-      <div className="card p-5 bg-surface border space-y-4">
+      {/* Section 1: Channel Boost General Settings & Boosters */}
+      <div className="card p-5 bg-surface border space-y-4 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
               <span className="text-xl">🚀</span>
-              <h2 className="text-base font-semibold">Скидка за буст Telegram-канала</h2>
-              <span className="badge text-xs px-2 py-0.5 rounded-full bg-brand/15 text-brand border border-brand/30">
-                Автоматически
+              <h2 className="text-base font-semibold">Скидки за буст Telegram-канала</h2>
+              <span
+                className={`badge text-xs px-2 py-0.5 rounded-full font-medium ${
+                  isBoostGlobalEnabled
+                    ? "bg-success/15 text-success border border-success/30"
+                    : "bg-muted/15 text-muted border border-muted/30"
+                }`}
+              >
+                {isBoostGlobalEnabled ? "🟢 Система активна" : "⚪ Отключена"}
               </span>
             </div>
             <p className="text-xs text-muted mt-1">
-              Когда пользователь отдаёт голос (буст) вашему каналу, Telegram отправляет событие в бот.
-              Пользователь получает скидку на все товары магазина на всё время действия буста.
+              Когда пользователь отдаёт голос каналу, бот мгновенно начисляет ему скидку на все разрешённые товары.
             </p>
           </div>
 
-          <form action={updateBoostSettingsAction} className="flex items-center gap-2">
-            <div className="flex items-center gap-1.5">
-              <label className="text-xs font-medium text-muted">Размер скидки:</label>
+          <div className="flex items-center gap-2">
+            <form action={toggleGlobalBoostDiscountAction}>
+              <button
+                type="submit"
+                className={`btn btn-sm text-xs border ${
+                  isBoostGlobalEnabled
+                    ? "border-warning/30 text-warning hover:bg-warning/10"
+                    : "border-success/30 text-success hover:bg-success/10"
+                }`}
+              >
+                {isBoostGlobalEnabled ? "⏸ Отключить буст-скидки" : "▶️ Включить буст-скидки"}
+              </button>
+            </form>
+          </div>
+        </div>
+
+        {/* Settings form: Percent + Boost Link */}
+        <form action={updateBoostSettingsAction} className="p-3.5 bg-surface-2 rounded-lg border space-y-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+            <div>
+              <label className="font-semibold block mb-1">Скидка по умолчанию (%)</label>
               <div className="relative">
                 <input
                   type="number"
@@ -215,23 +292,39 @@ export default async function BotGiveawaysPage({
                   defaultValue={boostDiscountPercent}
                   min="0"
                   max="100"
-                  className="input w-24 text-right pr-6 font-semibold"
+                  className="input w-full pr-8 font-semibold"
                 />
-                <span className="absolute right-2 top-2 text-xs text-muted">%</span>
+                <span className="absolute right-3 top-2 text-muted">%</span>
               </div>
+              <span className="text-[10px] text-muted">Применяется к товарам, где не задана индивидуальная цена.</span>
             </div>
+
+            <div>
+              <label className="font-semibold block mb-1">Прямая ссылка на буст канала</label>
+              <input
+                type="text"
+                name="channelBoostLink"
+                defaultValue={customBoostLink}
+                placeholder={effectiveBoostLink}
+                className="input w-full font-mono text-[11px]"
+              />
+              <span className="text-[10px] text-muted">Оставьте пустым для автогенерации (https://t.me/boost/ваш_канал).</span>
+            </div>
+          </div>
+
+          <div className="flex justify-end">
             <button type="submit" className="btn btn-sm btn-primary text-xs">
-              💾 Сохранить
+              💾 Сохранить общие настройки буста
             </button>
-          </form>
-        </div>
+          </div>
+        </form>
 
         {/* Active Boosters List */}
         {activeBoosters.length > 0 ? (
           <div className="border rounded-lg p-3 bg-surface-2 space-y-2">
             <div className="flex items-center justify-between text-xs text-muted font-medium">
               <span>Активные бустеры канала ({activeBoosters.length}):</span>
-              <span>Скидка {boostDiscountPercent}% активна</span>
+              <span className="text-success font-semibold">Скидка активна</span>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 text-xs">
               {activeBoosters.map((b: any) => {
@@ -239,10 +332,10 @@ export default async function BotGiveawaysPage({
                 const displayName = u ? maskUserIdentifier(u) : `ID: ${b.tgId}`;
                 const expDate = new Date(b.expiresAt).toLocaleDateString("ru-RU");
                 return (
-                  <div key={b.id} className="p-2 bg-surface rounded border flex items-center justify-between">
+                  <div key={b.id} className="p-2 bg-surface rounded border flex items-center justify-between shadow-xs">
                     <div className="truncate">
                       <span className="font-medium text-text">{displayName}</span>
-                      <span className="text-[10px] text-muted block">Буст ID: {b.boostId.slice(0, 8)}...</span>
+                      <span className="text-[10px] text-muted block">ID буста: {b.boostId.slice(0, 8)}...</span>
                     </div>
                     <span className="text-[10px] text-success font-semibold shrink-0 ml-2">
                       до {expDate}
@@ -254,16 +347,204 @@ export default async function BotGiveawaysPage({
           </div>
         ) : (
           <div className="text-xs text-muted p-2.5 bg-surface-2 rounded border">
-            ℹ️ Активных бустов пока нет. Как только кто-то забустит ваш канал, бот автоматически начислит скидку {boostDiscountPercent}%.
+            ℹ️ Активных бустов пока нет. Опубликуйте рекламу в канал ниже, чтобы привлечь первых бустеров!
           </div>
         )}
       </div>
 
+      {/* Section 2: Ready-made Advertising Posts & Buttons */}
+      <div className="card p-5 bg-surface border space-y-4 shadow-sm">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="text-xl">📢</span>
+            <h2 className="text-base font-semibold">Готовые рекламные посты для привлечения бустов</h2>
+            <span className="badge text-xs px-2 py-0.5 rounded-full bg-brand/15 text-brand border border-brand/30">
+              В 1 клик
+            </span>
+          </div>
+          <p className="text-xs text-muted mt-1">
+            Выберите готовый рекламный пост, протестируйте его в личке Telegram или сразу опубликуйте в канал.
+            К каждому посту автоматически прикрепляются кнопки «🚀 Забустить канал» и «🛍 Открыть магазин со скидкой».
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {adTemplates.map((tpl) => (
+            <div key={tpl.id} className="border rounded-xl p-4 bg-surface-2 flex flex-col justify-between space-y-3">
+              <div>
+                <div className="flex items-center justify-between border-b pb-2 mb-2">
+                  <span className="font-semibold text-xs text-text">{tpl.title}</span>
+                  <span className="badge text-[10px] bg-surface border px-1.5 py-0.5 rounded text-muted">Шаблон</span>
+                </div>
+
+                {/* Post mockup preview */}
+                <div className="rounded-lg p-3 bg-[#182533] text-[#e4e4e4] text-[11px] leading-relaxed whitespace-pre-wrap font-sans border border-[#2b3c4f] max-h-48 overflow-y-auto">
+                  <div dangerouslySetInnerHTML={{ __html: tpl.text.replace(/\n/g, "<br/>") }} />
+                </div>
+
+                {/* Mockup buttons */}
+                <div className="mt-2 space-y-1">
+                  <div className="bg-[#3390ec] text-white text-[11px] py-1.5 px-2 rounded text-center font-medium shadow-xs">
+                    {tpl.buttonText} ↗
+                  </div>
+                  <div className="bg-[#242f3d] text-[#8ecaff] text-[10px] py-1 px-2 rounded text-center border border-[#374b61]">
+                    {tpl.storeButtonText} ↗
+                  </div>
+                </div>
+              </div>
+
+              {/* Action buttons for template */}
+              <div className="pt-2 border-t space-y-2">
+                <form action={publishBoosterAdAction}>
+                  <input type="hidden" name="adText" value={tpl.text} />
+                  <input type="hidden" name="channelTarget" value={channelTarget} />
+                  <button
+                    type="submit"
+                    className="btn btn-sm btn-primary w-full text-xs font-semibold flex items-center justify-center gap-1"
+                    title="Опубликовать этот рекламный пост в канал с кнопками"
+                  >
+                    📢 Опубликовать в канал
+                  </button>
+                </form>
+
+                <form action={sendTestBoosterAdAction}>
+                  <input type="hidden" name="adText" value={tpl.text} />
+                  <input type="hidden" name="channelTarget" value={channelTarget} />
+                  <button
+                    type="submit"
+                    className="btn btn-sm btn-ghost w-full text-xs border flex items-center justify-center gap-1 hover:bg-surface-1"
+                    title="Отправить точную копию рекламы с кнопками админу в Telegram"
+                  >
+                    🧪 Тест мне в Telegram
+                  </button>
+                </form>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Section 3: Per-Product/Variant Booster Pricing Configuration */}
+      <div className="card p-5 bg-surface border space-y-4 shadow-sm">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="text-xl">🏷</span>
+            <h2 className="text-base font-semibold">Настройка цен бустеров по товарам (Процент или точная цена)</h2>
+          </div>
+          <p className="text-xs text-muted mt-1">
+            Вы можете включить или отключить скидку бустера для каждого товара индивидуально, а также выбрать: процент скидки или конкретную фиксированную цену.
+          </p>
+        </div>
+
+        <div className="overflow-x-auto border rounded-xl">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b bg-surface-2 text-muted text-left">
+                <th className="py-2.5 px-3">Товар и тариф</th>
+                <th className="py-2.5 px-3">Обычная цена</th>
+                <th className="py-2.5 px-3">Скидка бустера</th>
+                <th className="py-2.5 px-3">Режим цены</th>
+                <th className="py-2.5 px-3">Значение</th>
+                <th className="py-2.5 px-3">Итого для бустера</th>
+                <th className="py-2.5 px-3 text-right">Действие</th>
+              </tr>
+            </thead>
+            <tbody>
+              {allVariants.map((v) => {
+                const isEnabled = (v as any).boostDiscountEnabled ?? true;
+                const customPercent = (v as any).boostDiscountPercent;
+                const fixedPrice = (v as any).boostPriceUzs;
+
+                const boosterRes = calculateVariantBoosterPrice({
+                  basePriceUzs: v.priceUzs,
+                  boostDiscountEnabled: isEnabled,
+                  boostDiscountPercent: customPercent,
+                  boostPriceUzs: fixedPrice,
+                  globalPercent: boostDiscountPercent,
+                });
+
+                const currentMode = fixedPrice && fixedPrice > 0 ? "price" : "percent";
+                const currentValue = fixedPrice && fixedPrice > 0 ? fixedPrice : customPercent || boostDiscountPercent;
+
+                return (
+                  <tr key={v.id} className="border-b/50 hover:bg-surface-2/40 transition">
+                    <td className="py-2.5 px-3 font-medium">
+                      <div>{v.productTitle}</div>
+                      <div className="text-[11px] text-muted">{v.titleRu}</div>
+                    </td>
+                    <td className="py-2.5 px-3 font-semibold text-muted">
+                      {money(v.priceUzs)}
+                    </td>
+
+                    <td colSpan={5} className="py-1 px-3">
+                      <form action={updateVariantBoostPricingAction} className="flex items-center gap-2 justify-between">
+                        <input type="hidden" name="variantId" value={v.id} />
+
+                        {/* On / Off switch */}
+                        <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            name="boostDiscountEnabled"
+                            defaultChecked={isEnabled}
+                            className="checkbox checkbox-xs"
+                          />
+                          <span className={isEnabled ? "text-success font-medium text-[11px]" : "text-muted text-[11px]"}>
+                            {isEnabled ? "Включено" : "Отключено"}
+                          </span>
+                        </label>
+
+                        {/* Pricing Mode: Percent vs Fixed Price */}
+                        <select
+                          name="pricingMode"
+                          defaultValue={currentMode}
+                          className="input py-1 px-2 text-[11px] w-36"
+                        >
+                          <option value="percent">Процент (%)</option>
+                          <option value="price">Фикс. цена (сум)</option>
+                        </select>
+
+                        {/* Value Input */}
+                        <div className="relative w-28">
+                          <input
+                            type="number"
+                            name="pricingValue"
+                            defaultValue={currentValue}
+                            min="0"
+                            className="input py-1 px-2 text-[11px] w-full font-semibold"
+                          />
+                        </div>
+
+                        {/* Calculated Result Badge */}
+                        <div className="w-40 truncate">
+                          {isEnabled ? (
+                            <span className="badge bg-brand/15 text-brand border border-brand/30 px-2 py-0.5 rounded text-[11px] font-semibold">
+                              {money(boosterRes.price)} ({boosterRes.label || `-${boosterRes.discountPercent}%`})
+                            </span>
+                          ) : (
+                            <span className="text-muted text-[11px]">— обычная цена</span>
+                          )}
+                        </div>
+
+                        {/* Save Button */}
+                        <button type="submit" className="btn btn-sm btn-ghost border text-[11px] hover:bg-surface-1">
+                          💾 Сохранить
+                        </button>
+                      </form>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Section 4: Giveaways list and creation */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
         {/* Left: Giveaways list */}
         <div className="lg:col-span-2 space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Список розыгрышей</h2>
+            <h2 className="text-lg font-semibold">Список розыгрышей и конкурсов</h2>
             <span className="text-xs text-muted">Всего: {giveaways.length}</span>
           </div>
 
