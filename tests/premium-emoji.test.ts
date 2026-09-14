@@ -258,22 +258,28 @@ describe("sanitizeTextCustomEmojis", () => {
     expect(sanitizeTextCustomEmojis(text)).toBe(text);
   });
 
-  it("maps unofficial custom emoji IDs with known fallback emojis to official IDs", () => {
-    const text = '<tg-emoji emoji-id="999999999999">🚀</tg-emoji> Start now';
+  it("preserves arbitrary valid custom emoji IDs (from custom Telegram packs)", () => {
+    const text = '<tg-emoji emoji-id="5341439423449939486">👅</tg-emoji> <b>Super Duolingo</b>';
+    expect(sanitizeTextCustomEmojis(text)).toBe(text);
+
+    const text2 = '<tg-emoji emoji-id="999999999999">🚀</tg-emoji> Start now';
+    expect(sanitizeTextCustomEmojis(text2)).toBe(text2);
+  });
+
+  it("preserves custom emoji with black heart and exact custom emoji ID", () => {
+    const text = '<tg-emoji emoji-id="888888888888">🖤</tg-emoji> CapCut Video';
+    expect(sanitizeTextCustomEmojis(text)).toBe(text);
+  });
+
+  it("falls back to EMOJI_CHAR_TO_PREMIUM when emoji-id is malformed/short", () => {
+    const text = '<tg-emoji emoji-id="12">🚀</tg-emoji> Start now';
     expect(sanitizeTextCustomEmojis(text)).toBe(
       '<tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji> Start now',
     );
   });
 
-  it("maps unofficial custom emoji with black heart to official video emoji while preserving 🖤", () => {
-    const text = '<tg-emoji emoji-id="888888888888">🖤</tg-emoji> CapCut Video';
-    expect(sanitizeTextCustomEmojis(text)).toBe(
-      '<tg-emoji emoji-id="5375464961822695044">🖤</tg-emoji> CapCut Video',
-    );
-  });
-
-  it("strips unrecognized tags into clean character without causing 400 errors", () => {
-    const text = '<tg-emoji emoji-id="777777777777">XYZ</tg-emoji> Description';
+  it("strips malformed/short tags with unknown character into clean character", () => {
+    const text = '<tg-emoji emoji-id="12">XYZ</tg-emoji> Description';
     expect(sanitizeTextCustomEmojis(text)).toBe("XYZ Description");
   });
 });
@@ -305,6 +311,23 @@ describe("messageEntitiesToHtml", () => {
     ];
     const html = messageEntitiesToHtml(text, entities);
     expect(html).toBe('Formula &lt;a &amp; b&gt; <tg-emoji emoji-id="5372917041193828849">🚀</tg-emoji>');
+  });
+
+  it("preserves custom premium emoji pack tags from user screenshot (e.g. Duolingo owl, custom sparkles, green badge, pink key)", () => {
+    const raw = "👅 Super Duolingo — 12 oy\n✨ Nimalar kiradi:\n✅ Reklamalarsiz\n⚡ Cheksiz Hearts\n🗝 Qanday aktivatsiya qilinadi";
+    const entities = [
+      { type: "custom_emoji", offset: raw.indexOf("👅"), length: 2, custom_emoji_id: "5341439423449939486" },
+      { type: "custom_emoji", offset: raw.indexOf("✨"), length: 1, custom_emoji_id: "5325547803936572038" },
+      { type: "custom_emoji", offset: raw.indexOf("✅"), length: 1, custom_emoji_id: "6237790860377854962" },
+      { type: "custom_emoji", offset: raw.indexOf("⚡"), length: 1, custom_emoji_id: "5208569713885473176" },
+      { type: "custom_emoji", offset: raw.indexOf("🗝"), length: "🗝".length, custom_emoji_id: "5420094143089111506" },
+    ];
+    const html = messageEntitiesToHtml(raw, entities);
+    expect(html).toContain('<tg-emoji emoji-id="5341439423449939486">👅</tg-emoji>');
+    expect(html).toContain('<tg-emoji emoji-id="5325547803936572038">✨</tg-emoji>');
+    expect(html).toContain('<tg-emoji emoji-id="6237790860377854962">✅</tg-emoji>');
+    expect(html).toContain('<tg-emoji emoji-id="5208569713885473176">⚡</tg-emoji>');
+    expect(html).toContain('<tg-emoji emoji-id="5420094143089111506">🗝</tg-emoji>');
   });
 });
 

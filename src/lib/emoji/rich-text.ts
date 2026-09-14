@@ -298,16 +298,24 @@ export const BRAND_PREMIUM_EMOJIS: Array<{ match: RegExp; id: string; char: stri
  */
 export function sanitizeTextCustomEmojis(text: string): string {
   if (!text) return "";
-  return text.replace(/<tg-emoji\s+(?:emoji-)?id=["']?(\d+)["']?\s*>([\s\S]*?)<\/tg-emoji>/gi, (_m, id, inner) => {
-    const cleanChar = (inner || "").trim() || "✨";
-    if (OFFICIAL_TEXT_EMOJI_IDS.has(id)) {
-      return `<tg-emoji emoji-id="${id}">${cleanChar}</tg-emoji>`;
-    }
-    if (EMOJI_CHAR_TO_PREMIUM[cleanChar]) {
-      return `<tg-emoji emoji-id="${EMOJI_CHAR_TO_PREMIUM[cleanChar].id}">${cleanChar}</tg-emoji>`;
-    }
-    return cleanChar;
-  });
+  return text.replace(
+    /<tg-emoji\s+(?:emoji-)?id=(?:\\*["']|&quot;)?(\d+)(?:\\*["']|&quot;)?\s*>([\s\S]*?)<\/tg-emoji>/gi,
+    (_m, id, inner) => {
+      const cleanChar = (inner || "").trim() || "✨";
+      // 1. If an explicit valid Telegram custom emoji ID is present (6+ digits),
+      // PRESERVE IT 100%! Never overwrite or strip an ID the user/admin provided.
+      if (id && /^\d{6,}$/.test(id)) {
+        return `<tg-emoji emoji-id="${id}">${cleanChar}</tg-emoji>`;
+      }
+      if (OFFICIAL_TEXT_EMOJI_IDS.has(id)) {
+        return `<tg-emoji emoji-id="${id}">${cleanChar}</tg-emoji>`;
+      }
+      if (EMOJI_CHAR_TO_PREMIUM[cleanChar]) {
+        return `<tg-emoji emoji-id="${EMOJI_CHAR_TO_PREMIUM[cleanChar].id}">${cleanChar}</tg-emoji>`;
+      }
+      return cleanChar;
+    },
+  );
 }
 
 export interface ResolvedPremiumEmoji {

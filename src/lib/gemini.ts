@@ -80,10 +80,22 @@ export async function geminiTranslate(text: string, target: string): Promise<str
   const key = process.env.GEMINI_API_KEY ?? "";
   const model = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
   if (!key || !text.trim()) return "";
+
+  // Protect all <tg-emoji> tags so Gemini doesn't alter emoji IDs, translate inner characters, or drop them
+  const emojiPlaceholders: string[] = [];
+  const maskedText = text.replace(
+    /<tg-emoji\s+(?:emoji-)?id=(?:\\*["']|&quot;)?(\d+)(?:\\*["']|&quot;)?\s*>([\s\S]*?)<\/tg-emoji>/gi,
+    (_m, id, inner) => {
+      const idx = emojiPlaceholders.length;
+      emojiPlaceholders.push(`<tg-emoji emoji-id="${id}">${inner}</tg-emoji>`);
+      return `___TG_EMOJI_${idx}___`;
+    },
+  );
+
   const prompt =
     `Переведи текст на ${LANG_NAME[target] ?? target} язык. ` +
     `Верни ТОЛЬКО перевод, без пояснений и без кавычек. ` +
-    `Сохрани HTML-теги (<b>, <i> и т.п.) и эмодзи как есть.\n\nТекст:\n${text}`;
+    `Сохрани HTML-теги (<b>, <i> и т.п.), заполнители плейсхолдеров вида ___TG_EMOJI_0___ и эмодзи строго как есть.\n\nТекст:\n${maskedText}`;
   try {
     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
       method: "POST",
@@ -93,7 +105,14 @@ export async function geminiTranslate(text: string, target: string): Promise<str
     });
     if (!res.ok) return "";
     const j = (await res.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
-    return (j?.candidates?.[0]?.content?.parts?.[0]?.text ?? "").trim();
+    let out = (j?.candidates?.[0]?.content?.parts?.[0]?.text ?? "").trim();
+    if (!out) return "";
+
+    // Restore protected emoji tags
+    for (let i = 0; i < emojiPlaceholders.length; i++) {
+      out = out.replace(new RegExp(`___TG_EMOJI_${i}___`, "g"), emojiPlaceholders[i]);
+    }
+    return sanitizeTextCustomEmojis(out);
   } catch {
     return "";
   }

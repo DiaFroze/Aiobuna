@@ -53,6 +53,8 @@ export default async function BotAdsPage() {
       <h2 className="font-semibold">Ссылки для объявлений</h2>
       <p>D1-A: <code>https://t.me/Aiobunabot?start=ad_meta_d1a</code></p>
       <p>D1-B: <code>https://t.me/Aiobunabot?start=ad_meta_d1b</code></p>
+      <p>D2-A: <code>https://t.me/Aiobunabot?start=ad_meta_d2a</code></p>
+      <p>D2-B: <code>https://t.me/Aiobunabot?start=ad_meta_d2b</code></p>
       <p className="text-sm text-muted">Статус подписки и принятия условий показан на текущий момент. «Новые» — те, кто впервые зарегистрировался в боте через этот источник.</p>
     </div>
   </div>;
