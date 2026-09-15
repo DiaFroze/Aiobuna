@@ -98,6 +98,57 @@ describe("sortSuppliersByStrategy", () => {
     expect(sorted[0].supplierKey).toBe("qamify");
     expect(sorted[1].supplierKey).toBe("vex");
   });
+
+  it("strategy 'cheapest': skips supplier with partial insufficient balance (e.g. $1.00 when item costs $4.50)", () => {
+    const balances = {
+      vex: 1.0, // $1.00 < $4.50 cost -> insufficient!
+      qamify: 20.0, // $20.00 >= $5.00 cost -> sufficient!
+    };
+    const sorted = sortSuppliersByStrategy(candidates, "cheapest", balances, 1);
+    expect(sorted[0].supplierKey).toBe("qamify");
+    expect(sorted[1].supplierKey).toBe("vex");
+  });
+
+  it("strategy 'priority': cascades to Level 2 if Level 1 has 0 balance", () => {
+    const balances = {
+      qamify: 0.0, // Level 1 (priority 1) has 0 balance!
+      vex: 50.0, // Level 2 (priority 2) has balance!
+    };
+    const sorted = sortSuppliersByStrategy(candidates, "priority", balances);
+    expect(sorted[0].supplierKey).toBe("vex"); // cascades to Level 2!
+    expect(sorted[1].supplierKey).toBe("qamify");
+  });
+
+  it("scales needed cost with quantity", () => {
+    const balances = {
+      vex: 10.0, // $10 balance: enough for 2 items ($9.0), but NOT enough for 3 items ($13.5)!
+      qamify: 20.0, // $20 balance: enough for 3 items ($15.0)!
+    };
+    // Qty = 1: vex is cheaper ($4.5 vs $5.0) and $10 >= $4.5
+    const sorted1 = sortSuppliersByStrategy(candidates, "cheapest", balances, 1);
+    expect(sorted1[0].supplierKey).toBe("vex");
+
+    // Qty = 3: vex needs $13.5 but has only $10. Qamify needs $15.0 and has $20!
+    const sorted3 = sortSuppliersByStrategy(candidates, "cheapest", balances, 3);
+    expect(sorted3[0].supplierKey).toBe("qamify");
+  });
+});
+
+import { simulateSupplierRouting } from "../src/lib/domain/supplier-routing";
+
+describe("simulateSupplierRouting", () => {
+  it("produces human-readable routing decision logs", () => {
+    const list: SupplierCandidate[] = [
+      { supplierKey: "vex", supplierExternalId: "vex_gemini", supplierPriceUsdt: 3.5, supplierStock: 10, priority: 1, isActive: true },
+      { supplierKey: "qamify", supplierExternalId: "qam_gemini", supplierPriceUsdt: 3.2, supplierStock: 5, priority: 2, isActive: true },
+    ];
+    const balances = { vex: 15.0, qamify: 0.0 };
+    const res = simulateSupplierRouting(list, "cheapest", balances, 1);
+
+    expect(res.selectedCandidate?.supplierKey).toBe("vex");
+    expect(res.logs.length).toBeGreaterThan(0);
+    expect(res.logs.some((l) => l.includes("Выбран поставщик [vex]"))).toBe(true);
+  });
 });
 
 describe("totalSupplierStock", () => {

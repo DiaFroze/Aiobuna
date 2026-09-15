@@ -20,6 +20,8 @@ import { parseBulkPrices, parseBulkBonus, bulkTotal, bonusQty, bulkSaving, descr
 import { checkUsername } from "../lib/domain/telegram-username";
 import { buildCheckoutUrl, sumToTiyin } from "../lib/domain/payme";
 import { buildClickUrl } from "../lib/domain/click";
+import { binancePayReady } from "../lib/services/binance-pay-client";
+import { createBinanceCheckout, reconcilePendingBinancePayments } from "../lib/services/binance-pay";
 // The auto-delivery decision logic (classifyGiftError / decideAfterReconcile)
 // lives in the same module and is unit-tested, but is intentionally NOT wired up
 // yet: PREMIUM_DELIVERY_MODE stays "manual" until the Star-balance experiment
@@ -275,6 +277,16 @@ const PAYME_ENABLED = process.env.PAYME_ENABLED === "1";
 const PAYME_MERCHANT_ID = process.env.PAYME_MERCHANT_ID ?? "";
 const PAYME_CHECKOUT_URL = (process.env.PAYME_CHECKOUT_URL ?? "https://checkout.paycom.uz").replace(/\/+$/, "");
 const paymeReady = (_ctx?: Context) => PAYME_ENABLED && PAYME_MERCHANT_ID !== "";
+
+async function appendBinanceButton(kb: InlineKeyboard, input: Parameters<typeof createBinanceCheckout>[0]) {
+  if (!binancePayReady()) return;
+  try {
+    const checkout = await createBinanceCheckout(input);
+    kb.url(`Binance Pay · ${checkout.amount} ${checkout.currency}`, checkout.url).row();
+  } catch {
+    console.error("[binance] could not create checkout; other payment methods remain available");
+  }
+}
 // Click SHOP-API (merchant.click.uz). The bot only builds the pay link; the
 // Prepare/Complete callbacks live in the Next.js app (/api/click).
 const CLICK_ENABLED = process.env.CLICK_ENABLED === "1";
@@ -1202,7 +1214,20 @@ async function deliverCourseBonus(courseOrderId: number): Promise<void> {
         },
       ];
     }
-    const sorted = sortSuppliersByStrategy(candidates, ((variant as any).routingStrategy as RoutingStrategy) || "priority");
+    let bonusBalances: Record<string, number> | undefined = undefined;
+    if (candidates.length > 1) {
+      bonusBalances = {};
+      const distinctKeys = Array.from(new Set(candidates.map((c) => c.supplierKey)));
+      await Promise.allSettled(
+        distinctKeys.map(async (key) => {
+          try {
+            const s = await resolveSource(key);
+            if (s) bonusBalances![key] = await sourceBalance(s);
+          } catch {}
+        }),
+      );
+    }
+    const sorted = sortSuppliersByStrategy(candidates, ((variant as any).routingStrategy as RoutingStrategy) || "priority", bonusBalances, 1);
     for (const cand of sorted) {
       try {
         const src = await resolveSource(cand.supplierKey);
@@ -1288,8 +1313,8 @@ async function executeCoursePurchase(
   paymentMethod?: string,
   paymentId?: string,
 ) {
-  if (!paymentMethod || !paymentId || !["payme", "click"].includes(paymentMethod)) {
-    await bot.api.sendMessage(user.tgId, "Этот курс оплачивается через Payme или Click.").catch(() => {});
+  if (!paymentMethod || !paymentId || !["payme", "click", "binance"].includes(paymentMethod)) {
+    await bot.api.sendMessage(user.tgId, t(user.lang, "course_payment_required")).catch(() => {});
     return;
   }
 
@@ -1741,6 +1766,7 @@ async function appendCardPayButtons(
 ) {
   const note = `buy:${variantId}:${qty}`;
   const amt = money(total, lang);
+  await appendBinanceButton(kb, { userId, amount: total, note: buildBuyNote(variantId, qty, null, null), refSpend, label });
   if (paymeReady()) {
     const topup = await db.topUp.create({ data: { userId, amount: total, method: "payme", status: "pending", note, refSpend, expiresAt: new Date(Date.now() + 30 * 60_000) } }).catch(() => null);
     if (topup) kb.url(`Payme · ${amt}`, buildCheckoutUrl({ checkoutBase: PAYME_CHECKOUT_URL, merchantId: PAYME_MERCHANT_ID, topUpId: topup.id, amountTiyin: sumToTiyin(total), lang })).icon(PAYME_BTN_EMOJI).row();
@@ -2420,10 +2446,10 @@ async function executePurchase(
 
       let balances: Record<string, number> | undefined = undefined;
       const strategy = ((v as any).routingStrategy as RoutingStrategy) || "priority";
-      if (strategy === "cheapest" || strategy === "balance") {
+      if (candidates.length > 1) {
         balances = {};
         const distinctKeys = Array.from(new Set(candidates.map((c) => c.supplierKey)));
-        await Promise.all(
+        await Promise.allSettled(
           distinctKeys.map(async (key) => {
             try {
               const s = await resolveSource(key);
@@ -2437,7 +2463,7 @@ async function executePurchase(
         );
       }
 
-      const sortedCandidates = sortSuppliersByStrategy(candidates, strategy, balances);
+      const sortedCandidates = sortSuppliersByStrategy(candidates, strategy, balances, supplierQty);
 
       for (const cand of sortedCandidates) {
         const src = await resolveSource(cand.supplierKey);
@@ -2781,6 +2807,7 @@ async function showBankPicker(
   const note = buildBuyNote(v.id, qty, targetUsername ?? null, recipientTgId ?? null);
   const refSpend = disc?.cost ?? 0;
   const kb = new InlineKeyboard();
+  await appendBinanceButton(kb, { userId: user.id, amount: total, note, refSpend, label });
 
   // Payme is a direct URL button: pre-create the pending top-up for the full
   // price, build its checkout link, and put it straight on the button — one tap
@@ -3697,7 +3724,7 @@ async function executeRejectTopup(
   reasonObj?: (typeof REJECT_REASONS)[number],
   customText?: string
 ) {
-  if (!topup) return;
+  if (!topup || topup.method === "binance") return;
   await db.topUp.update({ where: { id: topup.id }, data: { status: "rejected" } });
 
   if (ctx.callbackQuery) {
@@ -3740,7 +3767,7 @@ async function resolveTopUp(ctx: Context, id: number, approve: boolean) {
     claim: async (topUpId) =>
       db.$transaction(async (tx) => {
         const changed = await tx.topUp.updateMany({
-          where: { id: topUpId, status: { in: [...APPROVABLE_STATUSES] } },
+          where: { id: topUpId, method: { not: "binance" }, status: { in: [...APPROVABLE_STATUSES] } },
           data: { status: "approved" },
         });
         if (changed.count !== 1) return null; // lost the race, or not approvable
@@ -5985,6 +6012,7 @@ bot.command("health", async (ctx) => {
     `${dot(dbOk)} База данных\n` +
     `${dot(paymeReady())} Payme\n` +
     `${dot(clickReady())} Click\n` +
+    `${dot(binancePayReady())} Binance Pay\n` +
     `${dot(true)} Telegram Stars (оплата)\n` +
     `${PREMIUM_DELIVERY_MODE === "auto" ? "🟢" : "🟡"} Выдача Premium: <b>${PREMIUM_DELIVERY_MODE}</b>` +
     `${PREMIUM_DELIVERY_MODE === "manual" ? " (автовыдача выключена)" : ""}\n` +
@@ -8624,14 +8652,14 @@ async function maybeResetAdmins() {
 // restart mid-batch) never double-deliver. Money is never touched here.
 async function deliverPaidPaymeTopUps() {
   const pendingDelivery = await db.topUp.findMany({
-    where: { OR: [{ method: { in: ["payme", "click"] } }, { externalId: "admin-panel" }], status: "approved", deliveredAt: null },
+    where: { OR: [{ method: { in: ["payme", "click", "binance"] } }, { externalId: "admin-panel" }], status: "approved", deliveredAt: null },
     take: 20,
   }).catch(() => [] as Array<{ id: number; userId: number; amount: number; note: string | null; refSpend: number }>);
 
   for (const topup of pendingDelivery) {
     // Atomic claim — only the tick that flips deliveredAt proceeds.
     const claim = await db.topUp.updateMany({
-      where: { id: topup.id, OR: [{ method: { in: ["payme", "click"] } }, { externalId: "admin-panel" }], status: "approved", deliveredAt: null },
+      where: { id: topup.id, OR: [{ method: { in: ["payme", "click", "binance"] } }, { externalId: "admin-panel" }], status: "approved", deliveredAt: null },
       data: { deliveredAt: new Date() },
     }).catch(() => ({ count: 0 }));
     if (claim.count !== 1) continue;
@@ -8684,6 +8712,7 @@ async function bootstrap() {
   await maybeResetAdmins();         // one-time admin reset (guarded)
   // Poll for Payme top-ups the webhook credited, to notify + fulfil them.
   setInterval(() => {
+    reconcilePendingBinancePayments().catch(() => console.error("[binance] reconciliation unavailable"));
     deliverPaidPaymeTopUps().catch(() => {});
     retryPendingCourseOrders().catch(() => {});
     checkPromoExpiry().catch(() => {});

@@ -25,10 +25,10 @@ export async function approveTopUpAction(formData: FormData) {
   const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
   const id = Number(formData.get("id"));
   const topup = await botDb.topUp.findUnique({ where: { id }, include: { user: true } });
-  if (!topup || ["payme", "click", "stars"].includes(topup.method)) return;
+  if (!topup || ["payme", "click", "stars", "binance"].includes(topup.method)) return;
   const won = await botDb.$transaction(async (tx) => {
     const claimed = await tx.topUp.updateMany({
-      where: { id, status: { in: [...APPROVABLE_STATUSES] }, method: { notIn: ["payme", "click", "stars"] } },
+      where: { id, status: { in: [...APPROVABLE_STATUSES] }, method: { notIn: ["payme", "click", "stars", "binance"] } },
       data: { status: "approved", externalId: "admin-panel", deliveredAt: null },
     });
     if (claimed.count !== 1) return false;
@@ -51,9 +51,9 @@ export async function rejectTopUpAction(formData: FormData) {
   const admin = await requirePermission(PERMISSIONS.SETTINGS_WRITE);
   const id = Number(formData.get("id"));
   const topup = await botDb.topUp.findUnique({ where: { id }, include: { user: true } });
-  if (!topup || ["payme", "click", "stars"].includes(topup.method)) return;
+  if (!topup || ["payme", "click", "stars", "binance"].includes(topup.method)) return;
   const changed = await botDb.topUp.updateMany({
-    where: { id, status: { in: [...APPROVABLE_STATUSES] }, method: { notIn: ["payme", "click", "stars"] } },
+    where: { id, status: { in: [...APPROVABLE_STATUSES] }, method: { notIn: ["payme", "click", "stars", "binance"] } },
     data: { status: "rejected" },
   });
   if (changed.count !== 1) return;

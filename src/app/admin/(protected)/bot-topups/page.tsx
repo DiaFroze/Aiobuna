@@ -39,7 +39,7 @@ export default async function BotTopUpsPage() {
   });
   // Payme transaction state → human label.
   const PAYME_STATE: Record<number, string> = { 1: "создана", 2: "оплачена", "-1": "отменена", "-2": "возврат" };
-  const methodLabel = (m: string) => (m === "payme" ? "💳 Payme" : m === "stars" ? "⭐ Stars" : m === "receipt" ? "🧾 Чек" : m === "card" ? "💳 Карта" : m === "manual" ? "✍️ Вручную" : m);
+  const methodLabel = (m: string) => (m === "binance" ? "Binance Pay" : m === "payme" ? "💳 Payme" : m === "stars" ? "⭐ Stars" : m === "receipt" ? "🧾 Чек" : m === "card" ? "💳 Карта" : m === "manual" ? "✍️ Вручную" : m);
 
   return (
     <div className="space-y-6">
@@ -150,7 +150,7 @@ export default async function BotTopUpsPage() {
               </td>
               <td className="px-4 py-3 text-xs text-muted">{t.createdAt.toLocaleString("ru-RU")}</td>
               <td className="px-4 py-3">
-                {APPROVABLE_STATUSES.some((status) => status === t.status) && !["payme", "click", "stars"].includes(t.method) && (
+                {APPROVABLE_STATUSES.some((status) => status === t.status) && !["payme", "click", "stars", "binance"].includes(t.method) && (
                   <div className="flex items-center gap-1">
                     <form action={approveTopUpAction}>
                       <input type="hidden" name="id" value={t.id} />
