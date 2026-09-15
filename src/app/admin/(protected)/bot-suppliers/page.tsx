@@ -393,112 +393,126 @@ export default async function BotSuppliersPage() {
                         {/* List of Connected API Suppliers */}
                         {v.suppliers.length > 0 ? (
                           <div className="space-y-2">
-                            <div className="text-[11px] font-semibold text-muted uppercase tracking-wider">
-                              Подключенные поставщики (в порядке каскада):
+                            <div className="flex items-center justify-between">
+                              <span className="text-[11px] font-semibold text-muted uppercase tracking-wider">
+                                Подключенные поставщики (в порядке каскада):
+                              </span>
+                              {!v.suppliers.some((s) => s.priority === 1) && (
+                                <span className="text-[11px] text-warning bg-warning/10 px-2 py-0.5 rounded border border-warning/20">
+                                  ⚠️ Нет поставщика с Уровнем 1 (Основной)
+                                </span>
+                              )}
                             </div>
                             {v.suppliers.map((s) => {
                               const srcBal = balances[s.supplierKey];
-                              const isEnough = srcBal !== undefined && srcBal >= s.supplierPriceUsdt && srcBal > 0;
+                              const hasPrice = s.supplierPriceUsdt > 0;
+                              const isEnough = hasPrice && srcBal !== undefined && srcBal >= s.supplierPriceUsdt;
 
                               return (
                                 <form
                                   key={s.id}
                                   action={updateVariantSupplierAction}
-                                  className="flex flex-wrap items-center gap-2 p-2.5 rounded-lg bg-surface border text-xs"
+                                  className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-lg bg-surface border text-xs"
                                 >
-                                  <input type="hidden" name="id" value={s.id} />
-                                  <input
-                                    type="hidden"
-                                    name="supplierExternalId"
-                                    value={s.supplierExternalId}
-                                  />
-
-                                  {/* Priority level badge */}
-                                  <span
-                                    className={`badge font-bold px-2 py-0.5 ${
-                                      s.priority === 1
-                                        ? "bg-brand/20 text-brand border border-brand/30"
-                                        : "bg-surface-3 text-muted"
-                                    }`}
-                                  >
-                                    {s.priority === 1 ? "👑 Уровень 1 (Основной)" : `🛡 Уровень ${s.priority} (Резерв)`}
-                                  </span>
-
-                                  {/* Supplier Key */}
-                                  <span className="font-mono font-bold text-foreground">
-                                    {s.supplierKey.toUpperCase()}
-                                  </span>
-
-                                  {/* External Product ID */}
-                                  <span className="text-muted font-mono text-[11px]">
-                                    ID: <code className="bg-surface-2 px-1 py-0.5 rounded">{s.supplierExternalId}</code>
-                                  </span>
-
-                                  {/* Live API Balance badge */}
-                                  <span
-                                    className={`badge font-mono text-[11px] ${
-                                      isEnough
-                                        ? "bg-success/10 text-success border border-success/30"
-                                        : srcBal === 0
-                                        ? "bg-danger/10 text-danger border border-danger/30"
-                                        : "bg-warning/10 text-warning border border-warning/30"
-                                    }`}
-                                  >
-                                    Баланс API: ${(srcBal ?? 0).toFixed(2)}{" "}
-                                    {isEnough ? "✅" : "⚠️"}
-                                  </span>
-
-                                  {/* Price USDT */}
-                                  <div className="flex items-center gap-1">
-                                    <span className="text-muted text-[11px]">Закупка:</span>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <input type="hidden" name="id" value={s.id} />
                                     <input
-                                      name="supplierPriceUsdt"
-                                      type="number"
-                                      step="0.01"
-                                      defaultValue={s.supplierPriceUsdt}
-                                      className="input text-xs w-20 py-0.5 px-1.5 font-mono"
-                                      title="Цена закупки в USDT"
+                                      type="hidden"
+                                      name="supplierExternalId"
+                                      value={s.supplierExternalId}
                                     />
-                                    <span className="text-muted font-mono">$</span>
+
+                                    {/* Priority level badge */}
+                                    <span
+                                      className={`badge font-bold px-2 py-0.5 ${
+                                        s.priority === 1
+                                          ? "bg-brand/20 text-brand border border-brand/30"
+                                          : "bg-surface-3 text-muted"
+                                      }`}
+                                    >
+                                      {s.priority === 1 ? "👑 Уровень 1 (Основной)" : `🛡 Уровень ${s.priority} (Резерв)`}
+                                    </span>
+
+                                    {/* Supplier Key */}
+                                    <span className="font-mono font-bold text-foreground">
+                                      {s.supplierKey.toUpperCase()}
+                                    </span>
+
+                                    {/* External Product ID */}
+                                    <span className="text-muted font-mono text-[11px]">
+                                      ID: <code className="bg-surface-2 px-1 py-0.5 rounded">{s.supplierExternalId}</code>
+                                    </span>
+
+                                    {/* Live API Balance badge */}
+                                    {!hasPrice ? (
+                                      <span className="badge font-mono text-[11px] bg-warning/10 text-warning border border-warning/30">
+                                        Баланс: ${(srcBal ?? 0).toFixed(2)} ⚠️ Укажите цену закупки
+                                      </span>
+                                    ) : (
+                                      <span
+                                        className={`badge font-mono text-[11px] ${
+                                          isEnough
+                                            ? "bg-success/10 text-success border border-success/30"
+                                            : "bg-danger/10 text-danger border border-danger/30"
+                                        }`}
+                                      >
+                                        Баланс API: ${(srcBal ?? 0).toFixed(2)}{" "}
+                                        {isEnough ? "✅ Хватает" : "⚠️ Не хватает"}
+                                      </span>
+                                    )}
+
+                                    {/* Price USDT */}
+                                    <div className="flex items-center gap-1">
+                                      <span className="text-muted text-[11px]">Закупка:</span>
+                                      <input
+                                        name="supplierPriceUsdt"
+                                        type="number"
+                                        step="0.01"
+                                        defaultValue={s.supplierPriceUsdt}
+                                        className="input text-xs w-20 py-0.5 px-1.5 font-mono"
+                                        title="Цена закупки в USDT"
+                                      />
+                                      <span className="text-muted font-mono">$</span>
+                                    </div>
+
+                                    {/* Priority input */}
+                                    <div className="flex items-center gap-1">
+                                      <span className="text-muted text-[11px]">Уровень:</span>
+                                      <input
+                                        name="priority"
+                                        type="number"
+                                        min="1"
+                                        max="99"
+                                        defaultValue={s.priority}
+                                        className="input text-xs w-14 py-0.5 px-1.5 font-mono"
+                                        title="1 = основной, 2 = резерв"
+                                      />
+                                    </div>
+
+                                    {/* Stock input */}
+                                    <div className="flex items-center gap-1">
+                                      <span className="text-muted text-[11px]">Сток:</span>
+                                      <input
+                                        name="supplierStock"
+                                        type="number"
+                                        defaultValue={s.supplierStock}
+                                        className="input text-xs w-16 py-0.5 px-1.5 font-mono"
+                                        title="Остаток у поставщика"
+                                      />
+                                    </div>
+
+                                    {/* Active checkbox */}
+                                    <label className="flex items-center gap-1 text-muted text-[11px] cursor-pointer">
+                                      <input
+                                        type="checkbox"
+                                        name="isActive"
+                                        defaultChecked={s.isActive}
+                                      />
+                                      вкл
+                                    </label>
                                   </div>
 
-                                  {/* Priority input */}
-                                  <div className="flex items-center gap-1">
-                                    <span className="text-muted text-[11px]">Уровень:</span>
-                                    <input
-                                      name="priority"
-                                      type="number"
-                                      min="1"
-                                      max="99"
-                                      defaultValue={s.priority}
-                                      className="input text-xs w-14 py-0.5 px-1.5 font-mono"
-                                      title="1 = основной, 2 = резерв"
-                                    />
-                                  </div>
-
-                                  {/* Stock input */}
-                                  <div className="flex items-center gap-1">
-                                    <span className="text-muted text-[11px]">Сток:</span>
-                                    <input
-                                      name="supplierStock"
-                                      type="number"
-                                      defaultValue={s.supplierStock}
-                                      className="input text-xs w-16 py-0.5 px-1.5 font-mono"
-                                      title="Остаток у поставщика"
-                                    />
-                                  </div>
-
-                                  {/* Active checkbox */}
-                                  <label className="flex items-center gap-1 text-muted text-[11px] cursor-pointer">
-                                    <input
-                                      type="checkbox"
-                                      name="isActive"
-                                      defaultChecked={s.isActive}
-                                    />
-                                    вкл
-                                  </label>
-
-                                  <div className="flex items-center gap-1 ml-auto">
+                                  <div className="flex items-center gap-1 shrink-0 ml-auto sm:ml-0">
                                     <button
                                       type="submit"
                                       className="btn-primary text-xs px-2.5 py-1"
@@ -570,7 +584,7 @@ export default async function BotSuppliersPage() {
                                 type="number"
                                 step="0.01"
                                 min="0"
-                                placeholder="3.50"
+                                placeholder="0.40"
                                 className="input text-xs font-mono mt-1 w-full bg-surface"
                               />
                             </div>
@@ -582,7 +596,7 @@ export default async function BotSuppliersPage() {
                                 type="number"
                                 min="1"
                                 max="99"
-                                defaultValue={v.suppliers.length + 1}
+                                defaultValue={!v.suppliers.some((s) => s.priority === 1) ? 1 : v.suppliers.length + 1}
                                 className="input text-xs font-mono mt-1 w-full bg-surface"
                                 title="1 = Основной, 2 = Резервный"
                               />
