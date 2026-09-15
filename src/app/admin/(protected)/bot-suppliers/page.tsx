@@ -20,6 +20,28 @@ import { RoutingSimulator, type SimulatorVariant } from "./RoutingSimulator";
 
 export const dynamic = "force-dynamic";
 
+async function getProductsWithSuppliers() {
+  return botDb.product.findMany({
+    orderBy: { sortOrder: "asc" },
+    include: {
+      plans: {
+        orderBy: { sortOrder: "asc" },
+        include: {
+          variants: {
+            orderBy: { sortOrder: "asc" },
+            include: {
+              suppliers: {
+                orderBy: { priority: "asc" },
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+}
+type ProductsWithSuppliers = Awaited<ReturnType<typeof getProductsWithSuppliers>>;
+
 export default async function BotSuppliersPage() {
   if (!botConfigured()) {
     return (
@@ -31,7 +53,12 @@ export default async function BotSuppliersPage() {
   }
 
   // 1. Fetch API sources from DB and fallback envs
-  const dbSources = await botDb.apiSource.findMany({ orderBy: { id: "asc" } });
+  let dbSources: Awaited<ReturnType<typeof botDb.apiSource.findMany>> = [];
+  try {
+    dbSources = await botDb.apiSource.findMany({ orderBy: { id: "asc" } });
+  } catch (err) {
+    console.error("Failed to fetch apiSources:", err);
+  }
   const envSources = [envBuyerSource(), envVexSource(), envQamifySource()]
     .filter((s): s is Source => Boolean(s))
     .filter((es) => !dbSources.some((d) => d.slug === es.slug));
@@ -63,24 +90,12 @@ export default async function BotSuppliersPage() {
   );
 
   // 3. Fetch all products, plans, variants, and their linked multi-suppliers
-  const products = await botDb.product.findMany({
-    orderBy: { sortOrder: "asc" },
-    include: {
-      plans: {
-        orderBy: { sortOrder: "asc" },
-        include: {
-          variants: {
-            orderBy: { sortOrder: "asc" },
-            include: {
-              suppliers: {
-                orderBy: { priority: "asc" },
-              },
-            },
-          },
-        },
-      },
-    },
-  });
+  let products: ProductsWithSuppliers = [];
+  try {
+    products = await getProductsWithSuppliers();
+  } catch (err) {
+    console.error("Failed to fetch products for supplier routing:", err);
+  }
 
   // Prepare data for the interactive simulator
   const simulatorVariants: SimulatorVariant[] = [];
@@ -321,13 +336,19 @@ export default async function BotSuppliersPage() {
                               <select
                                 name="routingStrategy"
                                 defaultValue={v.routingStrategy || "priority"}
-                                onChange={(e) => e.target.form?.requestSubmit()}
                                 className="input text-xs py-1 px-2 font-medium bg-surface-2 border"
                               >
                                 <option value="cheapest">💸 Самый дешевый (с балансом)</option>
                                 <option value="priority">🎯 Каскад по приоритету (Ур.1 → Ур.2)</option>
                                 <option value="balance">💳 По наличию баланса</option>
                               </select>
+                              <button
+                                type="submit"
+                                className="btn-primary text-xs px-2 py-1"
+                                title="Сохранить стратегию"
+                              >
+                                ✓
+                              </button>
                             </form>
 
                             {/* Toggle auto-supplier */}
