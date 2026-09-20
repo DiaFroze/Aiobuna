@@ -788,7 +788,13 @@ async function getUser(ctx: Context, refParam?: string) {
     }
   }
   const created = await db.botUser.create({
-    data: { tgId, username: from.username ?? null, firstName: from.first_name ?? null, referredBy },
+    data: {
+      tgId,
+      username: from.username ?? null,
+      firstName: from.first_name ?? null,
+      referredBy,
+      termsAcceptedAt: new Date(),
+    },
   });
   db.channelBoost.updateMany({ where: { tgId, userId: null }, data: { userId: created.id } }).catch(() => {});
   // No automatic gift here any more — the referrer earns 1 point per invite
@@ -3832,11 +3838,8 @@ async function sendHome(ctx: Context, user: Awaited<ReturnType<typeof getUser>>)
   }
 }
 
-// Gate every entry into the shop behind a one-time terms acceptance: users who
-// haven't tapped "Accept" yet (brand-new, or existing accounts predating this
-// feature) see the terms instead of the home screen.
+// Entry into the shop: terms gate removed, users proceed directly to catalog.
 async function enterShop(ctx: Context, user: Awaited<ReturnType<typeof getUser>>) {
-  if (!user.termsAcceptedAt) return sendTermsGate(ctx, user.lang);
   return sendHome(ctx, user);
 }
 
@@ -4006,35 +4009,7 @@ bot.use(async (ctx, next) => {
   ).catch(() => {});
 });
 
-// ---------- mandatory terms-acceptance gate ----------
-// Nothing works until the user taps "Принимаю условия" — not the reply
-// keyboard (sendTermsGate removes it), and not old inline buttons still
-// sitting in the chat history either: any action from a user who hasn't
-// accepted bounces back to the terms message instead of running.
-bot.use(async (ctx, next) => {
-  if (!isUserAction(ctx)) return next();
-  if (String(ctx.from?.id) === ADMIN_ID) return next();
-
-  const data = ctx.callbackQuery?.data;
-  // check_subs MUST pass through: a brand-new user has termsAcceptedAt = null,
-  // so without this the terms screen swallowed their "Проверить подписку" tap.
-  // channelVerifiedAt then never got stamped and their referrer never earned
-  // the point, even though the person really had subscribed.
-  if (data === "terms_accept" || data === "check_subs" || data?.startsWith("lang:") || data?.startsWith("vote:")) return next();
-
-  const text = ctx.message?.text;
-  if (text?.startsWith("/start")) return next();
-
-  const tgId = String(ctx.from?.id ?? "");
-  if (!tgId) return next();
-  const existingUser = await db.botUser.findUnique({ where: { tgId } });
-  if (!existingUser || existingUser.termsAcceptedAt) return next();
-
-  if (ctx.callbackQuery) {
-    await ctx.answerCallbackQuery({ text: t(existingUser.lang, "terms_required_toast"), show_alert: true }).catch(() => {});
-  }
-  return sendTermsGate(ctx, existingUser.lang);
-});
+// Mandatory terms-acceptance gate removed per user request.
 
 // ---------- mandatory subscription check middleware ----------
 bot.use(async (ctx, next) => {
@@ -4044,7 +4019,7 @@ bot.use(async (ctx, next) => {
   }
 
   const data = ctx.callbackQuery?.data;
-  if (data === "check_subs" || data === "terms_accept" || data?.startsWith("lang:") || data?.startsWith("vote:")) {
+  if (data === "check_subs" || data?.startsWith("lang:") || data?.startsWith("vote:")) {
     return next();
   }
 
@@ -6460,8 +6435,7 @@ bot.command("banner_reset", async (ctx) => {
 // the gate no longer shows on its own).
 bot.command("terms", async (ctx) => {
   if (!isAdmin(ctx)) return;
-  const u = await getUser(ctx);
-  await sendTermsGate(ctx, u.lang);
+  await ctx.reply("ℹ️ Обязательные условия и экран принятия условий полностью отключены в боте. Пользователи сразу попадают в каталог товаров.");
 });
 // Keyboard builder for catalog product ordering
 async function buildOrderKeyboard(): Promise<InlineKeyboard> {
@@ -7005,26 +6979,12 @@ bot.on("callback_query:data", async (ctx) => {
     }
     if (data.startsWith("lang:")) {
       const lang = normalizeLang(data.split(":")[1]);
-      await db.botUser.update({ where: { tgId: String(ctx.from?.id) }, data: { lang } }).catch(() => {});
+      await db.botUser.update({ where: { tgId: String(ctx.from?.id) }, data: { lang, termsAcceptedAt: new Date() } }).catch(() => {});
       await ctx.answerCallbackQuery({ text: t(lang, "lang_set") }).catch(() => {});
       await ctx.editMessageText(t(lang, "lang_set")).catch(() => {});
       const user = await getUser(ctx);
-      return enterShop(ctx, user);
-    }
-    if (data === "terms_accept") {
-      const user = await getUser(ctx);
-      // Only termsAcceptedAt here. channelVerifiedAt is deliberately NOT set:
-      // this middleware runs before the subscription gate, so an unsubscribed
-      // user can reach the terms screen. Stamping verification here would
-      // credit their referrer without them ever joining the channel.
-      await db.botUser.update({
-        where: { id: user.id },
-        data: { termsAcceptedAt: new Date() },
-      }).catch(() => {});
-      await ctx.answerCallbackQuery({ text: t(user.lang, "terms_accepted_toast") }).catch(() => {});
-      await ctx.editMessageReplyMarkup().catch(() => {});
       await sendHome(ctx, user);
-      // Onboarding is done — deliver what the deep link promised.
+      // Onboarding complete — deliver what the deep link promised immediately!
       const intent = pendingIntent.get(user.tgId);
       if (intent) {
         pendingIntent.delete(user.tgId);
@@ -7045,6 +7005,13 @@ bot.on("callback_query:data", async (ctx) => {
         }
       }
       return;
+    }
+    if (data === "terms_accept") {
+      // Legacy fallback if an old button is tapped in history
+      const user = await getUser(ctx);
+      await ctx.answerCallbackQuery().catch(() => {});
+      await ctx.editMessageReplyMarkup().catch(() => {});
+      return sendHome(ctx, user);
     }
     const user = await getUser(ctx);
     const lang = user.lang;
@@ -7957,19 +7924,7 @@ bot.on("chat_member", async (ctx) => {
 
   const lang = user.lang ?? "ru";
 
-  if (!user.termsAcceptedAt) {
-    // New user: show terms gate next (they'll see the shop after accepting).
-    const termsCustom = await db.setting.findUnique({ where: { key: "terms" } }).then((r) => r?.valueRu?.trim() ?? "").catch(() => "");
-    const body = termsCustom || t(lang, "terms_body");
-    const termsText = `${t(lang, "terms_title")}\n\n<blockquote>${esc(t(lang, "terms_intro"))}\n\n${body}</blockquote>`;
-    const termsKb = new InlineKeyboard().text(t(lang, "terms_accept_btn"), "terms_accept");
-    await bot.api.sendMessage(tgId, termsText, { parse_mode: "HTML", reply_markup: termsKb, link_preview_options: { is_disabled: true } }).catch(async () => {
-      await bot.api.sendMessage(tgId, stripTags(termsText), { reply_markup: termsKb }).catch(() => {});
-    });
-    return;
-  }
-
-  // Returning user: open shop directly.
+  // Open shop directly: terms gate removed.
   const menu = await buildMenu(lang, 0, "all", user.id, false);
   const banner = await shopBanner();
   if (banner) {
@@ -8570,6 +8525,9 @@ async function backfillChannelVerified() {
       create: { key: REF_BACKFILL_KEY, valueRu: new Date().toISOString() },
       update: {},
     });
+    await db.$executeRawUnsafe(
+      `UPDATE "BotUser" SET "termsAcceptedAt" = NOW() WHERE "termsAcceptedAt" IS NULL`
+    ).catch(() => {});
     console.info(`[bot] channelVerifiedAt backfill: ${n} row(s) updated (one-time)`);
   } catch (e) {
     console.error("[bot] backfillChannelVerified failed:", (e as Error).message);
