@@ -37,6 +37,7 @@ import {
   tgHtml,
   escHtml,
   stripRichText,
+  safeTruncateHtml,
   stripHtml,
   resolveProductPremiumEmoji,
   sanitizeTextCustomEmojis,
@@ -189,8 +190,11 @@ async function sendOrEdit(ctx: Context, text: string, opts: SendOrEditOpts = {})
       }
     }
     await ctx.replyWithVideo(video).catch(() => null);
-    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: opts.link_preview_options }).catch((err) => {
-      console.error("[bot] reply text failed after video:", (err as Error)?.message || err);
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: opts.link_preview_options }).catch(async (err) => {
+      console.error("[bot] reply text failed after video, retrying plain:", (err as Error)?.message || err);
+      await ctx.reply(stripHtml(text), { reply_markup: kb, link_preview_options: opts.link_preview_options }).catch((plainErr) => {
+        console.error("[bot] plain text reply also failed after video:", (plainErr as Error)?.message || plainErr);
+      });
     });
     return;
   }
@@ -213,8 +217,11 @@ async function sendOrEdit(ctx: Context, text: string, opts: SendOrEditOpts = {})
       return null;
     });
     if (photoMsg) opts.onPhotoSent?.(photoMsg);
-    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: opts.link_preview_options }).catch((err) => {
-      console.error("[bot] reply text failed:", (err as Error)?.message || err);
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: opts.link_preview_options }).catch(async (err) => {
+      console.error("[bot] reply text failed after photo, retrying plain:", (err as Error)?.message || err);
+      await ctx.reply(stripHtml(text), { reply_markup: kb, link_preview_options: opts.link_preview_options }).catch((plainErr) => {
+        console.error("[bot] plain text reply also failed after photo:", (plainErr as Error)?.message || plainErr);
+      });
     });
     return;
   }
@@ -1673,9 +1680,17 @@ async function showProduct(ctx: Context, id: number, back: string) {
   }
   kb.text(t(lang, "back_to_list"), `m:${back}`).row();
 
+  const photo = resolveProductBanner(p.bannerFileId);
+  const video = p.videoFileId ?? null;
   const pd = await pick3(p.descRu ?? "", p.descEn, p.descUz, lang);
   const rawFormatted = pd?.trim() ? tgHtml(formatRichText(pd.trim())) : "";
-  const formattedDesc = rawFormatted ? sanitizeTextCustomEmojis(rawFormatted) : "";
+  const fullFormattedDesc = rawFormatted ? sanitizeTextCustomEmojis(rawFormatted) : "";
+  // Telegram captions are limited to 1024 characters. Keep enough room for
+  // the title, stock rows and plan prompt so media product cards remain one
+  // valid message instead of degrading to a standalone video/photo.
+  const formattedDesc = (photo || video)
+    ? safeTruncateHtml(fullFormattedDesc, 600)
+    : safeTruncateHtml(fullFormattedDesc, 3000);
 
   let text = `${pe.textTag} <b>${esc(cleanPt)}</b>`;
   if (formattedDesc) {
@@ -1699,8 +1714,6 @@ async function showProduct(ctx: Context, id: number, back: string) {
   const suffix = `\n\n${t(lang, "choose_plan")}`;
   text += suffix;
 
-  const photo = resolveProductBanner(p.bannerFileId);
-  const video = p.videoFileId ?? null;
   await sendOrEdit(ctx, text, {
     photo,
     video,
@@ -1903,8 +1916,13 @@ async function buildQtyChooser(
   let desc = "";
   if (course) {
     desc = formattedDesc || (lang === "uz" ? COURSE_DESC_UZ : lang === "ru" ? COURSE_DESC_RU : COURSE_DESC_EN);
+  } else if (hasMedia) {
+    // Product media captions can contain at most 1024 characters. Reserving
+    // the rest for title, price, quantity and total guarantees that customers
+    // receive the buy buttons together with the video/photo.
+    desc = safeTruncateHtml(formattedDesc, 650);
   } else {
-    desc = formattedDesc;
+    desc = safeTruncateHtml(formattedDesc, 3000);
   }
   const offers = describeBulk(unitPrice, deal.tiers, deal.bonuses, (n) => money(n, lang));
 
