@@ -743,6 +743,7 @@ model BotUser {
   giveawayEntries  GiveawayParticipant[]
   giveawayWins     GiveawayWinner[]
   channelBoosts    ChannelBoost[]
+  cardPaymentRequests CardPaymentRequest[]
 }
 
 model BotAdStart {
@@ -1307,5 +1308,61 @@ model ChannelBoost {
   @@index([tgId])
   @@index([expiresAt])
 }
+
+// ---------------------------------------------------------------------------
+// Card Payments (HUMO MTProto Monitor)
+// ---------------------------------------------------------------------------
+
+model CardPaymentRequest {
+  id                    Int               @id @default(autoincrement())
+  userId                Int
+  user                  BotUser           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  variantId             Int
+  qty                   Int               @default(1)
+  baseAmount            Int               // Original product price in UZS
+  extraAmount           Int               // Unique offset in UZS (e.g. 1..99)
+  totalAmount           Int               // Exact expected deposit in UZS (baseAmount + extraAmount)
+  cardLast4             String            // Last 4 digits of destination card
+  cardNumber            String            // Display card number (digits or formatted)
+  status                String            @default("pending") // pending | confirmed | expired | cancelled | manual_confirmed | manual_rejected
+  expiresAt             DateTime          // 5 minutes from creation
+  chatId                String?           // Telegram chat/user ID
+  messageId             Int?              // Message ID with requisites in Telegram bot
+  orderId               Int?              // Linked BotOrder id once fulfilled
+  matchedNotificationId Int?              @unique
+  notification          BankNotification? @relation("MatchedCardPayment", fields: [matchedNotificationId], references: [id], onDelete: SetNull)
+  refSpend              Int               @default(0)
+  targetUsername        String?
+  recipientTgId         String?
+  adminNote             String?
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  @@index([status, expiresAt])
+  @@index([totalAmount, cardLast4, status])
+  @@index([userId])
+}
+
+model BankNotification {
+  id               Int                 @id @default(autoincrement())
+  chatId           String              // Numeric chat ID of the bank notification channel
+  messageId        Int                 // Telegram message ID
+  operationType    String              // deposit | debit | unknown
+  amount           Int                 // Parsed amount in UZS
+  cardLast4        String              // Last 4 digits of card
+  operationTime    DateTime            // Parsed or message timestamp (Asia/Tashkent)
+  rawSummary       String              // Sanitized snippet (no secrets, max 250 chars)
+  status           String              @default("unmatched") // matched | unmatched | late | ignored | manual_reviewed
+  matchedRequestId Int?                @unique
+  cardPayment      CardPaymentRequest? @relation("MatchedCardPayment")
+  adminReviewNote  String?
+  createdAt        DateTime            @default(now())
+
+  @@unique([chatId, messageId])
+  @@index([status])
+  @@index([amount, cardLast4])
+  @@index([operationTime])
+}
+
 
 

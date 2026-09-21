@@ -63,6 +63,8 @@ import {
   calculateVariantBoosterPrice,
   buildTelegramBoostUrl,
 } from "../lib/domain/channel-boosts";
+import { canAccessCardPayment, getCardPaymentConfig, generateUniqueAmount, claimPaymentCancellation, claimPaymentExpiration } from "../lib/domain/card-payment";
+import { startHumoMonitor, registerPaymentConfirmedHandler, triggerImmediateCheck, getHumoMonitorStatus } from "../lib/services/humo-monitor";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -1845,6 +1847,10 @@ async function appendCardPayButtons(
   }
   if (!bankOnly) {
     kb.text(stripLeadEmoji(t(lang, "pay_stars", { n: soumToStars(total) })), `tstar_buy:${total}:${variantId}:${qty}`).icon(STARS_BTN_EMOJI).row();
+    // Card payment button (HUMO) — gated by PAYMENT_MONITOR_MODE
+    if (canAccessCardPayment(userTgId)) {
+      kb.text(stripLeadEmoji(t(lang, "btn_pay_card")), `pay_card:${variantId}:${qty}`).row();
+    }
     const adminUser = (await setting("support_username", "Aiobuna_support")).replace(/^@/, "");
     kb.url(stripLeadEmoji(t(lang, "admin_topup")), `https://t.me/${adminUser}?text=${encodeURIComponent(`${label} — ${money(total, lang)}`)}`).icon(ADMIN_BTN_EMOJI).row();
   }
@@ -7264,6 +7270,103 @@ bot.on("callback_query:data", async (ctx) => {
     // rest[3] = username (may be empty), rest[4] = numeric recipient id. Built
     if (tag === "tstar_buy") return starsInvoice(ctx, lang, Number(rest[0]), buildBuyNote(Number(rest[1]), Number(rest[2]) || 1, rest[3] || null, rest[4] || null));
     if (tag === "tman_buy") { await ctx.answerCallbackQuery().catch(() => {}); return requestTopUp(ctx, lang, Number(rest[0]), "manual", `buy:${rest[1]}:${rest[2]}${rest[3] ? `:${rest[3]}` : ""}`); }
+    // ---- Card payment (HUMO) handlers ----
+    if (tag === "pay_card") {
+      await ctx.answerCallbackQuery().catch(() => {});
+      const variantId = Number(rest[0]);
+      const qty = Number(rest[1]) || 1;
+      if (!canAccessCardPayment(user.tgId)) {
+        return ctx.reply(t(lang, "card_pay_unavailable"), { parse_mode: "HTML" }).catch(() => {});
+      }
+      const config = getCardPaymentConfig();
+      if (config.mode === "disabled" || !config.cardNumber || !config.cardLast4) {
+        return ctx.reply(t(lang, "card_pay_unavailable"), { parse_mode: "HTML" }).catch(() => {});
+      }
+      const monitorStatus = getHumoMonitorStatus();
+      if (!monitorStatus.isRunning && !monitorStatus.isConfigured) {
+        return ctx.reply(t(lang, "card_pay_unavailable"), { parse_mode: "HTML" }).catch(() => {});
+      }
+      const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
+      if (!v) return;
+      const pt = await pick3(v.plan.product.titleRu, v.plan.product.titleEn, v.plan.product.titleUz, lang);
+      const vt = await locName(v.titleRu, v.titleUz, lang);
+      const itemTitle = `${pt} — ${vt}`;
+      const eff = await effPriceFor(user.id, variantId, v.priceUzs);
+      const baseAmount = bulkTotal(eff.price, qty, parseBulkPrices(v.bulkPrices || ""));
+      try {
+        const { extraAmount, totalAmount } = await generateUniqueAmount(baseAmount, config.cardLast4, db);
+        const expiresAt = new Date(Date.now() + config.ttlSeconds * 1000);
+        const request = await db.cardPaymentRequest.create({
+          data: {
+            userId: user.id,
+            variantId,
+            qty,
+            baseAmount,
+            extraAmount,
+            totalAmount,
+            cardLast4: config.cardLast4,
+            cardNumber: config.cardNumber,
+            status: "pending",
+            expiresAt,
+            chatId: user.tgId,
+          },
+        });
+        const cardDigitsOnly = config.cardNumber.replace(/\s+/g, "");
+        const kb = new InlineKeyboard();
+        kb.add({ text: t(lang, "btn_copy_card"), copy_text: { text: cardDigitsOnly } }).row();
+        kb.add({ text: t(lang, "btn_copy_amount"), copy_text: { text: String(totalAmount) } }).row();
+        kb.text(t(lang, "btn_check_payment"), `card_chk:${request.id}`).row();
+        const adminUser = config.adminUsername || (await setting("support_username", "Aiobuna_support")).replace(/^@/, "");
+        kb.url(t(lang, "btn_contact_admin"), `https://t.me/${adminUser}`).row();
+        kb.text(t(lang, "btn_cancel_payment"), `card_cancel:${request.id}`).row();
+        const msg = await ctx.reply(
+          t(lang, "card_pay_instructions", {
+            item: itemTitle,
+            qty: String(qty),
+            cardNumber: config.cardNumber,
+            totalAmount: String(totalAmount),
+            baseAmount: String(baseAmount),
+            extraAmount: String(extraAmount),
+          }),
+          { parse_mode: "HTML", reply_markup: kb }
+        );
+        // Save messageId for later deletion
+        await db.cardPaymentRequest.update({ where: { id: request.id }, data: { messageId: msg.message_id } }).catch(() => {});
+      } catch (err: any) {
+        console.error("[bot] card payment create error:", err.message);
+        return ctx.reply(t(lang, "card_pay_unavailable"), { parse_mode: "HTML" }).catch(() => {});
+      }
+      return;
+    }
+    if (tag === "card_chk") {
+      const requestId = Number(rest[0]);
+      if (!requestId) return ctx.answerCallbackQuery().catch(() => {});
+      const result = await triggerImmediateCheck(requestId, db);
+      if (result.isConfirmed) {
+        await ctx.answerCallbackQuery({ text: "✅ Оплата подтверждена!", show_alert: true }).catch(() => {});
+      } else {
+        await ctx.answerCallbackQuery({ text: result.message, show_alert: true }).catch(() => {});
+      }
+      return;
+    }
+    if (tag === "card_cancel") {
+      const requestId = Number(rest[0]);
+      if (!requestId) return ctx.answerCallbackQuery().catch(() => {});
+      const cancelled = await claimPaymentCancellation(db, requestId);
+      if (cancelled) {
+        // Try to delete the requisites message
+        const req = await db.cardPaymentRequest.findUnique({ where: { id: requestId } });
+        if (req?.chatId && req?.messageId) {
+          await ctx.api.deleteMessage(req.chatId, req.messageId).catch(() => {});
+        }
+        await ctx.answerCallbackQuery({ text: t(lang, "card_pay_cancelled"), show_alert: false }).catch(() => {});
+        await ctx.reply(t(lang, "card_pay_cancelled"), { parse_mode: "HTML" }).catch(() => {});
+      } else {
+        await ctx.answerCallbackQuery({ text: "Заявка уже обработана или отменена.", show_alert: true }).catch(() => {});
+      }
+      return;
+    }
+    // ---- End of card payment handlers ----
     if (tag === "gw_check") {
       const giveawayId = Number(rest[0]);
       const refUserId = Number(rest[1]) || 0;
@@ -8766,6 +8869,55 @@ async function ensureSchema() {
     `CREATE INDEX IF NOT EXISTS "AdLink_metaCampaignId_idx" ON "AdLink"("metaCampaignId")`,
     `CREATE INDEX IF NOT EXISTS "BotOrder_attributedAdId_idx" ON "BotOrder"("attributedAdId")`,
     `CREATE INDEX IF NOT EXISTS "BotOrder_attributedAdCode_idx" ON "BotOrder"("attributedAdCode")`,
+    `CREATE TABLE IF NOT EXISTS "CardPaymentRequest" (
+      "id" SERIAL NOT NULL,
+      "userId" INTEGER NOT NULL,
+      "variantId" INTEGER NOT NULL,
+      "qty" INTEGER NOT NULL DEFAULT 1,
+      "baseAmount" INTEGER NOT NULL,
+      "extraAmount" INTEGER NOT NULL,
+      "totalAmount" INTEGER NOT NULL,
+      "cardLast4" TEXT NOT NULL,
+      "cardNumber" TEXT NOT NULL,
+      "status" TEXT NOT NULL DEFAULT 'pending',
+      "expiresAt" TIMESTAMP(3) NOT NULL,
+      "chatId" TEXT,
+      "messageId" INTEGER,
+      "orderId" INTEGER,
+      "matchedNotificationId" INTEGER,
+      "refSpend" INTEGER NOT NULL DEFAULT 0,
+      "targetUsername" TEXT,
+      "recipientTgId" TEXT,
+      "adminNote" TEXT,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "CardPaymentRequest_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE INDEX IF NOT EXISTS "CardPaymentRequest_status_expiresAt_idx" ON "CardPaymentRequest"("status", "expiresAt")`,
+    `CREATE INDEX IF NOT EXISTS "CardPaymentRequest_totalAmount_cardLast4_status_idx" ON "CardPaymentRequest"("totalAmount", "cardLast4", "status")`,
+    `CREATE INDEX IF NOT EXISTS "CardPaymentRequest_userId_idx" ON "CardPaymentRequest"("userId")`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "CardPaymentRequest_matchedNotificationId_key" ON "CardPaymentRequest"("matchedNotificationId")`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "CardPaymentRequest_cardLast4_totalAmount_pending_idx" ON "CardPaymentRequest"("cardLast4", "totalAmount") WHERE "status" = 'pending'`,
+    `CREATE TABLE IF NOT EXISTS "BankNotification" (
+      "id" SERIAL NOT NULL,
+      "chatId" TEXT NOT NULL,
+      "messageId" INTEGER NOT NULL,
+      "operationType" TEXT NOT NULL,
+      "amount" INTEGER NOT NULL,
+      "cardLast4" TEXT NOT NULL,
+      "operationTime" TIMESTAMP(3) NOT NULL,
+      "rawSummary" TEXT NOT NULL,
+      "status" TEXT NOT NULL DEFAULT 'unmatched',
+      "matchedRequestId" INTEGER,
+      "adminReviewNote" TEXT,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "BankNotification_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "BankNotification_chatId_messageId_key" ON "BankNotification"("chatId", "messageId")`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "BankNotification_matchedRequestId_key" ON "BankNotification"("matchedRequestId")`,
+    `CREATE INDEX IF NOT EXISTS "BankNotification_status_idx" ON "BankNotification"("status")`,
+    `CREATE INDEX IF NOT EXISTS "BankNotification_amount_cardLast4_idx" ON "BankNotification"("amount", "cardLast4")`,
+    `CREATE INDEX IF NOT EXISTS "BankNotification_operationTime_idx" ON "BankNotification"("operationTime")`,
   ];
   for (const sql of statements) {
     try {
@@ -8935,6 +9087,37 @@ async function deliverPaidPaymeTopUps() {
   }
 }
 
+/** Expire card payment requests that have passed their 5-minute deadline. */
+async function expireCardPaymentRequests() {
+  const now = new Date();
+  const expired = await db.cardPaymentRequest.findMany({
+    where: { status: "pending", expiresAt: { lte: now } },
+    take: 20,
+  });
+  for (const req of expired) {
+    const claimed = await claimPaymentExpiration(db, req.id);
+    if (!claimed) continue;
+    // Delete the requisites message
+    if (req.chatId && req.messageId) {
+      await bot.api.deleteMessage(req.chatId, req.messageId).catch(() => {});
+    }
+    // Notify user
+    if (req.chatId) {
+      const user = await db.botUser.findUnique({ where: { tgId: req.chatId } });
+      const lang = user?.lang ?? "ru";
+      const config = getCardPaymentConfig();
+      const adminUser = config.adminUsername || "Aiobuna_support";
+      const kb = new InlineKeyboard();
+      kb.url(t(lang, "btn_contact_admin"), `https://t.me/${adminUser}`).row();
+      kb.text(t(lang, "to_shop"), "m:0:all").row();
+      await bot.api.sendMessage(req.chatId, t(lang, "card_pay_expired"), {
+        parse_mode: "HTML",
+        reply_markup: kb,
+      }).catch(() => {});
+    }
+  }
+}
+
 async function bootstrap() {
   await ensureSchema();             // create missing tables before serving anything
   await ensureCourseCatalog(Boolean(await configuredCourseChannel())).catch((e) => {
@@ -8949,7 +9132,39 @@ async function bootstrap() {
     retryPendingCourseOrders().catch(() => {});
     checkPromoExpiry().catch(() => {});
     checkGiveawayAutoDraw().catch(() => {});
+    expireCardPaymentRequests().catch(() => {});
   }, 12_000);
+
+  // ---- HUMO Card Payment Monitor ----
+  registerPaymentConfirmedHandler(async (request) => {
+    try {
+      // Delete/edit the requisites message
+      if (request.chatId && request.messageId) {
+        await bot.api.deleteMessage(request.chatId, request.messageId).catch(() => {});
+      }
+      const user = await db.botUser.findUnique({ where: { id: request.userId } });
+      if (!user) return;
+      const lang = user.lang;
+      await bot.api.sendMessage(user.tgId, t(lang, "card_pay_confirmed"), { parse_mode: "HTML" }).catch(() => {});
+      await executePurchase(
+        user.tgId, request.variantId, request.qty, undefined,
+        request.targetUsername ?? undefined, request.refSpend ?? 0,
+        request.recipientTgId ?? undefined, "card_humo", String(request.id),
+      ).catch((e) => {
+        console.error("[humo] executePurchase failed for request #" + request.id + ":", (e as Error).message);
+      });
+      if (ADMIN_ID) {
+        await bot.api.sendMessage(ADMIN_ID,
+          `💳 (HUMO) Подтверждён платёж #${request.id} на ${request.totalAmount} сум — ${user.firstName ?? ""} @${user.username ?? "—"} (${user.tgId})`,
+        ).catch(() => {});
+      }
+    } catch (e) {
+      console.error("[humo] confirmed handler error:", (e as Error).message);
+    }
+  });
+  startHumoMonitor(db).catch((e) => {
+    console.error("[humo] monitor start failed:", (e as Error).message);
+  });
   const pollingOptions = {
     drop_pending_updates: false,
     allowed_updates: [

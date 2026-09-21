@@ -222,6 +222,30 @@ const RU: Dict = {
   gw_winner_card: "🏆 <b>Поздравляем! Вы победили в розыгрыше!</b>\n\nВам доступен приз по акционной цене:\nТовар: <b>{product}</b>\nЦена: <b>{price}</b>\nСрок действия скидки: <b>до {expires}</b>",
   gw_claim_btn: "🎁 Забрать / купить приз",
   gw_not_winner: "К сожалению, в этом розыгрыше вы не попали в число победителей. Следите за новыми розыгрышами!",
+  btn_pay_card: "💳 Оплата на карту",
+  card_pay_unavailable: "⚠️ Оплата на карту временно недоступна. Пожалуйста, обратитесь к администратору или выберите другой способ оплаты.",
+  card_pay_instructions:
+    "💳 <b>Оплата переводом на карту HUMO</b>\n\n" +
+    "Товар: <b>{item}</b>\n" +
+    "Количество: <b>{qty}</b>\n\n" +
+    "📋 <b>Реквизиты для оплаты:</b>\n" +
+    "Номер карты: <code>{cardNumber}</code>\n" +
+    "Сумма к переводу: <code>{totalAmount}</code> сум\n" +
+    "<i>(Базовая цена: {baseAmount} сум + уникальный код: {extraAmount} сум)</i>\n\n" +
+    "⏳ <b>Срок действия заявки: 5 минут!</b>\n\n" +
+    "⚠️ <b>ВНИМАНИЕ! КРИТИЧЕСКИ ВАЖНО:</b>\n" +
+    "1. Переведите <b>РОВНО {totalAmount} сум</b> одним платежом.\n" +
+    "2. <b>НЕ округляйте</b> сумму и не переводите базовую цену ({baseAmount} сум) без уникальных {extraAmount} сум — иначе платеж не определится автоматически!\n" +
+    "3. После перевода нажмите кнопку «✅ Я оплатил — проверить».",
+  btn_copy_card: "📋 Скопировать карту",
+  btn_copy_amount: "📋 Скопировать сумму",
+  btn_check_payment: "✅ Я оплатил — проверить",
+  btn_contact_admin: "💬 Связаться с администратором",
+  btn_cancel_payment: "❌ Отменить",
+  card_pay_cancelled: "❌ Заявка на оплату отменена.",
+  card_pay_expired:
+    "⏱ <b>Время оплаты истекло</b>\n\nСрок действия платёжной заявки (5 минут) завершён.\n\nЕсли вы уже перевели деньги или возникла ошибка, пожалуйста, свяжитесь с администратором.",
+  card_pay_confirmed: "✅ <b>Оплата на карту успешно подтверждена!</b>\n\nФормируем ваш заказ...",
 };
 
 const EN: Dict = {
@@ -439,6 +463,30 @@ const EN: Dict = {
   gw_winner_card: "🏆 <b>Congratulations! You won the giveaway!</b>\n\nYour prize is available at the special price:\nProduct: <b>{product}</b>\nPrice: <b>{price}</b>\nDiscount valid: <b>until {expires}</b>",
   gw_claim_btn: "🎁 Claim / buy prize",
   gw_not_winner: "Unfortunately, you were not among the winners this time. Stay tuned for future giveaways!",
+  btn_pay_card: "💳 Pay by Card",
+  card_pay_unavailable: "⚠️ Card payment is temporarily unavailable. Please contact the administrator or select another payment method.",
+  card_pay_instructions:
+    "💳 <b>Payment by transfer to HUMO card</b>\n\n" +
+    "Item: <b>{item}</b>\n" +
+    "Quantity: <b>{qty}</b>\n\n" +
+    "📋 <b>Payment requisites:</b>\n" +
+    "Card number: <code>{cardNumber}</code>\n" +
+    "Amount to transfer: <code>{totalAmount}</code> UZS\n" +
+    "<i>(Base price: {baseAmount} UZS + unique tag: {extraAmount} UZS)</i>\n\n" +
+    "⏳ <b>Payment deadline: 5 minutes!</b>\n\n" +
+    "⚠️ <b>CRITICAL NOTICE:</b>\n" +
+    "1. Transfer <b>EXACTLY {totalAmount} UZS</b> in a single transaction.\n" +
+    "2. <b>DO NOT round</b> the amount and do not send the base price ({baseAmount} UZS) without the unique {extraAmount} UZS — automated confirmation requires the exact amount!\n" +
+    "3. After paying, tap “✅ I paid — check”.",
+  btn_copy_card: "📋 Copy card number",
+  btn_copy_amount: "📋 Copy amount",
+  btn_check_payment: "✅ I paid — verify",
+  btn_contact_admin: "💬 Contact administrator",
+  btn_cancel_payment: "❌ Cancel",
+  card_pay_cancelled: "❌ Payment request cancelled.",
+  card_pay_expired:
+    "⏱ <b>Payment deadline expired</b>\n\nThe 5-minute payment window has ended.\n\nIf you have already transferred money or encountered an error, please contact the administrator.",
+  card_pay_confirmed: "✅ <b>Card payment successfully confirmed!</b>\n\nFulfilling your order...",
 };
 
 const UZ: Dict = {
@@ -656,6 +704,30 @@ const UZ: Dict = {
   gw_winner_card: "🏆 <b>Tabriklaymiz! Siz tanlov g‘olibi bo‘ldingiz!</b>\n\nSizga maxsus narxdagi sovg‘a berildi:\nMahsulot: <b>{product}</b>\nNarx: <b>{price}</b>\nChegirma muddati: <b>{expires} gacha</b>",
   gw_claim_btn: "🎁 Sovg‘ani olish / xarid qilish",
   gw_not_winner: "Afsuski, bu safar g‘oliblar qatoriga kirmadingiz. Yangi tanlovlarni kuzatib boring!",
+  btn_pay_card: "💳 Kartaga to'lash",
+  card_pay_unavailable: "⚠️ Kartaga to'lash vaqtincha mavjud emas. Iltimos, administrator bilan bog'laning yoki boshqa to'lov usulini tanlang.",
+  card_pay_instructions:
+    "💳 <b>HUMO kartasiga o'tkazma orqali to'lov</b>\n\n" +
+    "Mahsulot: <b>{item}</b>\n" +
+    "Miqdor: <b>{qty}</b>\n\n" +
+    "📋 <b>To'lov rekvizitlari:</b>\n" +
+    "Karta raqami: <code>{cardNumber}</code>\n" +
+    "O'tkaziladigan summa: <code>{totalAmount}</code> so'm\n" +
+    "<i>(Asosiy narx: {baseAmount} so'm + noyob buyurtma kodi: {extraAmount} so'm)</i>\n\n" +
+    "⏳ <b>To'lov muddati: 5 daqiqa!</b>\n\n" +
+    "⚠️ <b>DIQQAT! JUDA MUHIM:</b>\n" +
+    "1. Bitta to'lov bilan <b>ANIQ {totalAmount} so'm</b> o'tkazing.\n" +
+    "2. Summani <b>yaxlitlamang</b> va qo'shimchasiz asosiy narxni ({baseAmount} so'm) o'tkazmang — aks holda to'lov avtomatik tasdiqlanmaydi!\n" +
+    "3. O'tkazgach, «✅ To'ladim — tekshirish» tugmasini bosing.",
+  btn_copy_card: "📋 Kartani nusxalash",
+  btn_copy_amount: "📋 Summani nusxalash",
+  btn_check_payment: "✅ To'ladim — tekshirish",
+  btn_contact_admin: "💬 Administrator bilan bog'lanish",
+  btn_cancel_payment: "❌ Bekor qilish",
+  card_pay_cancelled: "❌ To'lov arizasi bekor qilindi.",
+  card_pay_expired:
+    "⏱ <b>To'lov vaqti tugadi</b>\n\nTo'lov arizasining 5 daqiqalik muddati yakunlandi.\n\nAgar siz pul o'tkazgan bo'lsangiz yoki xatolik yuz bersa, iltimos administrator bilan bog'laning.",
+  card_pay_confirmed: "✅ <b>Kartaga to'lov muvaffaqiyatli tasdiqlandi!</b>\n\nBuyurtmangiz tayyorlanmoqda...",
 };
 
 const DICTS: Record<Lang, Dict> = { ru: RU, en: EN, uz: UZ };

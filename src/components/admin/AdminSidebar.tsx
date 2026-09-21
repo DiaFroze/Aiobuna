@@ -17,6 +17,7 @@ const NAV: { href: string; label: string; icon: React.ReactNode }[] = [
   { href: "/admin/bot-settings", label: "Тексты и меню бота", icon: "✎" },
   { href: "/admin/bot-channels", label: "Подписки бота", icon: "📢" },
   { href: "/admin/bot-topups", label: "Пополнения бота", icon: <TgEmoji name="click" /> },
+  { href: "/admin/card-payments", label: "Оплата на карту (HUMO)", icon: <TgEmoji name="click" /> },
   { href: "/admin/bot-users", label: "Пользователи бота", icon: "👤" },
   { href: "/admin/bot-ads", label: "Рекламные ссылки", icon: <TgEmoji name="statistics" /> },
   { href: "/admin/bot-vip-prices", label: "Индивидуальные цены", icon: "💎" },

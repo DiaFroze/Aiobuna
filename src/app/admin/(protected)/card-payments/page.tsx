@@ -1,0 +1,282 @@
+import { prisma } from "@/lib/db";
+import { PageHeader, Table, EmptyState, StatCard } from "@/components/admin/ui";
+import { getCardPaymentConfig } from "@/lib/domain/card-payment";
+import { manualConfirmAction, manualRejectAction, linkNotificationAction } from "./actions";
+
+export const dynamic = "force-dynamic";
+
+const STATUS_BADGE: Record<string, string> = {
+  pending: "bg-warning/10 text-warning border-warning/20",
+  confirmed: "bg-success/10 text-success border-success/20",
+  manual_confirmed: "bg-success/10 text-success border-success/20",
+  expired: "bg-surface-2 text-muted border-surface-3",
+  cancelled: "bg-danger/10 text-danger border-danger/20",
+  manual_rejected: "bg-danger/10 text-danger border-danger/20",
+};
+
+const NOTIF_STATUS_BADGE: Record<string, string> = {
+  unmatched: "bg-warning/10 text-warning border-warning/20",
+  late: "bg-danger/10 text-danger border-danger/20",
+  matched: "bg-success/10 text-success border-success/20",
+  ignored: "bg-surface-2 text-muted border-surface-3",
+};
+
+export default async function CardPaymentsAdminPage() {
+  const config = getCardPaymentConfig();
+
+  const [pendingRequests, unmatchedNotifications, recentConfirmed, stats] = await Promise.all([
+    // Active pending requests
+    prisma.cardPaymentRequest.findMany({
+      where: { status: "pending" },
+      orderBy: { createdAt: "desc" },
+      include: { user: true },
+      take: 50,
+    }),
+    // Unmatched or late bank notifications
+    prisma.bankNotification.findMany({
+      where: { status: { in: ["unmatched", "late"] } },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+    }),
+    // History of confirmed payments
+    prisma.cardPaymentRequest.findMany({
+      where: { status: { in: ["confirmed", "manual_confirmed"] } },
+      orderBy: { updatedAt: "desc" },
+      include: { user: true },
+      take: 50,
+    }),
+    // General stats
+    Promise.all([
+      prisma.cardPaymentRequest.count({ where: { status: "pending" } }),
+      prisma.cardPaymentRequest.count({ where: { status: { in: ["confirmed", "manual_confirmed"] } } }),
+      prisma.bankNotification.count({ where: { status: { in: ["unmatched", "late"] } } }),
+      prisma.cardPaymentRequest.aggregate({
+        where: { status: { in: ["confirmed", "manual_confirmed"] } },
+        _sum: { totalAmount: true },
+      }),
+    ]),
+  ]);
+
+  const [pendingCount, confirmedCount, queueCount, revenueAgg] = stats;
+  const totalRevenue = revenueAgg._sum.totalAmount || 0;
+
+  const modeBadgeColor =
+    config.mode === "all"
+      ? "text-success bg-success/10"
+      : config.mode === "admin_only"
+      ? "text-warning bg-warning/10"
+      : "text-danger bg-danger/10";
+
+  return (
+    <div className="space-y-6">
+      <PageHeader
+        title="Оплата на карту HUMO"
+        subtitle="Мониторинг Telegram MTProto, автоматические подтверждения, сверка выписки и ручной разбор."
+      />
+
+      {/* Info & Config Bar */}
+      <div className="card p-4 flex flex-wrap items-center justify-between gap-4 text-sm">
+        <div className="flex flex-wrap items-center gap-4">
+          <div>
+            <span className="text-muted">Режим доступа: </span>
+            <span className={`px-2 py-0.5 rounded font-mono font-medium ${modeBadgeColor}`}>
+              {config.mode}
+            </span>
+          </div>
+          <div>
+            <span className="text-muted">Карта: </span>
+            <span className="font-mono font-medium">
+              {config.cardNumber ? config.cardNumber.replace(/(\d{4}\s\d{4})\s\d{4}\s(\d{4})/, "$1 **** $2") : "Не задана"}
+            </span>
+          </div>
+          <div>
+            <span className="text-muted">Chat ID банка: </span>
+            <span className="font-mono">{config.humoChatId || "Не настроен"}</span>
+          </div>
+          <div>
+            <span className="text-muted">TTL заявки: </span>
+            <span>{config.ttlSeconds} сек ({Math.round(config.ttlSeconds / 60)} мин)</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Stat Cards */}
+      <div className="grid sm:grid-cols-4 gap-4">
+        <StatCard
+          label="Ожидают оплаты"
+          value={String(pendingCount)}
+          tone={pendingCount > 0 ? "warning" : "default"}
+          hint="Активные 5-минутные заявки"
+        />
+        <StatCard
+          label="Очередь на сверку"
+          value={String(queueCount)}
+          tone={queueCount > 0 ? "danger" : "default"}
+          hint="Несовпавшие / поздние платежи"
+        />
+        <StatCard
+          label="Подтверждено платежей"
+          value={String(confirmedCount)}
+          tone="success"
+          hint="Авто + ручные"
+        />
+        <StatCard
+          label="Выручка по карте"
+          value={`${totalRevenue.toLocaleString("ru-RU")} сум`}
+          tone="success"
+        />
+      </div>
+
+      {/* Section 1: Active Pending Requests */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold">Активные заявки (ожидают пополнения)</h2>
+          <span className="text-xs text-muted">Обновляется в реальном времени</span>
+        </div>
+
+        {pendingRequests.length === 0 ? (
+          <EmptyState>Нет активных заявок на оплату картой в данный момент.</EmptyState>
+        ) : (
+          <Table head={["ID", "Покупатель", "Товар (ID / Кол-во)", "Сумма к оплате", "Код заявки", "Истекает", "Действия"]}>
+            {pendingRequests.map((req) => {
+              const isExpired = new Date(req.expiresAt).getTime() < Date.now();
+              return (
+                <tr key={req.id} className="border-b hover:bg-surface-2/50 transition">
+                  <td className="px-4 py-3 font-mono text-muted">#{req.id}</td>
+                  <td className="px-4 py-3">
+                    <div className="font-medium">{req.user?.firstName || "—"}</div>
+                    <div className="text-xs text-muted font-mono">
+                      {req.user?.username ? `@${req.user.username}` : req.chatId || "—"}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3">
+                    <div>Вариант #{req.variantId}</div>
+                    <div className="text-xs text-muted">Кол-во: {req.qty} шт.</div>
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="font-bold font-mono text-base">{req.totalAmount.toLocaleString("ru-RU")} сум</div>
+                    <div className="text-xs text-muted">Базовая: {req.baseAmount.toLocaleString("ru-RU")}</div>
+                  </td>
+                  <td className="px-4 py-3 font-mono text-brand">+{req.extraAmount} сум</td>
+                  <td className="px-4 py-3">
+                    <span className={isExpired ? "text-danger font-semibold text-xs" : "text-xs"}>
+                      {new Date(req.expiresAt).toLocaleTimeString("ru-RU")}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <form action={manualConfirmAction}>
+                        <input type="hidden" name="requestId" value={req.id} />
+                        <button className="btn-success text-xs px-2.5 py-1">
+                          Подтвердить
+                        </button>
+                      </form>
+                      <form action={manualRejectAction}>
+                        <input type="hidden" name="requestId" value={req.id} />
+                        <button className="btn-danger text-xs px-2.5 py-1">
+                          Отклонить
+                        </button>
+                      </form>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </Table>
+        )}
+      </div>
+
+      {/* Section 2: Unmatched / Late Notifications Queue */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-semibold">Очередь банковских уведомлений на сверку</h2>
+            <p className="text-xs text-muted">Поступления, которые не совпали с активной заявкой или пришли после истечения 5 минут</p>
+          </div>
+        </div>
+
+        {unmatchedNotifications.length === 0 ? (
+          <EmptyState>Несопоставленных банковских уведомлений нет. Всё чисто!</EmptyState>
+        ) : (
+          <Table head={["ID", "Время", "Сумма", "Карта", "Статус", "Выжимка сообщения", "Ручная привязка к заявке"]}>
+            {unmatchedNotifications.map((notif) => (
+              <tr key={notif.id} className="border-b hover:bg-surface-2/50 transition">
+                <td className="px-4 py-3 font-mono text-muted">#{notif.id}</td>
+                <td className="px-4 py-3 text-xs whitespace-nowrap">
+                  {new Date(notif.operationTime).toLocaleString("ru-RU")}
+                </td>
+                <td className="px-4 py-3 font-mono font-bold text-success whitespace-nowrap">
+                  +{notif.amount.toLocaleString("ru-RU")} сум
+                </td>
+                <td className="px-4 py-3 font-mono">*{notif.cardLast4}</td>
+                <td className="px-4 py-3">
+                  <span className={`px-2 py-0.5 rounded text-xs border font-medium ${NOTIF_STATUS_BADGE[notif.status] || ""}`}>
+                    {notif.status}
+                  </span>
+                </td>
+                <td className="px-4 py-3 text-xs text-muted max-w-xs truncate" title={notif.rawSummary}>
+                  {notif.rawSummary}
+                </td>
+                <td className="px-4 py-3">
+                  <form action={linkNotificationAction} className="flex items-center gap-1.5">
+                    <input type="hidden" name="notificationId" value={notif.id} />
+                    <input
+                      name="requestId"
+                      required
+                      placeholder="№ заявки"
+                      className="input text-xs w-20 py-1 px-2 font-mono"
+                    />
+                    <button className="btn-primary text-xs px-2.5 py-1">
+                      Связать
+                    </button>
+                  </form>
+                </td>
+              </tr>
+            ))}
+          </Table>
+        )}
+      </div>
+
+      {/* Section 3: Confirmed History */}
+      <div className="space-y-3">
+        <h2 className="text-lg font-semibold">История подтверждённых оплат</h2>
+
+        {recentConfirmed.length === 0 ? (
+          <EmptyState>История подтверждённых платежей пуста.</EmptyState>
+        ) : (
+          <Table head={["ID", "Покупатель", "Сумма", "Код", "Статус", "Создана", "Подтверждена", "Заказ #"]}>
+            {recentConfirmed.map((req) => (
+              <tr key={req.id} className="border-b hover:bg-surface-2/50 transition">
+                <td className="px-4 py-3 font-mono text-muted">#{req.id}</td>
+                <td className="px-4 py-3">
+                  <div className="font-medium">{req.user?.firstName || "—"}</div>
+                  <div className="text-xs text-muted font-mono">
+                    {req.user?.username ? `@${req.user.username}` : req.chatId || "—"}
+                  </div>
+                </td>
+                <td className="px-4 py-3 font-mono font-semibold">
+                  {req.totalAmount.toLocaleString("ru-RU")} сум
+                </td>
+                <td className="px-4 py-3 font-mono text-xs text-muted">+{req.extraAmount}</td>
+                <td className="px-4 py-3">
+                  <span className={`px-2 py-0.5 rounded text-xs border font-medium ${STATUS_BADGE[req.status] || ""}`}>
+                    {req.status === "manual_confirmed" ? "Вручную" : "Авто (MTProto)"}
+                  </span>
+                </td>
+                <td className="px-4 py-3 text-xs text-muted whitespace-nowrap">
+                  {new Date(req.createdAt).toLocaleString("ru-RU")}
+                </td>
+                <td className="px-4 py-3 text-xs whitespace-nowrap">
+                  {new Date(req.updatedAt).toLocaleString("ru-RU")}
+                </td>
+                <td className="px-4 py-3 font-mono text-xs text-brand">
+                  {req.orderId ? `#${req.orderId}` : "—"}
+                </td>
+              </tr>
+            ))}
+          </Table>
+        )}
+      </div>
+    </div>
+  );
+}
