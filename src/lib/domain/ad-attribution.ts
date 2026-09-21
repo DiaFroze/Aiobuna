@@ -160,6 +160,36 @@ export function buildAdWebUrl(appUrl: string, code: string): string {
   return `${cleanAppUrl}/go/${encodeURIComponent(code)}`;
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function utcDay(value: Date): number {
+  return Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate());
+}
+
+/**
+ * Returns the part of an expense that belongs to the selected date range.
+ * Expense periods and report filters are inclusive calendar-day ranges.
+ */
+export function prorateExpenseForRange(
+  amount: number,
+  expenseStart: Date,
+  expenseEnd: Date,
+  rangeStart?: Date | null,
+  rangeEnd?: Date | null,
+): number {
+  const start = utcDay(expenseStart);
+  const end = utcDay(expenseEnd);
+  if (!Number.isFinite(amount) || amount <= 0 || end < start) return 0;
+
+  const selectedStart = rangeStart ? Math.max(start, utcDay(rangeStart)) : start;
+  const selectedEnd = rangeEnd ? Math.min(end, utcDay(rangeEnd)) : end;
+  if (selectedEnd < selectedStart) return 0;
+
+  const totalDays = Math.floor((end - start) / DAY_MS) + 1;
+  const selectedDays = Math.floor((selectedEnd - selectedStart) / DAY_MS) + 1;
+  return Math.round((amount * selectedDays) / totalDays);
+}
+
 export interface AdMetricsInput {
   clicks: number;
   uniqueClicks: number;

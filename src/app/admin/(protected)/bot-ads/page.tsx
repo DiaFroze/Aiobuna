@@ -10,6 +10,7 @@ import {
 import {
   calculateAdMetrics,
   buildAdWebUrl,
+  prorateExpenseForRange,
 } from "@/lib/domain/ad-attribution";
 
 export const dynamic = "force-dynamic";
@@ -188,14 +189,16 @@ export default async function BotAdsPage({
         }
       }
 
-      // Filter expenses if date range applies
-      const relevantExpenses = l.expenses.filter((exp) => {
-        if (!dateGte && !dateLte) return true;
-        if (dateGte && exp.endDate < dateGte) return false;
-        if (dateLte && exp.startDate > dateLte) return false;
-        return true;
-      });
-      const actualSpendUzs = relevantExpenses.reduce((sum, e) => sum + (e.amountUzs ?? e.amount), 0);
+      const actualSpendUzs = l.expenses.reduce(
+        (sum, expense) => sum + prorateExpenseForRange(
+          expense.amountUzs ?? expense.amount,
+          expense.startDate,
+          expense.endDate,
+          dateGte,
+          dateLte,
+        ),
+        0,
+      );
 
       const metrics = calculateAdMetrics({
         clicks,

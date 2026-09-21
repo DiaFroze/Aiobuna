@@ -4259,21 +4259,33 @@ bot.command("start", async (ctx) => {
 
     if (adLink && adLink.isActive) {
       const now = new Date();
-      const firstTouchPatch = !user.firstAdId ? {
-        firstAdId: adLink.id,
-        firstAdCode: adLink.code,
-        firstAdAt: now,
-      } : {};
-
-      await db.botUser.update({
-        where: { id: user.id },
+      // Claim first-touch atomically. Two concurrent /start updates must never
+      // overwrite the first campaign that reached this user.
+      const firstTouch = await db.botUser.updateMany({
+        where: { id: user.id, firstAdId: null },
         data: {
-          ...firstTouchPatch,
+          firstAdId: adLink.id,
+          firstAdCode: adLink.code,
+          firstAdAt: now,
           lastAdId: adLink.id,
           lastAdCode: adLink.code,
           lastAdAt: now,
         },
-      }).catch((e) => console.error("[bot] failed updating ad touch on user:", e));
+      }).catch((e) => {
+        console.error("[bot] failed claiming first ad touch:", e);
+        return { count: 0 };
+      });
+
+      if (firstTouch.count === 0) {
+        await db.botUser.update({
+          where: { id: user.id },
+          data: {
+            lastAdId: adLink.id,
+            lastAdCode: adLink.code,
+            lastAdAt: now,
+          },
+        }).catch((e) => console.error("[bot] failed updating last ad touch:", e));
+      }
 
       await db.adStartEvent.create({
         data: {

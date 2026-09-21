@@ -7,6 +7,7 @@ import {
   buildAdRedirectUrl,
   calculateAdMetrics,
   buildFunnelSteps,
+  prorateExpenseForRange,
 } from "../src/lib/domain/ad-attribution";
 
 describe("Ad Attribution & Analytics: 18 Comprehensive Scenarios", () => {
@@ -51,7 +52,7 @@ describe("Ad Attribution & Analytics: 18 Comprehensive Scenarios", () => {
   // Scenario 6: Первый запуск бота новым пользователем (first touch)
   it("Scenario 6: first-time start identifies candidate code and marks new user", () => {
     const payload = "meta_reels5_broad";
-    const code = parseAdStartPayload(payload);
+    const code = parseAdStartPayload(payload)!;
     expect(code).toBe("meta_reels5_broad");
 
     // Simulating user record attribution
@@ -79,12 +80,36 @@ describe("Ad Attribution & Analytics: 18 Comprehensive Scenarios", () => {
     };
 
     // User taps start with same ad again
-    const code = parseAdStartPayload("meta_campaign_1");
+    const code = parseAdStartPayload("meta_campaign_1")!;
     if (!user.firstAdCode) user.firstAdCode = code;
     user.lastAdCode = code;
 
     expect(user.firstAdCode).toBe("meta_campaign_1");
     expect(user.lastAdCode).toBe("meta_campaign_1");
+  });
+
+  it("prorates a multi-day expense to the selected inclusive date range", () => {
+    const amount = prorateExpenseForRange(
+      70_000,
+      new Date("2026-09-01T00:00:00.000Z"),
+      new Date("2026-09-07T00:00:00.000Z"),
+      new Date("2026-09-07T00:00:00.000Z"),
+      new Date("2026-09-07T23:59:59.999Z"),
+    );
+
+    expect(amount).toBe(10_000);
+  });
+
+  it("excludes an expense outside the selected date range", () => {
+    const amount = prorateExpenseForRange(
+      70_000,
+      new Date("2026-09-01T00:00:00.000Z"),
+      new Date("2026-09-07T00:00:00.000Z"),
+      new Date("2026-09-08T00:00:00.000Z"),
+      new Date("2026-09-08T23:59:59.999Z"),
+    );
+
+    expect(amount).toBe(0);
   });
 
   // Scenario 8: Пользователь пришёл сначала из одной рекламы, затем из другой
@@ -97,7 +122,7 @@ describe("Ad Attribution & Analytics: 18 Comprehensive Scenarios", () => {
 
     // User visits campaign B
     const payloadB = "ad_campaign_B";
-    const codeB = parseAdStartPayload(payloadB);
+    const codeB = parseAdStartPayload(payloadB)!;
     expect(codeB).toBe("campaign_B");
 
     if (!user.firstAdCode) user.firstAdCode = codeB;

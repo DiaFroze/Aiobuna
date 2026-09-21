@@ -188,8 +188,13 @@ export async function createAdExpenseAction(formData: FormData) {
   const startDate = new Date(rawStart);
   const endDate = new Date(rawEnd);
 
-  if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+  if (isNaN(startDate.getTime()) || isNaN(endDate.getTime()) || endDate < startDate) {
     redirect(`${returnTo}?error=invalid_dates`);
+  }
+
+  const adLinkExists = await botDb.adLink.count({ where: { id: adLinkId } });
+  if (!adLinkExists) {
+    redirect(`${returnTo}?error=ad_link_not_found`);
   }
 
   const amountUzs = currency === "USD" ? Math.round(amount * rate) : amount;
