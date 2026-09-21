@@ -22,52 +22,58 @@ pushMain.on("close", (code) => {
     process.exit(1);
   }
 
-  console.log("🚀 Starting both Next.js App and Telegram Bot...");
+  // Run clean slate once if not already applied
+  console.log("🧹 Verifying clean slate status...");
+  const cleanProc = spawn("npx", ["tsx", "scripts/clean_slate.ts"], { stdio: "inherit", shell: true });
 
-  let shuttingDown = false;
+  cleanProc.on("close", () => {
+    console.log("🚀 Starting both Next.js App and Telegram Bot...");
 
-  const nextApp = spawn("npx", ["next", "start", "-p", process.env.PORT || "3000"], { stdio: "inherit", shell: true });
-  const tgBot = spawn("npx", ["tsx", "--conditions=react-server", "src/bot/index.ts"], { stdio: "inherit", shell: true });
+    let shuttingDown = false;
 
-  const children = [
-    { name: "next", proc: nextApp },
-    { name: "bot", proc: tgBot },
-  ];
+    const nextApp = spawn("npx", ["next", "start", "-p", process.env.PORT || "3000"], { stdio: "inherit", shell: true });
+    const tgBot = spawn("npx", ["tsx", "--conditions=react-server", "src/bot/index.ts"], { stdio: "inherit", shell: true });
 
-  // Supervise both children. Previously nothing listened here: if the bot
-  // crashed, the parent and the web server stayed up, so the platform kept
-  // reporting a healthy deploy while the shop quietly stopped selling.
-  for (const { name, proc } of children) {
-    proc.on("exit", (code, signal) => {
-      const d = decideOnChildExit({ name, code, signal, shuttingDown });
-      if (d.action === "ignore") return;
-      console.error(`❌ ${d.reason} — shutting down so the platform can restart us.`);
+    const children = [
+      { name: "next", proc: nextApp },
+      { name: "bot", proc: tgBot },
+    ];
+
+    // Supervise both children. Previously nothing listened here: if the bot
+    // crashed, the parent and the web server stayed up, so the platform kept
+    // reporting a healthy deploy while the shop quietly stopped selling.
+    for (const { name, proc } of children) {
+      proc.on("exit", (code, signal) => {
+        const d = decideOnChildExit({ name, code, signal, shuttingDown });
+        if (d.action === "ignore") return;
+        console.error(`❌ ${d.reason} — shutting down so the platform can restart us.`);
+        shuttingDown = true;
+        for (const other of children) if (other.proc !== proc) other.proc.kill("SIGTERM");
+        process.exit(d.code);
+      });
+      proc.on("error", (err) => {
+        const d = decideOnChildError({ name, message: err.message, shuttingDown });
+        if (d.action === "ignore") return;
+        console.error(`❌ ${d.reason}`);
+        shuttingDown = true;
+        for (const other of children) if (other.proc !== proc) other.proc.kill("SIGTERM");
+        process.exit(d.code);
+      });
+    }
+
+    // Platform shutdown: pass the signal on so each child can close its database
+    // and Redis connections, then leave. The exit handlers above stay quiet
+    // because shuttingDown is set first.
+    const terminate = (signal) => {
+      if (shuttingDown) return;
       shuttingDown = true;
-      for (const other of children) if (other.proc !== proc) other.proc.kill("SIGTERM");
-      process.exit(d.code);
-    });
-    proc.on("error", (err) => {
-      const d = decideOnChildError({ name, message: err.message, shuttingDown });
-      if (d.action === "ignore") return;
-      console.error(`❌ ${d.reason}`);
-      shuttingDown = true;
-      for (const other of children) if (other.proc !== proc) other.proc.kill("SIGTERM");
-      process.exit(d.code);
-    });
-  }
+      console.log(`👋 ${signal} received — shutting down...`);
+      for (const { proc } of children) proc.kill(signal);
+      // Give the children a moment to exit cleanly, then stop regardless.
+      setTimeout(() => process.exit(0), 5000).unref();
+    };
 
-  // Platform shutdown: pass the signal on so each child can close its database
-  // and Redis connections, then leave. The exit handlers above stay quiet
-  // because shuttingDown is set first.
-  const terminate = (signal) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    console.log(`👋 ${signal} received — shutting down...`);
-    for (const { proc } of children) proc.kill(signal);
-    // Give the children a moment to exit cleanly, then stop regardless.
-    setTimeout(() => process.exit(0), 5000).unref();
-  };
-
-  process.on("SIGINT", () => terminate("SIGINT"));
-  process.on("SIGTERM", () => terminate("SIGTERM"));
+    process.on("SIGINT", () => terminate("SIGINT"));
+    process.on("SIGTERM", () => terminate("SIGTERM"));
+  });
 });

@@ -22,6 +22,7 @@ import {
 import { DailySalesChart } from "./DailySalesChart";
 import { ProductRatingTable } from "./ProductRatingTable";
 import { TgEmoji } from "@/components/admin/TgEmoji";
+import { ResetOrdersButton } from "./ResetOrdersButton";
 
 export const dynamic = "force-dynamic";
 
@@ -276,10 +277,16 @@ export default async function StatisticsPage({
     <div className="space-y-6">
       {/* Header */}
       <PageHeader
-        title="📊 Статистика продаж"
+        title={
+          <span className="inline-flex items-center gap-2.5">
+            <TgEmoji name="statistics" />
+            <span>Статистика продаж</span>
+          </span>
+        }
         subtitle="Продажи по дням, платежи через Payme и Click, закупки через API"
         action={
           <div className="flex items-center gap-2">
+            <ResetOrdersButton />
             <Link href="/admin/bot-products" className="btn-secondary text-xs sm:text-sm">
               Товары и закупка
             </Link>
@@ -581,7 +588,7 @@ export default async function StatisticsPage({
         <div className="p-4 sm:p-5 border-b border-border flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
             <h2 className="font-semibold text-base sm:text-lg flex items-center gap-2">
-              ⏱️ Список продаж
+              <TgEmoji name="receipt" /> Список продаж
               {selectedPayment && (
                 <span className="badge bg-brand/10 text-brand text-xs font-normal">
                   Фильтр: {normalizePaymentMethod(selectedPayment).name}
