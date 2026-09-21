@@ -252,3 +252,151 @@ export async function deleteAdExpenseAction(formData: FormData) {
   if (adLinkId) revalidatePath(`/admin/bot-ads/${adLinkId}`);
   redirect(`${returnTo}?ok=expense_deleted`);
 }
+
+/**
+ * Tests connection to Meta Marketing API and returns status.
+ */
+export async function testMetaConnectionAction(): Promise<{
+  ok: boolean;
+  message: string;
+  account?: any;
+}> {
+  await requirePermission(PERMISSIONS.LINKS_MANAGE);
+  const { checkMetaConnection } = await import("@/lib/services/meta-ads");
+  const res = await checkMetaConnection();
+  if (!res.ok) {
+    return {
+      ok: false,
+      message: res.error || "Ошибка подключения к Meta API",
+    };
+  }
+  return {
+    ok: true,
+    message: `Подключение успешно! Аккаунт: ${res.account?.name} (${res.account?.id}), валюта: ${res.account?.currency}`,
+    account: res.account,
+  };
+}
+
+/**
+ * Triggers on-demand synchronization of Meta Ads insights and expenses.
+ */
+export async function syncMetaAdsAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.LINKS_MANAGE);
+  const datePreset = str(formData.get("datePreset")) || "last_30d";
+  const returnTo = str(formData.get("returnTo")) || "/admin/bot-ads/meta-settings";
+
+  const { syncMetaExpenses } = await import("@/lib/services/meta-ads");
+  const res = await syncMetaExpenses({ datePreset });
+
+  await audit({
+    adminId: admin.id,
+    action: "bot.meta_ads.sync",
+    entityType: "AdExpense",
+    metadata: {
+      ok: res.ok,
+      syncedCount: res.syncedCount,
+      totalSpendUzs: res.totalSpendUzs,
+      error: res.error,
+    },
+  });
+
+  revalidatePath("/admin/bot-ads");
+  revalidatePath("/admin/bot-ads/meta-settings");
+
+  if (!res.ok) {
+    redirect(`${returnTo}?error=${encodeURIComponent(res.error || "sync_failed")}`);
+  }
+
+  redirect(
+    `${returnTo}?ok=synced&count=${res.syncedCount}&created=${res.createdCount}&updated=${res.updatedCount}&spend=${res.totalSpendUzs}&unmapped=${res.unmappedCount}`,
+  );
+}
+
+/**
+ * Manually maps a Meta Ad or Campaign to an existing AdLink.
+ */
+export async function mapMetaAdToLinkAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.LINKS_MANAGE);
+  const metaAdId = str(formData.get("metaAdId"));
+  const metaCampaignId = str(formData.get("metaCampaignId")) || null;
+  const metaAdSetId = str(formData.get("metaAdSetId")) || null;
+  const adLinkId = Number(formData.get("adLinkId"));
+  const returnTo = str(formData.get("returnTo")) || "/admin/bot-ads/meta-settings";
+
+  if (!metaAdId || !adLinkId || Number.isNaN(adLinkId)) {
+    redirect(`${returnTo}?error=missing_mapping_fields`);
+  }
+
+  const link = await botDb.adLink.findUnique({ where: { id: adLinkId } });
+  if (!link) {
+    redirect(`${returnTo}?error=link_not_found`);
+  }
+
+  // Update AdLink with Meta identifiers
+  await botDb.adLink.update({
+    where: { id: adLinkId },
+    data: {
+      metaAdId,
+      metaCampaignId: metaCampaignId || link.metaCampaignId,
+      metaAdSetId: metaAdSetId || link.metaAdSetId,
+    },
+  });
+
+  // Re-associate existing AdExpense rows with this adLinkId
+  await botDb.adExpense.updateMany({
+    where: { metaAdId },
+    data: { adLinkId },
+  });
+
+  await audit({
+    adminId: admin.id,
+    action: "bot.meta_ads.map",
+    entityType: "AdLink",
+    entityId: String(adLinkId),
+    metadata: { metaAdId, metaCampaignId, adLinkCode: link.code },
+  });
+
+  revalidatePath("/admin/bot-ads");
+  revalidatePath("/admin/bot-ads/meta-settings");
+  revalidatePath(`/admin/bot-ads/${adLinkId}`);
+
+  redirect(`${returnTo}?ok=mapped&adCode=${encodeURIComponent(link.code)}`);
+}
+
+/**
+ * Removes Meta mapping from an AdLink without deleting historical expense records.
+ */
+export async function unlinkMetaAdAction(formData: FormData) {
+  const admin = await requirePermission(PERMISSIONS.LINKS_MANAGE);
+  const adLinkId = Number(formData.get("adLinkId"));
+  const returnTo = str(formData.get("returnTo")) || "/admin/bot-ads/meta-settings";
+
+  if (!adLinkId || Number.isNaN(adLinkId)) {
+    redirect(`${returnTo}?error=missing_id`);
+  }
+
+  const link = await botDb.adLink.findUnique({ where: { id: adLinkId } });
+  if (link) {
+    await botDb.adLink.update({
+      where: { id: adLinkId },
+      data: {
+        metaAdId: null,
+      },
+    });
+
+    await audit({
+      adminId: admin.id,
+      action: "bot.meta_ads.unlink",
+      entityType: "AdLink",
+      entityId: String(adLinkId),
+      metadata: { adLinkCode: link.code },
+    });
+  }
+
+  revalidatePath("/admin/bot-ads");
+  revalidatePath("/admin/bot-ads/meta-settings");
+  revalidatePath(`/admin/bot-ads/${adLinkId}`);
+
+  redirect(`${returnTo}?ok=unlinked`);
+}
+

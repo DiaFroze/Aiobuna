@@ -833,6 +833,9 @@ model AdLink {
   isActive      Boolean         @default(true)
   targetType    String          @default("shop") // "shop", "product", "deal"
   targetPayload String?
+  metaCampaignId String?
+  metaAdSetId    String?
+  metaAdId       String?
   createdAt     DateTime        @default(now())
   updatedAt     DateTime        @updatedAt
 
@@ -846,6 +849,8 @@ model AdLink {
   @@index([platform])
   @@index([isActive])
   @@index([createdAt])
+  @@index([metaAdId])
+  @@index([metaCampaignId])
 }
 
 model AdClick {
@@ -879,19 +884,37 @@ model AdStartEvent {
 }
 
 model AdExpense {
-  id        Int      @id @default(autoincrement())
-  adLinkId  Int
-  adLink    AdLink   @relation(fields: [adLinkId], references: [id], onDelete: Cascade)
-  amount    Float
-  currency  String   @default("USD") // "USD" | "UZS"
-  amountUzs Float?
-  startDate DateTime
-  endDate   DateTime
-  comment   String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id               Int       @id @default(autoincrement())
+  adLinkId         Int?
+  adLink           AdLink?   @relation(fields: [adLinkId], references: [id], onDelete: Cascade)
+  amount           Float
+  currency         String    @default("USD") // "USD" | "UZS"
+  amountUzs        Float?
+  startDate        DateTime
+  endDate          DateTime
+  comment          String?
+  metaCampaignId   String?
+  metaCampaignName String?
+  metaAdSetId      String?
+  metaAdSetName    String?
+  metaAdId         String?
+  metaAdName       String?
+  metaSyncKey      String?
+  source           String    @default("manual") // "manual" | "meta_api"
+  impressions      Int?      @default(0)
+  reach            Int?      @default(0)
+  clicks           Int?      @default(0)
+  cpm              Float?
+  cpc              Float?
+  ctr              Float?
+  syncedAt         DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   @@index([adLinkId, startDate, endDate])
+  @@index([metaAdId])
+  @@index([metaCampaignId])
+  @@index([metaSyncKey])
 }
 
 model ApiSource {

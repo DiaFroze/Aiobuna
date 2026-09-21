@@ -6,6 +6,7 @@ import { useState } from "react";
 
 const NAV: { href: string; label: string; icon: string }[] = [
   { href: "/admin", label: "Dashboard", icon: "▤" },
+  { href: "/admin/statistics", label: "Статистика продаж", icon: "📊" },
   { href: "/admin/bot-products", label: "Товары бота", icon: "🤖" },
   { href: "/admin/bot-suppliers", label: "Связки API и закупка", icon: "🔀" },
   { href: "/admin/bot-fragment", label: "Stars и Premium", icon: "⭐" },

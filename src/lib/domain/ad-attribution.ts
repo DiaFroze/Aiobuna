@@ -367,3 +367,117 @@ export function buildFunnelSteps(metrics: {
     };
   });
 }
+
+export interface CampaignPerformanceRow {
+  campaignName: string;
+  metaCampaignId?: string | null;
+  spendUzs: number;
+  revenueUzs: number;
+  costPriceUzs: number | null;
+  hasIncompleteCostPrice: boolean;
+  profitBeforeAds: number | null;
+  profitAfterAds: number | null;
+  roas: number | null;
+  roi: number | null;
+  clicks: number;
+  starts: number;
+  buyers: number;
+  ordersCount: number;
+}
+
+export interface AdSetPerformanceRow {
+  adSetName: string;
+  metaAdSetId?: string | null;
+  campaignName?: string | null;
+  spendUzs: number;
+  revenueUzs: number;
+  costPriceUzs: number | null;
+  hasIncompleteCostPrice: boolean;
+  profitBeforeAds: number | null;
+  profitAfterAds: number | null;
+  roas: number | null;
+  roi: number | null;
+  clicks: number;
+  starts: number;
+  buyers: number;
+  ordersCount: number;
+}
+
+export interface AdPerformanceRow {
+  adName: string;
+  metaAdId?: string | null;
+  campaignName?: string | null;
+  adSetName?: string | null;
+  spendUzs: number;
+  revenueUzs: number;
+  costPriceUzs: number | null;
+  hasIncompleteCostPrice: boolean;
+  profitBeforeAds?: number | null;
+  profitAfterAds: number | null;
+  roas: number | null;
+  roi?: number | null;
+  clicks: number;
+  starts?: number;
+  buyers: number;
+  ordersCount: number;
+  conversionRate: number; // buyers / clicks %
+}
+
+export interface DailyAdPerformanceRow {
+  dateKey: string;
+  dateFormatted: string;
+  spendUzs: number;
+  clicks: number;
+  starts: number;
+  buyers: number;
+  ordersCount: number;
+  revenueUzs: number;
+  costPriceUzs: number;
+  hasIncompleteCostPrice: boolean;
+  profitBeforeAds: number;
+  profitAfterAds: number;
+  roas: number | null;
+  roi: number | null;
+}
+
+/**
+ * Ranks advertising campaigns into top-performing (profitable) and loss-making.
+ */
+export function rankCampaignsByProfitability(campaigns: CampaignPerformanceRow[]): {
+  profitable: CampaignPerformanceRow[];
+  lossMaking: CampaignPerformanceRow[];
+} {
+  const profitable = campaigns
+    .filter((c) => (c.profitAfterAds ?? 0) > 0)
+    .sort((a, b) => (b.profitAfterAds ?? 0) - (a.profitAfterAds ?? 0));
+
+  const lossMaking = campaigns
+    .filter((c) => (c.profitAfterAds ?? 0) < 0 || (c.spendUzs > 0 && c.revenueUzs === 0))
+    .sort((a, b) => (a.profitAfterAds ?? 0) - (b.profitAfterAds ?? 0));
+
+  return { profitable, lossMaking };
+}
+
+/**
+ * Ranks ad sets (groups of ads) by profitability and volume.
+ */
+export function rankAdSetsByPerformance(adSets: AdSetPerformanceRow[]): AdSetPerformanceRow[] {
+  return [...adSets].sort((a, b) => {
+    const profitDiff = (b.profitAfterAds ?? 0) - (a.profitAfterAds ?? 0);
+    if (profitDiff !== 0) return profitDiff;
+    return b.revenueUzs - a.revenueUzs || b.ordersCount - a.ordersCount || b.spendUzs - a.spendUzs;
+  });
+}
+
+/**
+ * Ranks individual ads by sales, conversion, and ROAS.
+ */
+export function rankAdsByPerformance(ads: AdPerformanceRow[]): AdPerformanceRow[] {
+  return [...ads].sort((a, b) => {
+    // Sort by profitAfterAds desc, then revenue desc, then ordersCount desc
+    const profitDiff = (b.profitAfterAds ?? 0) - (a.profitAfterAds ?? 0);
+    if (profitDiff !== 0) return profitDiff;
+    return b.revenueUzs - a.revenueUzs || b.ordersCount - a.ordersCount;
+  });
+}
+
