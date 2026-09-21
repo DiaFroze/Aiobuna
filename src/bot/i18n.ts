@@ -222,7 +222,7 @@ const RU: Dict = {
   gw_winner_card: "🏆 <b>Поздравляем! Вы победили в розыгрыше!</b>\n\nВам доступен приз по акционной цене:\nТовар: <b>{product}</b>\nЦена: <b>{price}</b>\nСрок действия скидки: <b>до {expires}</b>",
   gw_claim_btn: "🎁 Забрать / купить приз",
   gw_not_winner: "К сожалению, в этом розыгрыше вы не попали в число победителей. Следите за новыми розыгрышами!",
-  btn_pay_card: "💳 Оплата на карту",
+  btn_pay_card: "Оплата картой 💳 / 💳",
   card_pay_unavailable: "⚠️ Оплата на карту временно недоступна. Пожалуйста, обратитесь к администратору или выберите другой способ оплаты.",
   card_pay_instructions:
     "Товар: <b>{item}</b>\n" +
@@ -239,6 +239,7 @@ const RU: Dict = {
   btn_copy_card: "📋 Скопировать карту",
   btn_copy_amount: "📋 Скопировать сумму",
   btn_check_payment: "✅ Я оплатил — проверить",
+  card_chk_pending: "Платёж пока не найден. Заявка активна, осталось: {n} мин. Повторно переводить деньги не нужно.",
   btn_contact_admin: "💬 Связаться с администратором",
   btn_cancel_payment: "❌ Отменить",
   card_pay_cancelled: "❌ Заявка на оплату отменена.",
@@ -462,7 +463,7 @@ const EN: Dict = {
   gw_winner_card: "🏆 <b>Congratulations! You won the giveaway!</b>\n\nYour prize is available at the special price:\nProduct: <b>{product}</b>\nPrice: <b>{price}</b>\nDiscount valid: <b>until {expires}</b>",
   gw_claim_btn: "🎁 Claim / buy prize",
   gw_not_winner: "Unfortunately, you were not among the winners this time. Stay tuned for future giveaways!",
-  btn_pay_card: "💳 Pay by Card",
+  btn_pay_card: "Pay by card 💳 / 💳",
   card_pay_unavailable: "⚠️ Card payment is temporarily unavailable. Please contact the administrator or select another payment method.",
   card_pay_instructions:
     "Product: <b>{item}</b>\n" +
@@ -479,6 +480,7 @@ const EN: Dict = {
   btn_copy_card: "📋 Copy card number",
   btn_copy_amount: "📋 Copy amount",
   btn_check_payment: "✅ I paid — verify",
+  card_chk_pending: "Payment not found yet. Request is active, remaining: {n} min. No need to send money again.",
   btn_contact_admin: "💬 Contact administrator",
   btn_cancel_payment: "❌ Cancel",
   card_pay_cancelled: "❌ Payment request cancelled.",
@@ -702,7 +704,7 @@ const UZ: Dict = {
   gw_winner_card: "🏆 <b>Tabriklaymiz! Siz tanlov g‘olibi bo‘ldingiz!</b>\n\nSizga maxsus narxdagi sovg‘a berildi:\nMahsulot: <b>{product}</b>\nNarx: <b>{price}</b>\nChegirma muddati: <b>{expires} gacha</b>",
   gw_claim_btn: "🎁 Sovg‘ani olish / xarid qilish",
   gw_not_winner: "Afsuski, bu safar g‘oliblar qatoriga kirmadingiz. Yangi tanlovlarni kuzatib boring!",
-  btn_pay_card: "💳 Kartaga to'lash",
+  btn_pay_card: "Karta orqali to‘lash 💳 / 💳",
   card_pay_unavailable: "⚠️ Kartaga to'lash vaqtincha mavjud emas. Iltimos, administrator bilan bog'laning yoki boshqa to'lov usulini tanlang.",
   card_pay_instructions:
     "Mahsulot: <b>{item}</b>\n" +
@@ -719,6 +721,7 @@ const UZ: Dict = {
   btn_copy_card: "📋 Kartani nusxalash",
   btn_copy_amount: "📋 Summani nusxalash",
   btn_check_payment: "✅ To'ladim — tekshirish",
+  card_chk_pending: "To‘lov hozircha topilmadi. Ariza faol, qoldi: {n} daqiqa. Pulni qayta o‘tkazish shart emas.",
   btn_contact_admin: "💬 Administrator bilan bog'lanish",
   btn_cancel_payment: "❌ Bekor qilish",
   card_pay_cancelled: "❌ To'lov arizasi bekor qilindi.",

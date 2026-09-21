@@ -3,6 +3,34 @@
 
 export type PaymentMonitorMode = "disabled" | "admin_only" | "all";
 
+export const CARD_PREMIUM_EMOJI_1 = "5472296756152644790";
+export const CARD_PREMIUM_EMOJI_2 = "5346328681075712891";
+
+export const CARD_PAY_BUTTON_TEXT: Record<string, string> = {
+  uz: "Karta orqali to‘lash 💳 / 💳",
+  ru: "Оплата картой 💳 / 💳",
+  en: "Pay by card 💳 / 💳",
+};
+
+export const CARD_PAY_BUTTON_HTML: Record<string, string> = {
+  uz: `Karta orqali to‘lash <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_1}">💳</tg-emoji> / <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_2}">💳</tg-emoji>`,
+  ru: `Оплата картой <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_1}">💳</tg-emoji> / <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_2}">💳</tg-emoji>`,
+  en: `Pay by card <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_1}">💳</tg-emoji> / <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_2}">💳</tg-emoji>`,
+};
+
+export function renderCardPayButtonHtml(lang: string = "uz"): string {
+  const l = lang === "en" || lang === "ru" ? lang : "uz";
+  return CARD_PAY_BUTTON_HTML[l];
+}
+
+/**
+ * Calculates payment expiration date strictly based on server createdAt and TTL in seconds.
+ * Guarantees that expiresAt.getTime() - createdAt.getTime() === ttlSeconds * 1000.
+ */
+export function calculatePaymentExpiry(createdAt: Date, ttlSeconds: number): Date {
+  return new Date(createdAt.getTime() + ttlSeconds * 1000);
+}
+
 export interface CardPaymentConfig {
   mode: PaymentMonitorMode;
   ttlSeconds: number;
@@ -95,7 +123,16 @@ export function getCardPaymentConfig(): CardPaymentConfig {
 
   const ttlSeconds = Math.max(
     60,
-    Number.parseInt(getEnvTolerant("CARD_PAYMENT_TTL_SECONDS", ["card_payment_ttl_seconds", "CARD_TTL_SECONDS"]) || "300", 10) || 300
+    Number.parseInt(
+      getEnvTolerant("CARD_PAYMENT_TTL_SECONDS", [
+        "card_payment_ttl_seconds",
+        "CARD_PAYMENT_TTL_SECOND",
+        "card_payment_ttl_second",
+        "CARD_TTL_SECONDS",
+        "card_ttl_seconds",
+      ]) || "300",
+      10
+    ) || 300
   );
   const minExtra = Math.max(
     1,
@@ -300,19 +337,88 @@ export async function claimPaymentConfirmation(
 
 /**
  * Atomic Compare-And-Swap (CAS) to expire a pending request past its TTL.
- * Returns true if this call changed the state, false if already handled.
+ * Strictly verifies BOTH:
+ * 1. status = 'pending'
+ * 2. expiresAt <= current server time (now)
+ * Returns true if this call changed the state, false if already handled or not yet expired.
  */
-export async function claimPaymentExpiration(dbClient: any, requestId: number): Promise<boolean> {
+export async function claimPaymentExpiration(
+  dbClient: any,
+  requestId: number,
+  now: Date = new Date()
+): Promise<boolean> {
   const res = await dbClient.cardPaymentRequest.updateMany({
     where: {
       id: requestId,
       status: "pending",
+      expiresAt: { lte: now },
     },
     data: {
       status: "expired",
     },
   });
   return res.count === 1;
+}
+
+export interface CardPaymentSupportParams {
+  adminUsername?: string | null;
+  requestId: number;
+  itemTitle: string;
+  totalAmount: number;
+  createdAt: Date;
+  expiresAt: Date;
+  status: string; // "pending" | "expired" | "confirmed" | "manual_confirmed" | ...
+  now?: Date;
+}
+
+export function formatAmountUzs(amount: number): string {
+  return String(Math.round(amount)).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+}
+
+export function formatDateTime(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const y = date.getFullYear();
+  const m = pad(date.getMonth() + 1);
+  const d = pad(date.getDate());
+  const hh = pad(date.getHours());
+  const mm = pad(date.getMinutes());
+  return `${y}-${m}-${d} ${hh}:${mm}`;
+}
+
+export function buildCardPaymentSupportText(params: CardPaymentSupportParams): string {
+  const now = params.now || new Date();
+  const remMs = params.expiresAt.getTime() - now.getTime();
+  const isActive = params.status === "pending" && remMs > 0;
+  const remMin = Math.max(1, Math.ceil(remMs / 60000));
+
+  let statusText = "платёж отправлен, но ещё не подтверждён";
+  if (isActive) {
+    statusText = `платёж отправлен, но ещё не подтверждён (осталось: ${remMin} мин.)`;
+  } else if (params.status === "expired" || remMs <= 0) {
+    statusText = "время оплаты истекло";
+  } else if (params.status === "confirmed" || params.status === "manual_confirmed") {
+    statusText = "платёж подтверждён";
+  }
+
+  const createdStr = formatDateTime(params.createdAt);
+  const amountStr = `${formatAmountUzs(params.totalAmount)} сум`;
+
+  return (
+    `Здравствуйте! У меня проблема с оплатой на карту.\n` +
+    `Номер заявки: #${params.requestId}\n` +
+    `Товар: ${params.itemTitle}\n` +
+    `Сумма: ${amountStr}\n` +
+    `Время создания: ${createdStr}\n` +
+    `Статус: ${statusText}.\n` +
+    `Прошу проверить оплату.`
+  );
+}
+
+export function buildCardPaymentSupportUrl(params: CardPaymentSupportParams): string {
+  const fallbackUsername = "Aiobuna_support";
+  const rawAdmin = (params.adminUsername || "").replace(/^@/, "").trim() || fallbackUsername;
+  const text = buildCardPaymentSupportText(params);
+  return `https://t.me/${rawAdmin}?text=${encodeURIComponent(text)}`;
 }
 
 /**

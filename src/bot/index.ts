@@ -63,7 +63,17 @@ import {
   calculateVariantBoosterPrice,
   buildTelegramBoostUrl,
 } from "../lib/domain/channel-boosts";
-import { canAccessCardPayment, getCardPaymentConfig, generateUniqueAmount, claimPaymentCancellation, claimPaymentExpiration } from "../lib/domain/card-payment";
+import {
+  canAccessCardPayment,
+  getCardPaymentConfig,
+  generateUniqueAmount,
+  claimPaymentCancellation,
+  claimPaymentExpiration,
+  calculatePaymentExpiry,
+  CARD_PREMIUM_EMOJI_1,
+  CARD_PREMIUM_EMOJI_2,
+  buildCardPaymentSupportUrl,
+} from "../lib/domain/card-payment";
 import { startHumoMonitor, registerPaymentConfirmedHandler, triggerImmediateCheck, getHumoMonitorStatus } from "../lib/services/humo-monitor";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
@@ -1849,7 +1859,7 @@ async function appendCardPayButtons(
     kb.text(stripLeadEmoji(t(lang, "pay_stars", { n: soumToStars(total) })), `tstar_buy:${total}:${variantId}:${qty}`).icon(STARS_BTN_EMOJI).row();
     // Card payment button (HUMO) — gated by PAYMENT_MONITOR_MODE
     if (canAccessCardPayment(userTgId)) {
-      kb.text(stripLeadEmoji(t(lang, "btn_pay_card")), `pay_card:${variantId}:${qty}`).row();
+      kb.text(stripLeadEmoji(t(lang, "btn_pay_card")), `pay_card:${variantId}:${qty}`).icon(CARD_PREMIUM_EMOJI_1).row();
     }
     const adminUser = (await setting("support_username", "Aiobuna_support")).replace(/^@/, "");
     kb.url(stripLeadEmoji(t(lang, "admin_topup")), `https://t.me/${adminUser}?text=${encodeURIComponent(`${label} — ${money(total, lang)}`)}`).icon(ADMIN_BTN_EMOJI).row();
@@ -2962,7 +2972,7 @@ async function showBankPicker(
     }
     // Card payment button (HUMO) — gated by PAYMENT_MONITOR_MODE
     if (canAccessCardPayment(user.tgId)) {
-      kb.text(stripLeadEmoji(t(lang, "btn_pay_card")), `pay_card:${v.id}:${qty}${suffix}`).row();
+      kb.text(stripLeadEmoji(t(lang, "btn_pay_card")), `pay_card:${v.id}:${qty}${suffix}`).icon(CARD_PREMIUM_EMOJI_1).row();
     }
     // Contact admin: a URL button that opens the admin's personal chat with the
     // product name pre-filled, so the customer only has to hit send.
@@ -7317,7 +7327,8 @@ bot.on("callback_query:data", async (ctx) => {
       const baseAmount = bulkTotal(eff.price, qty, parseBulkPrices(v.bulkPrices || ""));
       try {
         const { extraAmount, totalAmount } = await generateUniqueAmount(baseAmount, config.cardLast4, db);
-        const expiresAt = new Date(Date.now() + config.ttlSeconds * 1000);
+        const createdAt = new Date();
+        const expiresAt = calculatePaymentExpiry(createdAt, config.ttlSeconds);
         const request = await db.cardPaymentRequest.create({
           data: {
             userId: user.id,
@@ -7329,6 +7340,7 @@ bot.on("callback_query:data", async (ctx) => {
             cardLast4: config.cardLast4,
             cardNumber: config.cardNumber,
             status: "pending",
+            createdAt,
             expiresAt,
             chatId: user.tgId,
             targetUsername: targetUsername ?? null,
@@ -7337,10 +7349,21 @@ bot.on("callback_query:data", async (ctx) => {
         });
         const formatSum = (n: number) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
         const cardDigitsOnly = config.cardDigitsOnly || config.cardNumber.replace(/\s+/g, "");
+        const supportUrl = buildCardPaymentSupportUrl({
+          adminUsername: adminUser,
+          requestId: request.id,
+          itemTitle,
+          totalAmount,
+          createdAt,
+          expiresAt,
+          status: "pending",
+          now: createdAt,
+        });
         const kb = new InlineKeyboard();
         kb.add({ text: t(lang, "btn_copy_card"), copy_text: { text: cardDigitsOnly } }).row();
         kb.add({ text: t(lang, "btn_copy_amount"), copy_text: { text: String(totalAmount) } }).row();
         kb.text(t(lang, "btn_check_payment"), `card_chk:${request.id}`).row();
+        kb.url(t(lang, "btn_contact_admin"), supportUrl).row();
         const msg = await ctx.reply(
           t(lang, "card_pay_instructions", {
             item: itemTitle,
@@ -7364,7 +7387,7 @@ bot.on("callback_query:data", async (ctx) => {
     if (tag === "card_chk") {
       const requestId = Number(rest[0]);
       if (!requestId) return ctx.answerCallbackQuery().catch(() => {});
-      const result = await triggerImmediateCheck(requestId, db);
+      const result = await triggerImmediateCheck(requestId, db, lang);
       if (result.isConfirmed) {
         await ctx.answerCallbackQuery({ text: "✅ Оплата подтверждена!", show_alert: true }).catch(() => {});
       } else {
@@ -9118,7 +9141,7 @@ async function expireCardPaymentRequests() {
     take: 20,
   });
   for (const req of expired) {
-    const claimed = await claimPaymentExpiration(db, req.id);
+    const claimed = await claimPaymentExpiration(db, req.id, now);
     if (!claimed) continue;
     // Delete the requisites message
     if (req.chatId && req.messageId) {
@@ -9129,9 +9152,23 @@ async function expireCardPaymentRequests() {
       const user = await db.botUser.findUnique({ where: { tgId: req.chatId } });
       const lang = user?.lang ?? "ru";
       const config = getCardPaymentConfig();
-      const adminUser = config.adminUsername || "Aiobuna_support";
+      const adminUser = (await setting("support_username", "Aiobuna_support")).replace(/^@/, "") || config.adminUsername || "Aiobuna_support";
+      const v = await db.variant.findUnique({ where: { id: req.variantId }, include: { plan: { include: { product: true } } } });
+      const pt = v?.plan?.product ? await pick3(v.plan.product.titleRu, v.plan.product.titleEn, v.plan.product.titleUz, lang) : "Товар";
+      const vt = v ? await locName(v.titleRu, v.titleUz, lang) : "";
+      const itemTitle = formatItemTitle(pt, vt);
+      const supportUrl = buildCardPaymentSupportUrl({
+        adminUsername: adminUser,
+        requestId: req.id,
+        itemTitle,
+        totalAmount: req.totalAmount,
+        createdAt: req.createdAt,
+        expiresAt: req.expiresAt,
+        status: "expired",
+        now,
+      });
       const kb = new InlineKeyboard();
-      kb.url(t(lang, "btn_contact_admin"), `https://t.me/${adminUser}`).row();
+      kb.url(t(lang, "btn_contact_admin"), supportUrl).row();
       kb.text(t(lang, "to_shop"), "m:0:all").row();
       await bot.api.sendMessage(req.chatId, t(lang, "card_pay_expired"), {
         parse_mode: "HTML",

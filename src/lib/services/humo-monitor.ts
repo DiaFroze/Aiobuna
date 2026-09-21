@@ -396,7 +396,8 @@ export async function processBankMessage(
  */
 export async function triggerImmediateCheck(
   requestId: number,
-  db: any
+  db: any,
+  lang: string = "ru"
 ): Promise<{ isConfirmed: boolean; message: string }> {
   const req = await db.cardPaymentRequest.findUnique({ where: { id: requestId } });
   if (!req) return { isConfirmed: false, message: "Заявка не найдена." };
@@ -406,7 +407,8 @@ export async function triggerImmediateCheck(
   if (req.status === "cancelled") {
     return { isConfirmed: false, message: "Заявка была отменена." };
   }
-  if (req.status === "expired") {
+  const now = new Date();
+  if (req.status === "expired" || (req.expiresAt && req.expiresAt.getTime() <= now.getTime())) {
     return { isConfirmed: false, message: "Срок действия заявки (5 минут) истёк." };
   }
 
@@ -435,8 +437,22 @@ export async function triggerImmediateCheck(
     return { isConfirmed: true, message: "Оплата успешно подтверждена!" };
   }
 
+  const currentReq = freshReq || req;
+  const remMs = currentReq.expiresAt.getTime() - Date.now();
+  if (remMs <= 0 || currentReq.status === "expired") {
+    return { isConfirmed: false, message: "Срок действия заявки (5 минут) истёк." };
+  }
+
+  const remMin = Math.max(1, Math.ceil(remMs / 60000));
+  const l = lang === "uz" || lang === "en" ? lang : "ru";
+  const messages: Record<string, string> = {
+    ru: `Платёж пока не найден. Заявка активна, осталось: ${remMin} мин. Повторно переводить деньги не нужно.`,
+    uz: `To‘lov hozircha topilmadi. Ariza faol, qoldi: ${remMin} daqiqa. Pulni qayta o‘tkazish shart emas.`,
+    en: `Payment not found yet. Request is active, remaining: ${remMin} min. No need to send money again.`,
+  };
+
   return {
     isConfirmed: false,
-    message: "Платёж пока не поступил от банка. Обычно уведомление приходит в течение 10–60 секунд.",
+    message: messages[l] || messages.ru,
   };
 }

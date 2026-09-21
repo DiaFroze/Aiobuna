@@ -10,12 +10,23 @@ import {
   getEnvTolerant,
   maskCardNumber,
   maskChatId,
+  calculatePaymentExpiry,
+  CARD_PREMIUM_EMOJI_1,
+  CARD_PREMIUM_EMOJI_2,
+  CARD_PAY_BUTTON_TEXT,
+  CARD_PAY_BUTTON_HTML,
+  renderCardPayButtonHtml,
+  buildCardPaymentSupportText,
+  buildCardPaymentSupportUrl,
+  formatAmountUzs,
 } from "../src/lib/domain/card-payment";
 import {
   processBankMessage,
   isMatchingChatId,
   getHumoMonitorStatus,
+  triggerImmediateCheck,
 } from "../src/lib/services/humo-monitor";
+import { t } from "../src/bot/i18n";
 
 // In-memory fake database simulating Prisma transactions, CAS, and BotSetting storage
 class FakeCardDb {
@@ -73,8 +84,12 @@ class FakeCardDb {
             : args.where.status
             ? r.status === args.where.status
             : true;
+        const matchesExpires =
+          args.where.expiresAt?.lte
+            ? r.expiresAt <= args.where.expiresAt.lte
+            : true;
 
-        if (matchesId && matchesStatus) {
+        if (matchesId && matchesStatus && matchesExpires) {
           Object.assign(r, args.data);
           count++;
         }
@@ -399,7 +414,7 @@ describe("Card Payment Domain & Service", () => {
     });
 
     it("expires pending request atomically", async () => {
-      db.cardPaymentRequests.push({ id: 12, status: "pending" });
+      db.cardPaymentRequests.push({ id: 12, status: "pending", expiresAt: new Date(Date.now() - 1000) });
       const first = await claimPaymentExpiration(db, 12);
       expect(first).toBe(true);
       expect(db.cardPaymentRequests[0].status).toBe("expired");
@@ -530,6 +545,435 @@ describe("Card Payment Domain & Service", () => {
       expect(db.cardPaymentRequests[0].status).toBe("pending");
       expect(db.bankNotifications[0].status).toBe("ignored");
       expect(db.bankNotifications[0].operationType).toBe("debit");
+    });
+  });
+
+  describe("Fixed-time Expiration & Strict 5-Minute TTL", () => {
+    it("strictly calculates expiresAt as createdAt + ttlSeconds * 1000", () => {
+      const createdAt = new Date("2026-09-22T10:00:00.000Z");
+      const expiresAt = calculatePaymentExpiry(createdAt, 300);
+      expect(expiresAt.getTime() - createdAt.getTime()).toBe(300 * 1000);
+      expect(expiresAt.toISOString()).toBe("2026-09-22T10:05:00.000Z");
+    });
+
+    it("leaves request as pending after 1 minute (60s)", async () => {
+      const createdAt = new Date("2026-09-22T10:00:00.000Z");
+      const expiresAt = calculatePaymentExpiry(createdAt, 300);
+
+      db.cardPaymentRequests.push({
+        id: 201,
+        userId: 1,
+        variantId: 10,
+        qty: 1,
+        totalAmount: 50020,
+        cardLast4: "5678",
+        status: "pending",
+        createdAt,
+        expiresAt,
+      });
+
+      // 1 minute later
+      const timeAt1Min = new Date(createdAt.getTime() + 60 * 1000);
+      const expired = await claimPaymentExpiration(db, 201, timeAt1Min);
+
+      expect(expired).toBe(false);
+      expect(db.cardPaymentRequests[0].status).toBe("pending");
+    });
+
+    it("leaves request as pending after 4 minutes 59 seconds (299s)", async () => {
+      const createdAt = new Date("2026-09-22T10:00:00.000Z");
+      const expiresAt = calculatePaymentExpiry(createdAt, 300);
+
+      db.cardPaymentRequests.push({
+        id: 202,
+        userId: 1,
+        variantId: 10,
+        qty: 1,
+        totalAmount: 50020,
+        cardLast4: "5678",
+        status: "pending",
+        createdAt,
+        expiresAt,
+      });
+
+      // 4 minutes 59 seconds later
+      const timeAt4m59s = new Date(createdAt.getTime() + 299 * 1000);
+      const expired = await claimPaymentExpiration(db, 202, timeAt4m59s);
+
+      expect(expired).toBe(false);
+      expect(db.cardPaymentRequests[0].status).toBe("pending");
+    });
+
+    it("atomically transitions request to expired after 5 minutes 1 second (301s)", async () => {
+      const createdAt = new Date("2026-09-22T10:00:00.000Z");
+      const expiresAt = calculatePaymentExpiry(createdAt, 300);
+
+      db.cardPaymentRequests.push({
+        id: 203,
+        userId: 1,
+        variantId: 10,
+        qty: 1,
+        totalAmount: 50020,
+        cardLast4: "5678",
+        status: "pending",
+        createdAt,
+        expiresAt,
+      });
+
+      // 5 minutes 1 second later
+      const timeAt5m1s = new Date(createdAt.getTime() + 301 * 1000);
+      const expired = await claimPaymentExpiration(db, 203, timeAt5m1s);
+
+      expect(expired).toBe(true);
+      expect(db.cardPaymentRequests[0].status).toBe("expired");
+    });
+
+    it("confirmed request never transitions to expired even after TTL expires", async () => {
+      const createdAt = new Date("2026-09-22T10:00:00.000Z");
+      const expiresAt = calculatePaymentExpiry(createdAt, 300);
+
+      db.cardPaymentRequests.push({
+        id: 204,
+        userId: 1,
+        variantId: 10,
+        qty: 1,
+        totalAmount: 50020,
+        cardLast4: "5678",
+        status: "confirmed",
+        createdAt,
+        expiresAt,
+      });
+
+      const timeAt10m = new Date(createdAt.getTime() + 600 * 1000);
+      const expired = await claimPaymentExpiration(db, 204, timeAt10m);
+
+      expect(expired).toBe(false);
+      expect(db.cardPaymentRequests[0].status).toBe("confirmed");
+    });
+
+    it("repeated timer run does not modify already expired request", async () => {
+      const createdAt = new Date("2026-09-22T10:00:00.000Z");
+      const expiresAt = calculatePaymentExpiry(createdAt, 300);
+
+      db.cardPaymentRequests.push({
+        id: 205,
+        userId: 1,
+        variantId: 10,
+        qty: 1,
+        totalAmount: 50020,
+        cardLast4: "5678",
+        status: "pending",
+        createdAt,
+        expiresAt,
+      });
+
+      const timeAt5m1s = new Date(createdAt.getTime() + 301 * 1000);
+      const firstRun = await claimPaymentExpiration(db, 205, timeAt5m1s);
+      expect(firstRun).toBe(true);
+      expect(db.cardPaymentRequests[0].status).toBe("expired");
+
+      // Repeated run
+      const secondRun = await claimPaymentExpiration(db, 205, timeAt5m1s);
+      expect(secondRun).toBe(false);
+      expect(db.cardPaymentRequests[0].status).toBe("expired");
+    });
+
+    it("process restart does not shorten deadline", () => {
+      const createdAt = new Date("2026-09-22T10:00:00.000Z");
+      const expiresAt = calculatePaymentExpiry(createdAt, 300);
+
+      // Simulate state re-loaded from database in a fresh process instance
+      const freshDb = new FakeCardDb();
+      freshDb.cardPaymentRequests.push({
+        id: 206,
+        status: "pending",
+        createdAt,
+        expiresAt,
+      });
+
+      const checkTimeAt2m = new Date(createdAt.getTime() + 120 * 1000);
+      const remainingMs = expiresAt.getTime() - checkTimeAt2m.getTime();
+
+      expect(remainingMs).toBe(180 * 1000); // exactly 3 minutes remaining
+      expect(expiresAt.getTime() - createdAt.getTime()).toBe(300 * 1000);
+    });
+
+    it("supports CARD_PAYMENT_TTL_SECOND backward compatibility alias", () => {
+      delete process.env.CARD_PAYMENT_TTL_SECONDS;
+      process.env.CARD_PAYMENT_TTL_SECOND = "250";
+      expect(getCardPaymentConfig().ttlSeconds).toBe(250);
+
+      process.env.CARD_PAYMENT_TTL_SECONDS = "350";
+      expect(getCardPaymentConfig().ttlSeconds).toBe(350);
+
+      delete process.env.CARD_PAYMENT_TTL_SECOND;
+      delete process.env.CARD_PAYMENT_TTL_SECONDS;
+      expect(getCardPaymentConfig().ttlSeconds).toBe(300); // default
+    });
+  });
+
+  describe("Confirmation vs Expiration Race Condition", () => {
+    it("if confirmed first, claimPaymentExpiration fails", async () => {
+      const createdAt = new Date("2026-09-22T10:00:00.000Z");
+      const expiresAt = calculatePaymentExpiry(createdAt, 300);
+
+      db.cardPaymentRequests.push({
+        id: 301,
+        status: "pending",
+        createdAt,
+        expiresAt,
+      });
+
+      db.bankNotifications.push({
+        id: 501,
+        status: "unmatched",
+      });
+
+      // Confirm succeeds
+      const confirmed = await claimPaymentConfirmation(db, 301, 501);
+      expect(confirmed).toBe(true);
+
+      // Now timer tries to expire
+      const timePastTtl = new Date(createdAt.getTime() + 350 * 1000);
+      const expired = await claimPaymentExpiration(db, 301, timePastTtl);
+
+      expect(expired).toBe(false);
+      expect(db.cardPaymentRequests[0].status).toBe("confirmed");
+    });
+
+    it("if expired first, claimPaymentConfirmation fails", async () => {
+      const createdAt = new Date("2026-09-22T10:00:00.000Z");
+      const expiresAt = calculatePaymentExpiry(createdAt, 300);
+
+      db.cardPaymentRequests.push({
+        id: 302,
+        status: "pending",
+        createdAt,
+        expiresAt,
+      });
+
+      db.bankNotifications.push({
+        id: 502,
+        status: "unmatched",
+      });
+
+      // Expire succeeds past TTL
+      const timePastTtl = new Date(createdAt.getTime() + 301 * 1000);
+      const expired = await claimPaymentExpiration(db, 302, timePastTtl);
+      expect(expired).toBe(true);
+
+      // Now confirmation fails because request is no longer pending
+      const confirmed = await claimPaymentConfirmation(db, 302, 502);
+      expect(confirmed).toBe(false);
+      expect(db.cardPaymentRequests[0].status).toBe("expired");
+    });
+  });
+
+  describe("User On-Demand Check (triggerImmediateCheck)", () => {
+    it("returns active message with remaining minutes when payment not found yet", async () => {
+      const now = Date.now();
+      const expiresAt = new Date(now + 240 * 1000); // 4 minutes left
+
+      db.cardPaymentRequests.push({
+        id: 401,
+        status: "pending",
+        createdAt: new Date(now - 60 * 1000),
+        expiresAt,
+      });
+
+      const resRu = await triggerImmediateCheck(401, db, "ru");
+      expect(resRu.isConfirmed).toBe(false);
+      expect(resRu.message).toBe("Платёж пока не найден. Заявка активна, осталось: 4 мин. Повторно переводить деньги не нужно.");
+
+      const resUz = await triggerImmediateCheck(401, db, "uz");
+      expect(resUz.isConfirmed).toBe(false);
+      expect(resUz.message).toBe("To‘lov hozircha topilmadi. Ariza faol, qoldi: 4 daqiqa. Pulni qayta o‘tkazish shart emas.");
+
+      const resEn = await triggerImmediateCheck(401, db, "en");
+      expect(resEn.isConfirmed).toBe(false);
+      expect(resEn.message).toBe("Payment not found yet. Request is active, remaining: 4 min. No need to send money again.");
+
+      // Verify expiresAt was not modified / extended
+      expect(db.cardPaymentRequests[0].expiresAt.getTime()).toBe(expiresAt.getTime());
+      expect(db.cardPaymentRequests[0].status).toBe("pending");
+    });
+
+    it("returns expired message if request expired", async () => {
+      const now = Date.now();
+      db.cardPaymentRequests.push({
+        id: 402,
+        status: "expired",
+        createdAt: new Date(now - 400 * 1000),
+        expiresAt: new Date(now - 100 * 1000),
+      });
+
+      const res = await triggerImmediateCheck(402, db, "ru");
+      expect(res.isConfirmed).toBe(false);
+      expect(res.message).toContain("истёк");
+    });
+
+    it("returns confirmed message if request is already confirmed", async () => {
+      db.cardPaymentRequests.push({
+        id: 403,
+        status: "confirmed",
+        expiresAt: new Date(Date.now() + 100000),
+      });
+
+      const res = await triggerImmediateCheck(403, db, "ru");
+      expect(res.isConfirmed).toBe(true);
+      expect(res.message).toContain("подтверждена");
+    });
+  });
+
+  describe("Ready-Made Admin Support Link & Secrets Protection", () => {
+    it("generates correct support text with all required fields when request is active", () => {
+      const createdAt = new Date("2026-09-22T12:00:00.000Z");
+      const expiresAt = new Date("2026-09-22T12:05:00.000Z");
+      const now = new Date("2026-09-22T12:01:00.000Z"); // 4 min remaining
+
+      const text = buildCardPaymentSupportText({
+        adminUsername: "Aiobuna_support",
+        requestId: 123,
+        itemTitle: "Sinov Mahsuloti",
+        totalAmount: 6053,
+        createdAt,
+        expiresAt,
+        status: "pending",
+        now,
+      });
+
+      expect(text).toContain("Здравствуйте! У меня проблема с оплатой на карту.");
+      expect(text).toContain("Номер заявки: #123");
+      expect(text).toContain("Товар: Sinov Mahsuloti");
+      expect(text).toContain("Сумма: 6 053 сум");
+      expect(text).toContain("Время создания: 2026-09-22");
+      expect(text).toContain("Статус: платёж отправлен, но ещё не подтверждён (осталось: 4 мин.).");
+      expect(text).toContain("Прошу проверить оплату.");
+    });
+
+    it("generates correct support text when request is expired", () => {
+      const createdAt = new Date("2026-09-22T12:00:00.000Z");
+      const expiresAt = new Date("2026-09-22T12:05:00.000Z");
+      const now = new Date("2026-09-22T12:06:00.000Z"); // expired
+
+      const text = buildCardPaymentSupportText({
+        adminUsername: "Aiobuna_support",
+        requestId: 124,
+        itemTitle: "Telegram Premium 12 oy",
+        totalAmount: 350050,
+        createdAt,
+        expiresAt,
+        status: "expired",
+        now,
+      });
+
+      expect(text).toContain("Номер заявки: #124");
+      expect(text).toContain("Товар: Telegram Premium 12 oy");
+      expect(text).toContain("Сумма: 350 050 сум");
+      expect(text).toContain("Статус: время оплаты истекло.");
+    });
+
+    it("generates url-encoded telegram link without secrets", () => {
+      const createdAt = new Date("2026-09-22T12:00:00.000Z");
+      const expiresAt = new Date("2026-09-22T12:05:00.000Z");
+
+      const url = buildCardPaymentSupportUrl({
+        adminUsername: "@custom_admin",
+        requestId: 125,
+        itemTitle: "Gemini AI Pro",
+        totalAmount: 50077,
+        createdAt,
+        expiresAt,
+        status: "pending",
+      });
+
+      expect(url).toMatch(/^https:\/\/t\.me\/custom_admin\?text=/);
+      expect(url).toContain(encodeURIComponent("Номер заявки: #125"));
+      expect(url).toContain(encodeURIComponent("Товар: Gemini AI Pro"));
+
+      // NEVER leak secrets in link or message
+      expect(url).not.toContain("9860");
+      expect(url).not.toContain("session");
+      expect(url).not.toContain("api_hash");
+      expect(url).not.toContain("token");
+    });
+
+    it("uses default fallback username when admin username is not configured", () => {
+      const url = buildCardPaymentSupportUrl({
+        adminUsername: "",
+        requestId: 126,
+        itemTitle: "Test",
+        totalAmount: 10000,
+        createdAt: new Date(),
+        expiresAt: new Date(),
+        status: "pending",
+      });
+
+      expect(url).toMatch(/^https:\/\/t\.me\/Aiobuna_support\?text=/);
+    });
+  });
+
+  describe("Payment Instructions & Button Formatting", () => {
+    it("instruction text in uz contains exact total without formula", () => {
+      const text = t("uz", "card_pay_instructions", {
+        item: "Gemini AI Pro",
+        qty: "1",
+        cardNumber: "9860 6067 5671 8767",
+        totalAmount: "50 077",
+        baseAmount: "50 000",
+        extraAmount: "77",
+      });
+
+      expect(text).toContain("To‘lov uchun aniq summa: 50 077 so‘m");
+      expect(text).toContain("Faqat <b>50 077 so‘m</b> yuboring.");
+      expect(text).toContain("<b>50 000 so‘m yubormang</b>");
+      expect(text).not.toContain("50 000 + 77");
+      expect(text).not.toContain("extraAmount");
+    });
+
+    it("instruction text in ru contains exact total without formula", () => {
+      const text = t("ru", "card_pay_instructions", {
+        item: "Gemini AI Pro",
+        qty: "1",
+        cardNumber: "9860 6067 5671 8767",
+        totalAmount: "50 077",
+        baseAmount: "50 000",
+        extraAmount: "77",
+      });
+
+      expect(text).toContain("Точная сумма к оплате: 50 077 сум");
+      expect(text).toContain("Переводите ровно <b>50 077 сум</b>.");
+      expect(text).toContain("<b>Не отправляйте 50 000 сум</b>");
+      expect(text).not.toContain("50 000 + 77");
+      expect(text).not.toContain("extraAmount");
+    });
+
+    it("instruction text in en contains exact total without formula", () => {
+      const text = t("en", "card_pay_instructions", {
+        item: "Gemini AI Pro",
+        qty: "1",
+        cardNumber: "9860 6067 5671 8767",
+        totalAmount: "50 077",
+        baseAmount: "50 000",
+        extraAmount: "77",
+      });
+
+      expect(text).toContain("Exact amount to pay: 50 077 UZS");
+      expect(text).toContain("Transfer strictly <b>50 077 UZS</b>.");
+      expect(text).toContain("<b>Do not send 50 000 UZS</b>");
+      expect(text).not.toContain("50 000 + 77");
+    });
+
+    it("button text and premium custom emojis are properly configured", () => {
+      expect(CARD_PREMIUM_EMOJI_1).toBe("5472296756152644790");
+      expect(CARD_PREMIUM_EMOJI_2).toBe("5346328681075712891");
+
+      expect(t("uz", "btn_pay_card")).toBe("Karta orqali to‘lash 💳 / 💳");
+      expect(t("ru", "btn_pay_card")).toBe("Оплата картой 💳 / 💳");
+      expect(t("en", "btn_pay_card")).toBe("Pay by card 💳 / 💳");
+
+      const htmlUz = renderCardPayButtonHtml("uz");
+      expect(htmlUz).toBe('Karta orqali to‘lash <tg-emoji emoji-id="5472296756152644790">💳</tg-emoji> / <tg-emoji emoji-id="5346328681075712891">💳</tg-emoji>');
     });
   });
 });
