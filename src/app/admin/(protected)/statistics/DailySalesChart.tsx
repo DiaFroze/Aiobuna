@@ -13,18 +13,18 @@ export function DailySalesChart({ days }: DailySalesChartProps) {
   if (days.length === 0) {
     return (
       <div className="card p-8 text-center text-muted text-sm">
-        За выбранный период продаж нет.
+        За выбранный период продаж не зафиксировано.
       </div>
     );
   }
 
-  // Days for chart display: chronological order (oldest to newest left-to-right)
+  // Chronological order for visual chart (left to right)
   const chartDays = [...days].reverse();
   const maxRevenue = Math.max(...days.map((d) => d.revenue), 1);
-  const maxProfit = Math.max(...days.map((d) => Math.max(0, d.profit)), 1);
 
   return (
     <div className="card p-4 sm:p-5 space-y-4">
+      {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
         <div>
           <h2 className="font-semibold text-base sm:text-lg flex items-center gap-2">
@@ -34,22 +34,22 @@ export function DailySalesChart({ days }: DailySalesChartProps) {
             </span>
           </h2>
           <p className="text-xs text-muted mt-0.5">
-            Динамика выручки и прибыли (от старых к новым слева направо)
+            Динамика продаж, затрат на закупку и заработка по дням
           </p>
         </div>
 
         <div className="flex items-center gap-4 text-xs text-muted">
           <div className="flex items-center gap-1.5">
             <span className="w-3 h-3 rounded-sm bg-brand inline-block" />
-            <span>Выручка</span>
+            <span>Продажи</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="w-3 h-3 rounded-sm bg-success inline-block" />
-            <span>Прибыль</span>
+            <span className="w-3 h-3 rounded-sm bg-emerald-500 inline-block" />
+            <span>Заработано</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="w-3 h-3 rounded-sm bg-danger inline-block" />
-            <span>Убыток</span>
+            <span className="w-3 h-3 rounded-sm bg-amber-500/80 inline-block" />
+            <span>Закупка</span>
           </div>
         </div>
       </div>
@@ -59,7 +59,7 @@ export function DailySalesChart({ days }: DailySalesChartProps) {
         <div className="overflow-x-auto pb-2">
           <div
             className="flex items-end gap-2 sm:gap-3 min-w-max h-48 pt-6 px-2"
-            style={{ minWidth: `${Math.max(100, chartDays.length * 48)}px` }}
+            style={{ minWidth: `${Math.max(100, chartDays.length * 52)}px` }}
           >
             {chartDays.map((d) => {
               const revHeight = Math.max(8, (d.revenue / maxRevenue) * 140);
@@ -75,69 +75,61 @@ export function DailySalesChart({ days }: DailySalesChartProps) {
                   onMouseLeave={() => setHoveredDay(null)}
                 >
                   {/* Tooltip on hover */}
-                  <div className="opacity-0 group-hover:opacity-100 transition-opacity absolute bottom-full mb-2 z-20 pointer-events-none bg-surface-1 border border-border shadow-xl rounded-lg p-2.5 text-xs whitespace-nowrap min-w-[160px]">
-                    <div className="font-semibold text-foreground border-b border-border pb-1 mb-1.5">
-                      {d.dateFormatted}
+                  <div className="opacity-0 group-hover:opacity-100 transition-opacity absolute bottom-full mb-2 z-20 pointer-events-none bg-surface-1 border border-border shadow-xl rounded-lg p-2.5 text-xs whitespace-nowrap min-w-[180px]">
+                    <div className="font-semibold text-foreground border-b border-border pb-1 mb-1.5 flex items-center justify-between">
+                      <span>{d.dateFormatted}</span>
+                      <span className="text-muted font-normal">{d.ordersCount} зак.</span>
                     </div>
                     <div className="space-y-1 font-mono text-[11px]">
                       <div className="flex justify-between gap-3 text-muted">
-                        <span>Заказов:</span>
-                        <span className="text-foreground font-semibold">
-                          {d.ordersCount} ({d.itemsCount} шт.)
-                        </span>
-                      </div>
-                      <div className="flex justify-between gap-3 text-muted">
-                        <span>Выручка:</span>
+                        <span>Продажи:</span>
                         <span className="text-brand font-semibold">{formatUzs(d.revenue)}</span>
                       </div>
                       <div className="flex justify-between gap-3 text-muted">
-                        <span>Себестоимость:</span>
-                        <span className="text-foreground">
-                          {d.unknownCostOrders > 0 ? "Неполная" : formatUzs(d.cost)}
-                        </span>
+                        <span>Закупка:</span>
+                        <span className="text-foreground">{formatUzs(d.cost)}</span>
                       </div>
                       <div className="flex justify-between gap-3 text-muted">
-                        <span>Прибыль:</span>
+                        <span>Заработано:</span>
                         <span
                           className={`font-semibold ${
-                            d.unknownCostOrders > 0
-                              ? "text-warning"
-                              : d.profit >= 0
-                              ? "text-success"
-                              : "text-danger"
+                            d.profit >= 0 ? "text-emerald-400" : "text-rose-400"
                           }`}
                         >
-                          {d.unknownCostOrders > 0 ? "Неполные данные" : formatUzs(d.profit)}
+                          {formatUzs(d.profit)}
                         </span>
                       </div>
-                      {d.loss > 0 && (
-                        <div className="flex justify-between gap-3 text-danger font-semibold">
-                          <span>Убыток:</span>
-                          <span>{formatUzs(d.loss)}</span>
+                      {d.payments && d.payments.length > 0 && (
+                        <div className="pt-1 mt-1 border-t border-border/60 text-[10px]">
+                          <div className="text-muted mb-0.5">Оплаты:</div>
+                          {d.payments.map((p) => (
+                            <div key={p.id} className="flex justify-between text-muted">
+                              <span>{p.emoji} {p.name}:</span>
+                              <span className="text-foreground font-semibold">{p.count} зак.</span>
+                            </div>
+                          ))}
                         </div>
                       )}
                     </div>
                   </div>
 
-                  {/* Dual Bar Representation */}
+                  {/* Dual Bar */}
                   <div className="flex items-end gap-1 h-36">
                     {/* Revenue Bar */}
                     <div
                       className="w-3 sm:w-4 rounded-t bg-brand/80 group-hover:bg-brand transition-all"
                       style={{ height: `${revHeight}px` }}
-                      title={`Выручка: ${formatUzs(d.revenue)}`}
+                      title={`Продажи: ${formatUzs(d.revenue)}`}
                     />
                     {/* Profit Bar */}
                     <div
                       className={`w-3 sm:w-4 rounded-t transition-all ${
                         isNegativeProfit
-                          ? "bg-danger/80 group-hover:bg-danger"
-                          : d.unknownCostOrders > 0
-                          ? "bg-warning/80 group-hover:bg-warning"
-                          : "bg-success/80 group-hover:bg-success"
+                          ? "bg-rose-500/80 group-hover:bg-rose-500"
+                          : "bg-emerald-500/80 group-hover:bg-emerald-500"
                       }`}
                       style={{ height: `${profitHeight}px` }}
-                      title={`Прибыль: ${formatUzs(d.profit)}`}
+                      title={`Заработано: ${formatUzs(d.profit)}`}
                     />
                   </div>
 
@@ -152,7 +144,7 @@ export function DailySalesChart({ days }: DailySalesChartProps) {
         </div>
       </div>
 
-      {/* Selected/Hovered Day Quick Card */}
+      {/* Selected Day Bar details */}
       {hoveredDay && (
         <div className="p-3 rounded-lg bg-surface-2/40 border border-border flex flex-wrap items-center justify-between gap-3 text-xs">
           <div className="font-semibold text-foreground">
@@ -160,73 +152,67 @@ export function DailySalesChart({ days }: DailySalesChartProps) {
           </div>
           <div className="flex flex-wrap items-center gap-4 font-mono">
             <span>Заказов: <strong>{hoveredDay.ordersCount}</strong></span>
-            <span>Товаров: <strong>{hoveredDay.itemsCount}</strong></span>
-            <span className="text-brand">Выручка: <strong>{formatUzs(hoveredDay.revenue)}</strong></span>
-            <span>Себестоимость: <strong>{hoveredDay.unknownCostOrders > 0 ? "Неполная" : formatUzs(hoveredDay.cost)}</strong></span>
-            <span className={hoveredDay.unknownCostOrders > 0 ? "text-warning" : hoveredDay.profit >= 0 ? "text-success" : "text-danger"}>
-              Прибыль: <strong>{hoveredDay.unknownCostOrders > 0 ? "Неполная" : formatUzs(hoveredDay.profit)}</strong>
+            <span className="text-brand">Продажи: <strong>{formatUzs(hoveredDay.revenue)}</strong></span>
+            <span>Закупка: <strong>{formatUzs(hoveredDay.cost)}</strong></span>
+            <span className={hoveredDay.profit >= 0 ? "text-emerald-400" : "text-rose-400"}>
+              Заработано: <strong>{formatUzs(hoveredDay.profit)}</strong>
             </span>
           </div>
         </div>
       )}
 
-      {/* Daily Breakdown Table (Newest to Oldest) */}
+      {/* Daily Table (Newest to Oldest) */}
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b text-left text-xs font-semibold text-muted bg-surface-2/40 uppercase tracking-wider">
               <th className="px-4 py-2.5">Дата</th>
               <th className="px-3 py-2.5 text-right">Заказов</th>
-              <th className="px-3 py-2.5 text-right">Единиц</th>
-              <th className="px-3 py-2.5 text-right">Выручка</th>
-              <th className="px-3 py-2.5 text-right">Себестоимость</th>
-              <th className="px-4 py-2.5 text-right">Прибыль</th>
-              <th className="px-3 py-2.5 text-right">Убыток</th>
+              <th className="px-4 py-2.5 text-right">Продажи</th>
+              <th className="px-4 py-2.5 text-right">Закупка</th>
+              <th className="px-4 py-2.5 text-right">Заработано</th>
+              <th className="px-4 py-2.5">Оплаты за день</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
             {days.map((row) => {
-              const hasUnknown = row.unknownCostOrders > 0;
               const isProfitPositive = row.profit >= 0;
 
               return (
                 <tr key={row.dateKey} className="hover:bg-surface-2/30 transition-colors">
-                  <td className="px-4 py-2.5 font-medium font-mono text-xs sm:text-sm">
+                  <td className="px-4 py-2.5 font-medium font-mono text-xs sm:text-sm whitespace-nowrap">
                     {row.dateFormatted}
                   </td>
                   <td className="px-3 py-2.5 text-right font-mono text-xs sm:text-sm">
-                    {row.ordersCount}
+                    {row.ordersCount} ({row.itemsCount} шт.)
                   </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-xs sm:text-sm">
-                    {row.itemsCount}
-                  </td>
-                  <td className="px-3 py-2.5 text-right font-medium font-mono text-xs sm:text-sm text-brand">
+                  <td className="px-4 py-2.5 text-right font-medium font-mono text-xs sm:text-sm text-brand whitespace-nowrap">
                     {formatUzs(row.revenue)}
                   </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-xs sm:text-sm">
-                    {hasUnknown ? (
-                      <span className="text-warning text-xs">
-                        {row.cost > 0 ? formatUzs(row.cost) : "Не указана"} ({row.unknownCostOrders} без с/с)
-                      </span>
-                    ) : (
-                      formatUzs(row.cost)
-                    )}
+                  <td className="px-4 py-2.5 text-right font-mono text-xs sm:text-sm text-muted whitespace-nowrap">
+                    {formatUzs(row.cost)}
                   </td>
-                  <td className="px-4 py-2.5 text-right font-semibold font-mono text-xs sm:text-sm">
-                    {hasUnknown ? (
-                      <span className="text-warning text-xs">Неполные данные</span>
-                    ) : (
-                      <span className={isProfitPositive ? "text-success" : "text-danger"}>
-                        {formatUzs(row.profit)}
-                      </span>
-                    )}
+                  <td className="px-4 py-2.5 text-right font-semibold font-mono text-xs sm:text-sm whitespace-nowrap">
+                    <span className={isProfitPositive ? "text-emerald-400" : "text-rose-400"}>
+                      {formatUzs(row.profit)}
+                    </span>
                   </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-xs sm:text-sm">
-                    {row.loss > 0 ? (
-                      <span className="text-danger font-semibold">{formatUzs(row.loss)}</span>
-                    ) : (
-                      <span className="text-muted">0 сум</span>
-                    )}
+                  <td className="px-4 py-2.5 text-xs">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {row.payments && row.payments.length > 0 ? (
+                        row.payments.map((p) => (
+                          <span
+                            key={p.id}
+                            className="badge bg-surface-2 text-foreground font-mono text-[11px] px-1.5 py-0.5"
+                            title={`${p.name}: ${formatUzs(p.sum)}`}
+                          >
+                            {p.emoji} {p.name} ({p.count})
+                          </span>
+                        ))
+                      ) : (
+                        <span className="text-muted">—</span>
+                      )}
+                    </div>
                   </td>
                 </tr>
               );

@@ -11,6 +11,11 @@ import {
   toTashkentDateKey,
   formatTashkentDate,
   RawSalesOrder,
+  normalizePaymentMethod,
+  groupSalesByPaymentMethod,
+  normalizeSourceApi,
+  groupSalesBySource,
+  orderCost,
 } from "@/lib/domain/sales-statistics";
 
 describe("Sales Statistics Domain Helpers", () => {
@@ -116,6 +121,7 @@ describe("Sales Statistics Domain Helpers", () => {
         totalItems: 0,
         totalRevenue: 0,
         totalCost: 0,
+        profit: 0,
         incompleteCostOrders: 0,
         grossProfit: 0,
         netProfit: 0,
@@ -351,6 +357,154 @@ describe("Sales Statistics Domain Helpers", () => {
       expect(unk).toBeDefined();
       expect(unk?.isMissingCost).toBe(true);
       expect(unk?.unknownCostCount).toBe(1);
+    });
+  });
+
+  describe("normalizePaymentMethod & groupSalesByPaymentMethod", () => {
+    it("correctly identifies payment methods", () => {
+      expect(normalizePaymentMethod("click").name).toBe("Click");
+      expect(normalizePaymentMethod("payme").name).toBe("Payme");
+      expect(normalizePaymentMethod("stars").name).toBe("Telegram Stars");
+      expect(normalizePaymentMethod("binance").name).toBe("Binance Pay");
+      expect(normalizePaymentMethod("receipt").name).toBe("Чек / Перевод");
+      expect(normalizePaymentMethod("admin").name).toBe("Администратор");
+      expect(normalizePaymentMethod(null).name).toBe("Баланс бота");
+      expect(normalizePaymentMethod("").name).toBe("Баланс бота");
+    });
+
+    it("groups sales by payment method accurately with percentages", () => {
+      const orders: RawSalesOrder[] = [
+        {
+          id: 1,
+          titleRu: "Item 1",
+          priceUsdt: 60000,
+          priceUzs: 60000,
+          costPriceUzs: 20000,
+          status: "delivered",
+          paymentMethod: "click",
+          createdAt: new Date(),
+        },
+        {
+          id: 2,
+          titleRu: "Item 2",
+          priceUsdt: 40000,
+          priceUzs: 40000,
+          costPriceUzs: 10000,
+          status: "delivered",
+          paymentMethod: "payme",
+          createdAt: new Date(),
+        },
+        {
+          id: 3,
+          titleRu: "Item 3",
+          priceUsdt: 100000,
+          priceUzs: 100000,
+          costPriceUzs: 50000,
+          status: "delivered",
+          paymentMethod: "click",
+          createdAt: new Date(),
+        },
+      ];
+
+      const payments = groupSalesByPaymentMethod(orders);
+      expect(payments.length).toBe(2);
+
+      const click = payments.find((p) => p.id === "click");
+      expect(click).toBeDefined();
+      expect(click?.ordersCount).toBe(2);
+      expect(click?.totalRevenue).toBe(160000);
+      expect(click?.sharePct).toBe(80); // 160k / 200k = 80%
+
+      const payme = payments.find((p) => p.id === "payme");
+      expect(payme).toBeDefined();
+      expect(payme?.ordersCount).toBe(1);
+      expect(payme?.totalRevenue).toBe(40000);
+      expect(payme?.sharePct).toBe(20);
+    });
+  });
+
+  describe("normalizeSourceApi & groupSalesBySource", () => {
+    it("normalizes API source slugs and fallback channels", () => {
+      expect(normalizeSourceApi("vex").name).toBe("Vex Reseller API");
+      expect(normalizeSourceApi("qamify").name).toBe("Qamify API");
+      expect(normalizeSourceApi("stock").name).toBe("Склад (ключи)");
+      expect(normalizeSourceApi("manual").name).toBe("Ручная выдача");
+      expect(normalizeSourceApi("fragment").name).toBe("Telegram Fragment");
+    });
+
+    it("groups sales and procurement costs by source API", () => {
+      const orders: RawSalesOrder[] = [
+        {
+          id: 1,
+          titleRu: "Item 1",
+          priceUsdt: 80000,
+          priceUzs: 80000,
+          costPriceUzs: 35000,
+          status: "delivered",
+          source: "vex",
+          createdAt: new Date(),
+        },
+        {
+          id: 2,
+          titleRu: "Item 2",
+          priceUsdt: 50000,
+          priceUzs: 50000,
+          costPriceUzs: 0,
+          status: "delivered",
+          source: "stock",
+          createdAt: new Date(),
+        },
+      ];
+
+      const sources = groupSalesBySource(orders);
+      expect(sources.length).toBe(2);
+
+      const vex = sources.find((s) => s.id === "vex");
+      expect(vex).toBeDefined();
+      expect(vex?.totalRevenue).toBe(80000);
+      expect(vex?.totalCost).toBe(35000);
+      expect(vex?.profit).toBe(45000);
+
+      const stock = sources.find((s) => s.id === "stock");
+      expect(stock).toBeDefined();
+      expect(stock?.totalRevenue).toBe(50000);
+      expect(stock?.profit).toBe(50000);
+    });
+  });
+
+  describe("orderCost fallback resolution", () => {
+    it("resolves explicit costPriceUzs first", () => {
+      const order: RawSalesOrder = {
+        id: 1,
+        titleRu: "Test",
+        priceUsdt: 100000,
+        priceUzs: 100000,
+        costPriceUzs: 45000,
+        status: "delivered",
+        createdAt: new Date(),
+        variant: {
+          id: 10,
+          costPriceUzs: 30000,
+        },
+      };
+      expect(orderCost(order)).toBe(45000);
+    });
+
+    it("falls back to variant costPriceUzs if order costPriceUzs is null", () => {
+      const order: RawSalesOrder = {
+        id: 1,
+        titleRu: "Test",
+        priceUsdt: 100000,
+        priceUzs: 100000,
+        costPriceUzs: null,
+        status: "delivered",
+        createdAt: new Date(),
+        variant: {
+          id: 10,
+          costPriceUzs: 32000,
+        },
+      };
+      expect(orderCost(order)).toBe(32000);
     });
   });
 });
