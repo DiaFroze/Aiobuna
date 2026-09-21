@@ -2960,6 +2960,10 @@ async function showBankPicker(
       console.error("[bot] stars link:", (e as Error).message);
       kb.text(starLabel, `tstar_buy:${total}:${v.id}:${qty}${suffix}`).icon(STARS_BTN_EMOJI).row();
     }
+    // Card payment button (HUMO) — gated by PAYMENT_MONITOR_MODE
+    if (canAccessCardPayment(user.tgId)) {
+      kb.text(stripLeadEmoji(t(lang, "btn_pay_card")), `pay_card:${v.id}:${qty}${suffix}`).row();
+    }
     // Contact admin: a URL button that opens the admin's personal chat with the
     // product name pre-filled, so the customer only has to hit send.
     const adminUser = (await setting("support_username", "Aiobuna_support")).replace(/^@/, "");
@@ -7275,17 +7279,35 @@ bot.on("callback_query:data", async (ctx) => {
       await ctx.answerCallbackQuery().catch(() => {});
       const variantId = Number(rest[0]);
       const qty = Number(rest[1]) || 1;
+      const targetUsername = rest[2] || undefined;
+      const recipientTgId = rest[3] || undefined;
+
       if (!canAccessCardPayment(user.tgId)) {
         return ctx.reply(t(lang, "card_pay_unavailable"), { parse_mode: "HTML" }).catch(() => {});
       }
+
       const config = getCardPaymentConfig();
+      const adminUser = config.adminUsername || (await setting("support_username", "Aiobuna_support")).replace(/^@/, "");
+
       if (config.mode === "disabled" || !config.cardNumber || !config.cardLast4) {
-        return ctx.reply(t(lang, "card_pay_unavailable"), { parse_mode: "HTML" }).catch(() => {});
+        const kb = new InlineKeyboard()
+          .url(t(lang, "btn_contact_admin"), `https://t.me/${adminUser}`).row()
+          .text(t(lang, "to_shop"), "m:0:all");
+        return ctx.reply(t(lang, "card_pay_unavailable"), { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
       }
-      const monitorStatus = getHumoMonitorStatus();
-      if (!monitorStatus.isRunning && !monitorStatus.isConfigured) {
-        return ctx.reply(t(lang, "card_pay_unavailable"), { parse_mode: "HTML" }).catch(() => {});
+
+      const monitorStatus = await getHumoMonitorStatus(db);
+      if (!monitorStatus.isRunning) {
+        const kb = new InlineKeyboard()
+          .url(t(lang, "btn_contact_admin"), `https://t.me/${adminUser}`).row()
+          .text(t(lang, "to_shop"), "m:0:all");
+        return ctx.reply(
+          `⚠️ <b>Оплата на карту временно недоступна</b>\n\n` +
+          `Автоматический приём платежей на карту сейчас на техобслуживании (монитор недоступен). Вы можете обратиться к администратору для оформления заказа:`,
+          { parse_mode: "HTML", reply_markup: kb }
+        ).catch(() => {});
       }
+
       const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
       if (!v) return;
       const pt = await pick3(v.plan.product.titleRu, v.plan.product.titleEn, v.plan.product.titleUz, lang);
@@ -7309,14 +7331,15 @@ bot.on("callback_query:data", async (ctx) => {
             status: "pending",
             expiresAt,
             chatId: user.tgId,
+            targetUsername: targetUsername ?? null,
+            recipientTgId: recipientTgId ?? null,
           },
         });
-        const cardDigitsOnly = config.cardNumber.replace(/\s+/g, "");
+        const cardDigitsOnly = config.cardDigitsOnly || config.cardNumber.replace(/\s+/g, "");
         const kb = new InlineKeyboard();
         kb.add({ text: t(lang, "btn_copy_card"), copy_text: { text: cardDigitsOnly } }).row();
         kb.add({ text: t(lang, "btn_copy_amount"), copy_text: { text: String(totalAmount) } }).row();
         kb.text(t(lang, "btn_check_payment"), `card_chk:${request.id}`).row();
-        const adminUser = config.adminUsername || (await setting("support_username", "Aiobuna_support")).replace(/^@/, "");
         kb.url(t(lang, "btn_contact_admin"), `https://t.me/${adminUser}`).row();
         kb.text(t(lang, "btn_cancel_payment"), `card_cancel:${request.id}`).row();
         const msg = await ctx.reply(
@@ -7334,7 +7357,8 @@ bot.on("callback_query:data", async (ctx) => {
         await db.cardPaymentRequest.update({ where: { id: request.id }, data: { messageId: msg.message_id } }).catch(() => {});
       } catch (err: any) {
         console.error("[bot] card payment create error:", err.message);
-        return ctx.reply(t(lang, "card_pay_unavailable"), { parse_mode: "HTML" }).catch(() => {});
+        const kb = new InlineKeyboard().url(t(lang, "btn_contact_admin"), `https://t.me/${adminUser}`).row();
+        return ctx.reply(t(lang, "card_pay_unavailable"), { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
       }
       return;
     }

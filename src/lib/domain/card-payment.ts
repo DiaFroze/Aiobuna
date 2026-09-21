@@ -9,29 +9,150 @@ export interface CardPaymentConfig {
   minExtra: number;
   maxExtra: number;
   cardLast4: string;
-  cardNumber: string;
+  cardNumber: string; // Formatted card number for copy & display
+  cardDigitsOnly: string; // Raw digits without spaces
   adminUsername: string;
   humoChatId: string;
+  // MTProto credentials check (flags and masked values only)
+  apiId: number;
+  hasApiId: boolean;
+  hasApiHash: boolean;
+  hasSession: boolean;
+  hasChatId: boolean;
+  isConfigured: boolean;
+}
+
+/**
+ * Case-insensitive, quote-tolerant, and whitespace-trimming environment variable lookup.
+ * Critical on Linux / Railway where process.env is case-sensitive and values may contain quotes.
+ */
+export function getEnvTolerant(canonicalName: string, aliases: string[] = []): string {
+  const allNames = [canonicalName, ...aliases];
+
+  // 1. Direct match
+  for (const name of allNames) {
+    const val = process.env[name];
+    if (typeof val === "string" && val.trim()) {
+      return sanitizeEnvValue(val);
+    }
+  }
+
+  // 2. Case-insensitive match across all keys
+  const lowerMap = new Map<string, string>();
+  for (const [key, val] of Object.entries(process.env)) {
+    if (typeof val === "string") {
+      lowerMap.set(key.toLowerCase(), val);
+    }
+  }
+
+  for (const name of allNames) {
+    const val = lowerMap.get(name.toLowerCase());
+    if (typeof val === "string" && val.trim()) {
+      return sanitizeEnvValue(val);
+    }
+  }
+
+  return "";
+}
+
+function sanitizeEnvValue(val: string): string {
+  let cleaned = val.trim();
+  // Strip surrounding quotes: "value" or 'value'
+  cleaned = cleaned.replace(/^["']|["']$/g, "").trim();
+  // Strip trailing carriage return if present
+  cleaned = cleaned.replace(/\r$/, "");
+  return cleaned;
+}
+
+/**
+ * Masks a card number safely: outputs only the last 4 digits (e.g. "**** **** **** 1234").
+ * NEVER returns or leaks full 16 digits.
+ */
+export function maskCardNumber(cardNumber: string, cardLast4?: string): string {
+  const last4 = (cardLast4 || cardNumber.replace(/\D/g, "").slice(-4)).trim();
+  if (last4.length === 4) {
+    return `**** **** **** ${last4}`;
+  }
+  return "Не задана";
+}
+
+/**
+ * Masks a Telegram chat ID: e.g. "-1001234567890" -> "-100*****7890".
+ */
+export function maskChatId(chatId: string): string {
+  const str = chatId.trim();
+  if (!str) return "Не настроен";
+  if (str.length <= 6) return str;
+  const prefix = str.startsWith("-100") ? "-100" : str.slice(0, 2);
+  const suffix = str.slice(-4);
+  return `${prefix}*****${suffix}`;
 }
 
 export function getCardPaymentConfig(): CardPaymentConfig {
-  const modeRaw = (process.env.PAYMENT_MONITOR_MODE || "admin_only").trim().toLowerCase();
+  const modeRaw = getEnvTolerant("PAYMENT_MONITOR_MODE", ["payment_monitor_mode", "MONITOR_MODE"]).toLowerCase();
   const mode: PaymentMonitorMode =
     modeRaw === "all" ? "all" : modeRaw === "disabled" ? "disabled" : "admin_only";
 
-  const ttlSeconds = Math.max(60, Number.parseInt(process.env.CARD_PAYMENT_TTL_SECONDS || "300", 10) || 300);
-  const minExtra = Math.max(1, Number.parseInt(process.env.CARD_PAYMENT_MIN_EXTRA || "1", 10) || 1);
-  const maxExtra = Math.max(minExtra, Number.parseInt(process.env.CARD_PAYMENT_MAX_EXTRA || "99", 10) || 99);
+  const ttlSeconds = Math.max(
+    60,
+    Number.parseInt(getEnvTolerant("CARD_PAYMENT_TTL_SECONDS", ["card_payment_ttl_seconds", "CARD_TTL_SECONDS"]) || "300", 10) || 300
+  );
+  const minExtra = Math.max(
+    1,
+    Number.parseInt(getEnvTolerant("CARD_PAYMENT_MIN_EXTRA", ["card_payment_min_extra"]) || "1", 10) || 1
+  );
+  const maxExtra = Math.max(
+    minExtra,
+    Number.parseInt(getEnvTolerant("CARD_PAYMENT_MAX_EXTRA", ["card_payment_max_extra"]) || "99", 10) || 99
+  );
+
+  // Card number and last 4
+  const rawCardNumber = getEnvTolerant("HUMO_CARD_NUMBER", ["humo_card_number", "CARD_NUMBER", "HUMO_CARD"]);
+  const cleanDigits = rawCardNumber.replace(/\D/g, "");
+
+  const rawLast4 = getEnvTolerant("HUMO_CARD_LAST4", ["humo_card_last4", "CARD_LAST4", "HUMO_LAST4"]);
+  let cleanLast4 = rawLast4.replace(/\D/g, "");
+  if (!cleanLast4 && cleanDigits.length >= 4) {
+    cleanLast4 = cleanDigits.slice(-4);
+  }
+
+  const formattedCardNumber =
+    cleanDigits.length === 16
+      ? `${cleanDigits.slice(0, 4)} ${cleanDigits.slice(4, 8)} ${cleanDigits.slice(8, 12)} ${cleanDigits.slice(12, 16)}`
+      : rawCardNumber.trim();
+
+  // Telegram MTProto credentials
+  // Primary: TELEGRAM_API_ID / TELEGRAM_API_HASH
+  // Fallback: Appapi_id / Appapi_hash
+  const rawApiId = getEnvTolerant("TELEGRAM_API_ID", ["Appapi_id", "appapi_id", "telegram_api_id", "API_ID"]);
+  const rawApiHash = getEnvTolerant("TELEGRAM_API_HASH", ["Appapi_hash", "appapi_hash", "telegram_api_hash", "API_HASH"]);
+  const rawSession = getEnvTolerant("TELEGRAM_SESSION", ["telegram_session", "SESSION", "HUMO_SESSION", "STRING_SESSION"]);
+  const humoChatId = getEnvTolerant("HUMO_CHAT_ID", ["humo_chat_id", "CHAT_ID", "HUMO_CHAT"]);
+  const adminUsername = getEnvTolerant("ADMIN_USERNAME", ["admin_username", "SUPPORT_USERNAME"]).replace(/^@/, "");
+
+  const apiId = Number.parseInt(rawApiId, 10) || 0;
+  const hasApiId = apiId > 0;
+  const hasApiHash = Boolean(rawApiHash && rawApiHash.length >= 10);
+  const hasSession = Boolean(rawSession && rawSession.length >= 10);
+  const hasChatId = Boolean(humoChatId && humoChatId.length >= 4);
+  const isConfigured = hasApiId && hasApiHash && hasSession && hasChatId && Boolean(cleanDigits.length >= 12 && cleanLast4.length === 4);
 
   return {
     mode,
     ttlSeconds,
     minExtra,
     maxExtra,
-    cardLast4: (process.env.HUMO_CARD_LAST4 || "").trim(),
-    cardNumber: (process.env.HUMO_CARD_NUMBER || "").trim(),
-    adminUsername: (process.env.ADMIN_USERNAME || "").trim().replace(/^@/, ""),
-    humoChatId: (process.env.HUMO_CHAT_ID || "").trim(),
+    cardLast4: cleanLast4,
+    cardNumber: formattedCardNumber,
+    cardDigitsOnly: cleanDigits,
+    adminUsername,
+    humoChatId,
+    apiId,
+    hasApiId,
+    hasApiHash,
+    hasSession,
+    hasChatId,
+    isConfigured,
   };
 }
 
@@ -40,6 +161,8 @@ export function getCardPaymentConfig(): CardPaymentConfig {
  * - "disabled": no one can access
  * - "admin_only": only IDs in PAYMENT_ADMIN_IDS
  * - "all": open to everyone
+ *
+ * Strictly checks against PAYMENT_ADMIN_IDS (not TELEGRAM_ADMIN_CHAT_ID).
  */
 export function canAccessCardPayment(tgId?: string | number | null): boolean {
   const config = getCardPaymentConfig();
@@ -54,8 +177,13 @@ export function canAccessCardPayment(tgId?: string | number | null): boolean {
   }
 
   const strId = String(tgId).trim();
-  const rawAdminIds = (process.env.PAYMENT_ADMIN_IDS || "").split(",");
-  const adminIds = new Set(rawAdminIds.map((id) => id.trim()).filter(Boolean));
+  const rawAdminIds = getEnvTolerant("PAYMENT_ADMIN_IDS", ["payment_admin_ids"]);
+  const adminIds = new Set(
+    rawAdminIds
+      .split(/[,;\s]+/)
+      .map((id) => sanitizeEnvValue(id))
+      .filter(Boolean)
+  );
 
   return adminIds.has(strId);
 }
@@ -171,11 +299,11 @@ export async function claimPaymentConfirmation(
 }
 
 /**
- * Atomic CAS: mark pending request as expired.
- * Only transitions if current status is 'pending'.
+ * Atomic Compare-And-Swap (CAS) to expire a pending request past its TTL.
+ * Returns true if this call changed the state, false if already handled.
  */
 export async function claimPaymentExpiration(dbClient: any, requestId: number): Promise<boolean> {
-  const result = await dbClient.cardPaymentRequest.updateMany({
+  const res = await dbClient.cardPaymentRequest.updateMany({
     where: {
       id: requestId,
       status: "pending",
@@ -184,14 +312,14 @@ export async function claimPaymentExpiration(dbClient: any, requestId: number): 
       status: "expired",
     },
   });
-  return result.count > 0;
+  return res.count === 1;
 }
 
 /**
- * Atomic CAS: mark pending request as cancelled by buyer.
+ * Atomic Compare-And-Swap (CAS) to cancel a pending request by the customer.
  */
 export async function claimPaymentCancellation(dbClient: any, requestId: number): Promise<boolean> {
-  const result = await dbClient.cardPaymentRequest.updateMany({
+  const res = await dbClient.cardPaymentRequest.updateMany({
     where: {
       id: requestId,
       status: "pending",
@@ -200,28 +328,28 @@ export async function claimPaymentCancellation(dbClient: any, requestId: number)
       status: "cancelled",
     },
   });
-  return result.count > 0;
+  return res.count === 1;
 }
 
 /**
- * Atomic CAS: Manual admin confirmation or rejection.
+ * Atomic admin manual confirm or reject for unmatched or expired payments.
  */
 export async function claimManualReview(
   dbClient: any,
   requestId: number,
   action: "confirm" | "reject",
-  adminNote?: string
+  note: string
 ): Promise<boolean> {
-  const targetStatus = action === "confirm" ? "manual_confirmed" : "manual_rejected";
-  const result = await dbClient.cardPaymentRequest.updateMany({
+  const newStatus = action === "confirm" ? "manual_confirmed" : "manual_rejected";
+  const res = await dbClient.cardPaymentRequest.updateMany({
     where: {
       id: requestId,
       status: { in: ["pending", "expired"] },
     },
     data: {
-      status: targetStatus,
-      adminNote: adminNote || null,
+      status: newStatus,
+      adminNote: note,
     },
   });
-  return result.count > 0;
+  return res.count === 1;
 }

@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { PageHeader, Table, EmptyState, StatCard } from "@/components/admin/ui";
-import { getCardPaymentConfig } from "@/lib/domain/card-payment";
+import { getCardPaymentConfig, maskCardNumber, maskChatId } from "@/lib/domain/card-payment";
+import { getHumoMonitorStatus } from "@/lib/services/humo-monitor";
 import { manualConfirmAction, manualRejectAction, linkNotificationAction } from "./actions";
 
 export const dynamic = "force-dynamic";
@@ -23,6 +24,7 @@ const NOTIF_STATUS_BADGE: Record<string, string> = {
 
 export default async function CardPaymentsAdminPage() {
   const config = getCardPaymentConfig();
+  const monitorStatus = await getHumoMonitorStatus(prisma);
 
   const [pendingRequests, unmatchedNotifications, recentConfirmed, stats] = await Promise.all([
     // Active pending requests
@@ -62,10 +64,10 @@ export default async function CardPaymentsAdminPage() {
 
   const modeBadgeColor =
     config.mode === "all"
-      ? "text-success bg-success/10"
+      ? "text-success bg-success/10 border-success/30"
       : config.mode === "admin_only"
-      ? "text-warning bg-warning/10"
-      : "text-danger bg-danger/10";
+      ? "text-warning bg-warning/10 border-warning/30"
+      : "text-danger bg-danger/10 border-danger/30";
 
   return (
     <div className="space-y-6">
@@ -74,28 +76,82 @@ export default async function CardPaymentsAdminPage() {
         subtitle="Мониторинг Telegram MTProto, автоматические подтверждения, сверка выписки и ручной разбор."
       />
 
-      {/* Info & Config Bar */}
-      <div className="card p-4 flex flex-wrap items-center justify-between gap-4 text-sm">
-        <div className="flex flex-wrap items-center gap-4">
+      {/* Invalid Session / Error Banner */}
+      {monitorStatus.lastError === "invalid session" && (
+        <div className="card p-4 border-l-4 border-l-danger bg-danger/5 text-sm space-y-1">
+          <div className="font-bold text-danger flex items-center gap-2">
+            <span>⚠️ Внимание: Telegram-сессия недействительна (invalid session)</span>
+          </div>
+          <p className="text-muted">
+            Монитор не может авторизоваться в Telegram. Сгенерируйте новую строку сессии командой{" "}
+            <code className="bg-surface-2 px-1.5 py-0.5 rounded font-mono">npm run humo:session</code> и обновите{" "}
+            <code className="font-mono">TELEGRAM_SESSION</code> в переменных Railway.
+          </p>
+        </div>
+      )}
+
+      {/* Safe Diagnostics Bar */}
+      <div className="card p-5 space-y-4">
+        <div className="flex items-center justify-between border-b pb-3">
+          <h2 className="text-base font-semibold">Диагностика MTProto монитора</h2>
+          <span className="text-xs text-muted">Секреты не логируются и не выводятся</span>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
           <div>
-            <span className="text-muted">Режим доступа: </span>
-            <span className={`px-2 py-0.5 rounded font-mono font-medium ${modeBadgeColor}`}>
+            <span className="text-xs text-muted block">Конфигурация (configured):</span>
+            <span className={`font-semibold ${monitorStatus.isConfigured ? "text-success" : "text-danger"}`}>
+              {monitorStatus.isConfigured ? "✅ Да (заполнена)" : "❌ Нет (неполная)"}
+            </span>
+          </div>
+
+          <div>
+            <span className="text-xs text-muted block">Слушатель (running):</span>
+            <span className={`font-semibold ${monitorStatus.isRunning ? "text-success" : "text-warning"}`}>
+              {monitorStatus.isRunning ? "🟢 Онлайн" : "🟠 Офлайн"}
+            </span>
+          </div>
+
+          <div>
+            <span className="text-xs text-muted block">Статус ошибки (lastError):</span>
+            <span className={`font-mono text-xs ${monitorStatus.lastError ? "text-danger font-semibold" : "text-muted"}`}>
+              {monitorStatus.lastError || "Ошибок нет"}
+            </span>
+          </div>
+
+          <div>
+            <span className="text-xs text-muted block">Режим доступа:</span>
+            <span className={`px-2 py-0.5 rounded border text-xs font-mono font-medium ${modeBadgeColor}`}>
               {config.mode}
             </span>
           </div>
+
           <div>
-            <span className="text-muted">Карта: </span>
-            <span className="font-mono font-medium">
-              {config.cardNumber ? config.cardNumber.replace(/(\d{4}\s\d{4})\s\d{4}\s(\d{4})/, "$1 **** $2") : "Не задана"}
+            <span className="text-xs text-muted block">Карта (маскированная):</span>
+            <span className="font-mono font-medium text-text">
+              {maskCardNumber(config.cardNumber, config.cardLast4)}
             </span>
           </div>
+
           <div>
-            <span className="text-muted">Chat ID банка: </span>
-            <span className="font-mono">{config.humoChatId || "Не настроен"}</span>
+            <span className="text-xs text-muted block">Chat ID банка:</span>
+            <span className="font-mono font-medium text-text">
+              {maskChatId(config.humoChatId)}
+            </span>
           </div>
+
           <div>
-            <span className="text-muted">TTL заявки: </span>
-            <span>{config.ttlSeconds} сек ({Math.round(config.ttlSeconds / 60)} мин)</span>
+            <span className="text-xs text-muted block">Ключи Telegram:</span>
+            <span className="text-xs">
+              API ID: {config.hasApiId ? "✅" : "❌"} | Hash: {config.hasApiHash ? "✅" : "❌"} | Session: {config.hasSession ? "✅" : "❌"}
+            </span>
+          </div>
+
+          <div>
+            <span className="text-xs text-muted block">TTL заявки:</span>
+            <span className="text-xs">
+              {config.ttlSeconds} сек ({Math.round(config.ttlSeconds / 60)} мин)
+            </span>
           </div>
         </div>
       </div>
