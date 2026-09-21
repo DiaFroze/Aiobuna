@@ -37,7 +37,6 @@ import {
   tgHtml,
   escHtml,
   stripRichText,
-  safeTruncateHtml,
   stripHtml,
   fitCaption,
   resolveProductPremiumEmoji,
@@ -1739,8 +1738,8 @@ async function showProduct(ctx: Context, id: number, back: string) {
   const pd = await pick3(p.descRu ?? "", p.descEn, p.descUz, lang);
   const rawFormatted = pd?.trim() ? tgHtml(formatRichText(pd.trim())) : "";
   let formattedDesc = rawFormatted ? sanitizeTextCustomEmojis(rawFormatted) : "";
-  if (hasMedia && formattedDesc && formattedDesc.length > 550) {
-    formattedDesc = fitCaption(formattedDesc, 500);
+  if (hasMedia && formattedDesc && formattedDesc.length > 880) {
+    formattedDesc = fitCaption(formattedDesc, 880);
   }
 
   let text = `${pe.textTag} <b>${esc(cleanPt)}</b>`;
@@ -1968,15 +1967,12 @@ async function buildQtyChooser(
   if (course) {
     desc = formattedDesc || (lang === "uz" ? COURSE_DESC_UZ : lang === "ru" ? COURSE_DESC_RU : COURSE_DESC_EN);
   } else if (hasMedia) {
-    // Product media captions can contain at most 1024 characters. Reserving
-    // the rest for title, price, quantity and total guarantees that customers
-    // receive the buy buttons together with the video/photo.
-    desc = safeTruncateHtml(formattedDesc, 650);
+    // Product media captions can contain at most 1024 characters in Telegram.
+    // Reserving ~200 characters for title, price, quantity, total and bulk offers
+    // allows generous product descriptions (up to 800 chars) without cutting text.
+    desc = formattedDesc && formattedDesc.length > 800 ? fitCaption(formattedDesc, 800) : formattedDesc;
   } else {
-    desc = safeTruncateHtml(formattedDesc, 3000);
-  }
-  if (hasMedia && desc && desc.length > 550) {
-    desc = fitCaption(desc, 500);
+    desc = formattedDesc && formattedDesc.length > 3500 ? fitCaption(formattedDesc, 3500) : formattedDesc;
   }
   const offers = describeBulk(unitPrice, deal.tiers, deal.bonuses, (n) => money(n, lang));
 
