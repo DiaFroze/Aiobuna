@@ -68,12 +68,14 @@ import {
   getCardPaymentConfig,
   generateUniqueAmount,
   claimPaymentCancellation,
+  claimPaymentConfirmation,
   claimPaymentExpiration,
   calculatePaymentExpiry,
   CARD_PREMIUM_EMOJI_1,
   CARD_PREMIUM_EMOJI_2,
   buildCardPaymentSupportUrl,
 } from "../lib/domain/card-payment";
+import { parseHumoNotification } from "../lib/domain/humo-parser";
 import { startHumoMonitor, registerPaymentConfirmedHandler, triggerImmediateCheck, getHumoMonitorStatus } from "../lib/services/humo-monitor";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
@@ -9231,6 +9233,68 @@ async function fulfillPendingCardOrders() {
   }
 }
 
+async function repairUnmatchedBankNotifications() {
+  try {
+    const unmatched = await db.bankNotification.findMany({
+      where: { status: "unmatched" },
+      orderBy: { id: "desc" },
+      take: 50,
+    });
+    const config = getCardPaymentConfig();
+    for (const notif of unmatched) {
+      if (!notif.rawSummary) continue;
+      const parsed = parseHumoNotification(notif.rawSummary, notif.operationTime, config.cardLast4);
+      if (parsed.isDeposit && parsed.amount > 0 && parsed.amount !== notif.amount) {
+        console.log(`[humo] Correcting misparsed bank notification #${notif.id}: amount ${notif.amount} -> ${parsed.amount}`);
+        await db.bankNotification.update({
+          where: { id: notif.id },
+          data: {
+            amount: parsed.amount,
+            cardLast4: parsed.cardLast4 || notif.cardLast4,
+          },
+        });
+
+        // Try to match with any pending request for this exact amount
+        const now = new Date();
+        const matchedPending = await db.cardPaymentRequest.findFirst({
+          where: {
+            cardLast4: parsed.cardLast4,
+            totalAmount: parsed.amount,
+            status: "pending",
+            expiresAt: { gt: now },
+          },
+          orderBy: { createdAt: "desc" },
+        });
+        if (matchedPending) {
+          const success = await claimPaymentConfirmation(db, matchedPending.id, notif.id);
+          if (success) {
+            console.log(`[humo] Retroactively matched notification #${notif.id} with request #${matchedPending.id}!`);
+            const user = await db.botUser.findUnique({ where: { id: matchedPending.userId } });
+            if (user) {
+              await bot.api.sendMessage(user.tgId, t(user.lang, "card_pay_confirmed"), { parse_mode: "HTML" }).catch(() => {});
+              await executePurchase(
+                user.tgId,
+                matchedPending.variantId,
+                matchedPending.qty,
+                undefined,
+                matchedPending.targetUsername ?? undefined,
+                matchedPending.refSpend ?? 0,
+                matchedPending.recipientTgId ?? undefined,
+                "card_humo",
+                String(matchedPending.id),
+              ).catch((e) => {
+                console.error(`[humo] Retroactive executePurchase failed for #${matchedPending.id}:`, (e as Error).message);
+              });
+            }
+          }
+        }
+      }
+    }
+  } catch (e: any) {
+    console.error("[humo] repairUnmatchedBankNotifications error:", e.message || e);
+  }
+}
+
 async function bootstrap() {
   await ensureSchema();             // create missing tables before serving anything
   await ensureCourseCatalog(Boolean(await configuredCourseChannel())).catch((e) => {
@@ -9238,6 +9302,7 @@ async function bootstrap() {
   });
   await backfillChannelVerified();  // one-time referral verification backfill (guarded)
   await maybeResetAdmins();         // one-time admin reset (guarded)
+  repairUnmatchedBankNotifications().catch(() => {});
   // Poll for Payme top-ups the webhook credited, to notify + fulfil them.
   setInterval(() => {
     reconcilePendingBinancePayments().catch(() => console.error("[binance] reconciliation unavailable"));
@@ -9247,6 +9312,7 @@ async function bootstrap() {
     checkGiveawayAutoDraw().catch(() => {});
     expireCardPaymentRequests().catch(() => {});
     fulfillPendingCardOrders().catch(() => {});
+    repairUnmatchedBankNotifications().catch(() => {});
   }, 12_000);
 
   // ---- HUMO Card Payment Monitor ----

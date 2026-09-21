@@ -569,6 +569,30 @@ describe("Card Payment Domain & Service", () => {
       expect(db.cardPaymentRequests[0].status).toBe("confirmed");
       expect(db.bankNotifications[0].cardLast4).toBe("8767");
     });
+
+    it("correctly extracts amount from Zoomrad P2P notification with non-breaking space and comma decimals", async () => {
+      process.env.HUMO_CARD_LAST4 = "8767";
+      db.cardPaymentRequests.push({
+        id: 106,
+        userId: 1,
+        variantId: 34,
+        qty: 1,
+        totalAmount: 6056,
+        cardLast4: "8767",
+        status: "pending",
+        expiresAt: new Date(Date.now() + 60000),
+      });
+
+      // Exact Zoomrad P2P text with \u00A0 non-breaking space and ,00 decimals
+      const zoomradMsg = "🎉 Пополнение + 6\u00A0056,00 UZS 📍 ZOOMRAD P2P Перевод с карты на карту *8767";
+      const res = await processBankMessage(db, "-100123", 1006, zoomradMsg, new Date());
+
+      expect(res.matched).toBe(true);
+      expect(res.requestId).toBe(106);
+      expect(db.cardPaymentRequests[0].status).toBe("confirmed");
+      expect(db.bankNotifications[0].amount).toBe(6056);
+      expect(db.bankNotifications[0].cardLast4).toBe("8767");
+    });
   });
 
   describe("Fixed-time Expiration & Strict 5-Minute TTL", () => {

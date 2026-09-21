@@ -63,9 +63,9 @@ export default async function CardPaymentsAdminPage() {
   const totalRevenue = revenueAgg._sum.totalAmount || 0;
 
   const modeBadgeColor =
-    config.mode === "all"
+    monitorStatus.mode === "all"
       ? "text-success bg-success/10 border-success/30"
-      : config.mode === "admin_only"
+      : monitorStatus.mode === "admin_only"
       ? "text-warning bg-warning/10 border-warning/30"
       : "text-danger bg-danger/10 border-danger/30";
 
@@ -90,7 +90,7 @@ export default async function CardPaymentsAdminPage() {
         </div>
       )}
 
-      {/* Safe Diagnostics Bar */}
+      {/* Section 1: Diagnostics Panel */}
       <div className="card p-5 space-y-4">
         <div className="flex items-center justify-between border-b pb-3">
           <h2 className="text-base font-semibold">Диагностика MTProto монитора</h2>
@@ -122,35 +122,35 @@ export default async function CardPaymentsAdminPage() {
           <div>
             <span className="text-xs text-muted block">Режим доступа:</span>
             <span className={`px-2 py-0.5 rounded border text-xs font-mono font-medium ${modeBadgeColor}`}>
-              {config.mode}
+              {monitorStatus.mode}
             </span>
           </div>
 
           <div>
             <span className="text-xs text-muted block">Карта (маскированная):</span>
             <span className="font-mono font-medium text-text">
-              {maskCardNumber(config.cardNumber, config.cardLast4)}
+              {monitorStatus.cardNumberMasked}
             </span>
           </div>
 
           <div>
             <span className="text-xs text-muted block">Chat ID банка:</span>
             <span className="font-mono font-medium text-text">
-              {maskChatId(config.humoChatId)}
+              {monitorStatus.humoChatIdMasked}
             </span>
           </div>
 
           <div>
             <span className="text-xs text-muted block">Ключи Telegram:</span>
             <span className="text-xs">
-              API ID: {config.hasApiId ? "✅" : "❌"} | Hash: {config.hasApiHash ? "✅" : "❌"} | Session: {config.hasSession ? "✅" : "❌"}
+              API ID: {monitorStatus.hasApiId ? "✅" : "❌"} | Hash: {monitorStatus.hasApiHash ? "✅" : "❌"} | Session: {monitorStatus.hasSession ? "✅" : "❌"}
             </span>
           </div>
 
           <div>
             <span className="text-xs text-muted block">TTL заявки:</span>
             <span className="text-xs">
-              {config.ttlSeconds} сек ({Math.round(config.ttlSeconds / 60)} мин)
+              {monitorStatus.ttlSeconds} сек ({Math.round(monitorStatus.ttlSeconds / 60)} мин)
             </span>
           </div>
         </div>

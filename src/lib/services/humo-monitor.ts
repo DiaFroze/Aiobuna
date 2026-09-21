@@ -93,26 +93,51 @@ export function isMatchingChatId(
 async function persistMonitorState(db: any, s: MonitorState) {
   if (!db) return;
   try {
-    const val = JSON.stringify({
+    const config = getCardPaymentConfig();
+    const dataObj = {
       isRunning: s.isRunning,
-      isConfigured: s.isConfigured,
+      isConfigured: s.isConfigured || config.isConfigured,
       lastEventAt: s.lastEventAt ? s.lastEventAt.toISOString() : null,
       lastError: s.lastError,
       processedCount: s.processedCount,
+      mode: config.mode,
+      cardLast4: config.cardLast4,
+      cardNumberMasked: maskCardNumber(config.cardNumber, config.cardLast4),
+      humoChatIdMasked: maskChatId(config.humoChatId),
+      hasApiId: config.hasApiId,
+      hasApiHash: config.hasApiHash,
+      hasSession: config.hasSession,
+      hasChatId: config.hasChatId,
+      ttlSeconds: config.ttlSeconds,
       updatedAt: new Date().toISOString(),
-    });
-    if (db.setting) {
-      await db.setting.upsert({
-        where: { key: "humo_monitor_status" },
-        create: { key: "humo_monitor_status", valueRu: val },
-        update: { valueRu: val },
-      });
-    } else if (db.botSetting) {
+    };
+    const valRu = JSON.stringify(dataObj);
+
+    // Save into BotSetting (used by bot process)
+    if (db.botSetting) {
       await db.botSetting.upsert({
         where: { key: "humo_monitor_status" },
-        create: { key: "humo_monitor_status", valueRu: val },
-        update: { valueRu: val },
-      });
+        create: { key: "humo_monitor_status", valueRu: valRu },
+        update: { valueRu: valRu },
+      }).catch(() => {});
+    }
+
+    // Save into Setting (used by Next.js web process)
+    if (db.setting) {
+      try {
+        await db.setting.upsert({
+          where: { key: "humo_monitor_status" },
+          create: { key: "humo_monitor_status", value: dataObj as any },
+          update: { value: dataObj as any },
+        });
+      } catch {
+        // In bot process db.setting is proxied to BotSetting which expects valueRu
+        await db.setting.upsert({
+          where: { key: "humo_monitor_status" },
+          create: { key: "humo_monitor_status", valueRu: valRu },
+          update: { valueRu: valRu },
+        }).catch(() => {});
+      }
     }
   } catch {
     // Non-critical, ignore
@@ -131,21 +156,59 @@ export async function getHumoMonitorStatus(db?: any) {
   let currentLastError = state.lastError;
   let currentLastEventAt = state.lastEventAt;
   let currentProcessedCount = state.processedCount;
+  let currentCardNumberMasked = maskCardNumber(config.cardNumber, config.cardLast4);
+  let currentHumChatIdMasked = maskChatId(config.humoChatId);
+  let currentHasApiId = config.hasApiId;
+  let currentHasApiHash = config.hasApiHash;
+  let currentHasSession = config.hasSession;
+  let currentHasChatId = config.hasChatId;
+  let currentCardLast4 = config.cardLast4;
+  let currentMode = config.mode;
+  let currentTtlSeconds = config.ttlSeconds;
 
-  if (db && !state.isRunning) {
+  if (db) {
     try {
-      const row = db.setting
-        ? await db.setting.findUnique({ where: { key: "humo_monitor_status" } })
-        : db.botSetting
-        ? await db.botSetting.findUnique({ where: { key: "humo_monitor_status" } })
-        : null;
-      if (row?.valueRu) {
-        const parsed = JSON.parse(row.valueRu);
-        currentRunning = Boolean(parsed.isRunning);
-        currentConfigured = Boolean(parsed.isConfigured) || config.isConfigured;
-        currentLastError = parsed.lastError || null;
-        currentLastEventAt = parsed.lastEventAt ? new Date(parsed.lastEventAt) : null;
-        currentProcessedCount = Number(parsed.processedCount) || 0;
+      let parsed: any = null;
+      // Check BotSetting first (shared table)
+      if (db.botSetting) {
+        const row = await db.botSetting.findUnique({ where: { key: "humo_monitor_status" } });
+        if (row?.valueRu) {
+          try { parsed = JSON.parse(row.valueRu); } catch {}
+        }
+      }
+      // Check Setting second (raw Prisma Setting model)
+      if (!parsed && db.setting) {
+        const row = await db.setting.findUnique({ where: { key: "humo_monitor_status" } });
+        if (row?.value) {
+          parsed = typeof row.value === "string" ? JSON.parse(row.value) : row.value;
+        } else if (row?.valueRu) {
+          try { parsed = JSON.parse(row.valueRu); } catch {}
+        }
+      }
+
+      if (parsed) {
+        if (!state.isRunning && parsed.isRunning !== undefined) {
+          currentRunning = Boolean(parsed.isRunning);
+        }
+        if (parsed.isConfigured !== undefined) {
+          currentConfigured = Boolean(parsed.isConfigured) || currentConfigured;
+        }
+        if (parsed.lastError !== undefined) currentLastError = parsed.lastError || null;
+        if (parsed.lastEventAt) currentLastEventAt = new Date(parsed.lastEventAt);
+        if (parsed.processedCount !== undefined) currentProcessedCount = Number(parsed.processedCount) || 0;
+        if (parsed.cardNumberMasked && parsed.cardNumberMasked !== "Не задана") {
+          currentCardNumberMasked = parsed.cardNumberMasked;
+        }
+        if (parsed.humoChatIdMasked && parsed.humoChatIdMasked !== "Не настроен") {
+          currentHumChatIdMasked = parsed.humoChatIdMasked;
+        }
+        if (parsed.cardLast4) currentCardLast4 = parsed.cardLast4;
+        if (parsed.hasApiId !== undefined) currentHasApiId = currentHasApiId || Boolean(parsed.hasApiId);
+        if (parsed.hasApiHash !== undefined) currentHasApiHash = currentHasApiHash || Boolean(parsed.hasApiHash);
+        if (parsed.hasSession !== undefined) currentHasSession = currentHasSession || Boolean(parsed.hasSession);
+        if (parsed.hasChatId !== undefined) currentHasChatId = currentHasChatId || Boolean(parsed.hasChatId);
+        if (parsed.mode) currentMode = parsed.mode;
+        if (parsed.ttlSeconds) currentTtlSeconds = Number(parsed.ttlSeconds);
       }
     } catch {}
   }
@@ -156,14 +219,15 @@ export async function getHumoMonitorStatus(db?: any) {
     lastEventAt: currentLastEventAt,
     lastError: currentLastError,
     processedCount: currentProcessedCount,
-    mode: config.mode,
-    cardLast4: config.cardLast4,
-    cardNumberMasked: maskCardNumber(config.cardNumber, config.cardLast4),
-    humoChatIdMasked: maskChatId(config.humoChatId),
-    hasApiId: config.hasApiId,
-    hasApiHash: config.hasApiHash,
-    hasSession: config.hasSession,
-    hasChatId: config.hasChatId,
+    mode: currentMode,
+    cardLast4: currentCardLast4,
+    cardNumberMasked: currentCardNumberMasked,
+    humoChatIdMasked: currentHumChatIdMasked,
+    hasApiId: currentHasApiId,
+    hasApiHash: currentHasApiHash,
+    hasSession: currentHasSession,
+    hasChatId: currentHasChatId,
+    ttlSeconds: currentTtlSeconds,
   };
 }
 

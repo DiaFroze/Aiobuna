@@ -109,15 +109,19 @@ export function extractCardLast4(text: string): string | null {
  * "Kirim: 50,017.00" -> 50017
  * "50 017 UZS" -> 50017
  */
-export function extractAmount(text: string): number | null {
-  const CURRENCY_SUFFIX = `(?:so['’\`]?m|uzs|сум|sum)(?![а-яёa-z0-9])`;
+export function extractAmount(rawText: string): number | null {
+  if (!rawText) return null;
+  // Normalize unicode spaces (NBSP, narrow NBSP, etc.) to standard ASCII space
+  const text = rawText.replace(/[\u00A0\u202F\u2007\u200B\uFEFF]/g, " ");
+
+  const CURRENCY_SUFFIX = `(?:so['’\`]?m|uzs|сум|sum)(?![a-zA-Zа-яА-ЯёЁ0-9])`;
   const amountPatterns = [
-    // "+50 017 UZS", "+ 50 017 so'm", "+50017"
-    new RegExp(`[+]\\s*(\\d{1,3}(?:[ \\t,]\\d{3})*(?:\\.\\d{2})?|\\d+)\\s*${CURRENCY_SUFFIX}?`, "i"),
-    // "50 017.00 UZS", "50 017 so'm", "50017 сум", "100 055 сум"
-    new RegExp(`(\\d{1,3}(?:[ \\t,]\\d{3})*(?:\\.\\d{2})?|\\d+)\\s*${CURRENCY_SUFFIX}`, "i"),
-    // "Summa: 50 017", "Kirim: 50 017.00", "Сумма: 50000"
-    /(?:summa|сумма|kirim|кирим|miqdor)[\s:]*([+]?\d{1,3}(?:[ \t,]\d{3})*(?:\.\d{2})?|[+]?\d+)/i,
+    // "+ 6 056,00 UZS", "+50 017 UZS", "+ 50 017.00 so'm", "+50017"
+    new RegExp(`[+]\\s*(\\d{1,3}(?:[ \\t,]\\d{3})*(?:[.,]\\d{1,2})?|\\d+)\\s*(?:${CURRENCY_SUFFIX})?`, "i"),
+    // "6 056,00 UZS", "50 017.00 UZS", "75,025.00 сум", "50 017 so'm"
+    new RegExp(`(\\d{1,3}(?:[ \\t,]\\d{3})*(?:[.,]\\d{1,2})?|\\d+)\\s*${CURRENCY_SUFFIX}`, "i"),
+    // "Summa: 50 017,00", "Kirim: 50 017.00", "Сумма: 50000", "Пополнение: 6 056,00", "Зачисление: 75,025.00"
+    /(?:summa|сумма|kirim|кирим|miqdor|пополнение|зачисление)[\s:]*([+]?\d{1,3}(?:[ \t,]\d{3})*(?:[.,]\d{1,2})?|[+]?\d+)/i,
   ];
 
   for (const pattern of amountPatterns) {
@@ -130,8 +134,10 @@ export function extractAmount(text: string): number | null {
     }
   }
 
-  // Fallback: look for 4 to 8 digits with possible thousand separators
-  const fallbackMatch = text.match(/\b(\d{1,3}(?:[ \t]\d{3})+(?:\.\d{2})?|\d{4,9})\b/);
+  // Fallback: look for 4 to 8 digits with thousand separators, or 4-9 digits NOT preceded by card indicators or *
+  // Strip card references so card last 4 digits (e.g. *8767) are NEVER mistaken for an amount
+  const cleanedForFallback = text.replace(/(?:karta|карта|card|humo)[^\d\n]*?[*xX•·\d]+/gi, " ");
+  const fallbackMatch = cleanedForFallback.match(/(?<![*•\d])\b(\d{1,3}(?:[ \t,]\d{3})+(?:[.,]\d{1,2})?|\d{4,9})\b(?![*•\d])/);
   if (fallbackMatch && fallbackMatch[1]) {
     const parsed = parseAmountString(fallbackMatch[1]);
     if (parsed !== null && parsed > 0) {
@@ -143,18 +149,18 @@ export function extractAmount(text: string): number | null {
 }
 
 /**
- * Normalizes number string like "50 017.00" or "50,017" or "50017" into integer UZS.
+ * Normalizes number string like "50 017.00" or "6 056,00" or "50017" into integer UZS.
  */
 function parseAmountString(raw: string): number | null {
-  let cleaned = raw.trim();
+  let cleaned = raw.replace(/[\u00A0\u202F\u2007\u200B\uFEFF]/g, " ").trim();
   // Strip leading '+'
   if (cleaned.startsWith("+")) {
     cleaned = cleaned.slice(1).trim();
   }
   // Strip decimals like .00 or ,00
   cleaned = cleaned.replace(/[.,]00$/, "");
-  // Replace comma decimal with dot if decimal part exists
-  cleaned = cleaned.replace(/,(\d{2})$/, ".$1");
+  // Replace comma decimal with dot if 1-2 decimal digits exist
+  cleaned = cleaned.replace(/,(\d{1,2})$/, ".$1");
   // Remove spaces, tabs, apostrophes used as thousand separators
   cleaned = cleaned.replace(/[\s'`_]/g, "");
   // If there is still a comma, remove it
