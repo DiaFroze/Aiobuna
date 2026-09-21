@@ -234,6 +234,11 @@ export async function startHumoMonitor(db: any): Promise<void> {
 
     console.log(`[humo-monitor] GramJS MTProto client connected and authorized. Listening to chat ${maskChatId(rawChatId)}`);
 
+    // Preload dialogs so GramJS entity cache has channel access hashes
+    await client.getDialogs({ limit: 100 }).catch((e) => {
+      console.warn("[humo-monitor] getDialogs warning:", (e as Error).message || e);
+    });
+
     // Event listener for incoming bank notification messages
     client.addEventHandler(async (event: any) => {
       const message = event.message;
@@ -290,7 +295,8 @@ export async function processBankMessage(
     };
   }
 
-  const parsed = parseHumoNotification(text, messageDate);
+  const config = getCardPaymentConfig();
+  const parsed = parseHumoNotification(text, messageDate, config.cardLast4);
   const rawSummary = sanitizeNotificationText(text);
 
   if (!parsed.isDeposit || parsed.amount <= 0 || !parsed.cardLast4) {
@@ -415,7 +421,14 @@ export async function triggerImmediateCheck(
   const config = getCardPaymentConfig();
   if (client && state.isRunning && config.humoChatId) {
     try {
-      const messages = await client.getMessages(config.humoChatId, { limit: 10 });
+      let messages: any[] = [];
+      try {
+        messages = await client.getMessages(config.humoChatId, { limit: 15 });
+      } catch (err: any) {
+        console.warn("[humo-monitor] getMessages initial attempt failed, refreshing dialogs:", err?.message || err);
+        await client.getDialogs({ limit: 100 }).catch(() => {});
+        messages = await client.getMessages(config.humoChatId, { limit: 15 });
+      }
       for (const msg of messages) {
         if (msg && !msg.out && msg.message) {
           await processBankMessage(

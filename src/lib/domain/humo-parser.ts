@@ -216,7 +216,11 @@ export function extractOperationTime(text: string, fallbackDate: Date = new Date
 /**
  * Main parser function: parse raw text from HUMO Card Telegram message.
  */
-export function parseHumoNotification(rawText: string, messageDate: Date = new Date()): ParsedHumoNotification {
+export function parseHumoNotification(
+  rawText: string,
+  messageDate: Date = new Date(),
+  fallbackCardLast4?: string
+): ParsedHumoNotification {
   const sanitized = sanitizeNotificationText(rawText);
   const lower = rawText.toLowerCase();
 
@@ -257,7 +261,7 @@ export function parseHumoNotification(rawText: string, messageDate: Date = new D
     }
   }
 
-  const cardLast4 = extractCardLast4(rawText);
+  const cardLast4 = extractCardLast4(rawText) || (fallbackCardLast4 ? String(fallbackCardLast4).trim() : null);
   const amount = extractAmount(rawText);
   const operationTime = extractOperationTime(rawText, messageDate);
 

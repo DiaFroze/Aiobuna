@@ -546,6 +546,29 @@ describe("Card Payment Domain & Service", () => {
       expect(db.bankNotifications[0].status).toBe("ignored");
       expect(db.bankNotifications[0].operationType).toBe("debit");
     });
+
+    it("matches bank notification using fallbackCardLast4 when card is not mentioned in message text", async () => {
+      process.env.HUMO_CARD_LAST4 = "8767";
+      db.cardPaymentRequests.push({
+        id: 105,
+        userId: 1,
+        variantId: 10,
+        qty: 1,
+        totalAmount: 50077,
+        cardLast4: "8767",
+        status: "pending",
+        expiresAt: new Date(Date.now() + 60000),
+      });
+
+      // SMS text from bank without explicit card number (e.g. personal SMS forwarded to channel)
+      const message = "Kirim: 50 077 UZS. Balans: 1 500 000 UZS";
+      const res = await processBankMessage(db, "-100123", 1005, message, new Date());
+
+      expect(res.matched).toBe(true);
+      expect(res.requestId).toBe(105);
+      expect(db.cardPaymentRequests[0].status).toBe("confirmed");
+      expect(db.bankNotifications[0].cardLast4).toBe("8767");
+    });
   });
 
   describe("Fixed-time Expiration & Strict 5-Minute TTL", () => {

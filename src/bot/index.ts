@@ -2258,6 +2258,7 @@ async function executePurchase(
 ) {
   const isRefGift = refPointsCost !== undefined && refPointsCost > 0;
   const isAdminPay = paymentMethod === "admin";
+  const isCardPay = paymentMethod === "card_humo";
   const user = await db.botUser.findUnique({ where: { tgId } });
   if (!user) return;
   const lang = user.lang;
@@ -2266,6 +2267,17 @@ async function executePurchase(
     if (isRefGift) await refundRefPoints(user.id, refPointsCost);
     const suffix = isRefGift ? `\n\n♻️ ${refPointsCost} реф. возвращены на ваш счёт.` : "";
     await bot.api.sendMessage(tgId, t(lang, msgKey) + suffix, { parse_mode: "HTML" }).catch(() => {});
+    if (isCardPay && ADMIN_ID) {
+      await bot.api.sendMessage(
+        ADMIN_ID,
+        `⚠️ <b>(HUMO) Оплата #${paymentId} подтверждена, но выдача не выполнена!</b>\n` +
+        `Причина: <code>${msgKey}</code>\n` +
+        `Товар: <code>variantId=${variantId}, qty=${qty}</code>\n` +
+        `Покупатель: ${user.firstName ?? ""} @${user.username ?? "—"} (<code>${user.tgId}</code>)\n` +
+        `Требуется выдать товар вручную или связаться с клиентом.`,
+        { parse_mode: "HTML" }
+      ).catch(() => {});
+    }
   };
   const v = await db.variant.findUnique({
     where: { id: variantId },
@@ -2329,7 +2341,7 @@ async function executePurchase(
     const reserve = await db.$transaction(async (tx) => {
       const u = await tx.botUser.findUnique({ where: { id: user.id } });
       if (!u) return { error: "unavailable" as const };
-      if (!isRefGift && !isAdminPay && u.balance < total) return { error: "balance" as const };
+      if (!isRefGift && !isAdminPay && !isCardPay && u.balance < total) return { error: "balance" as const };
       
       const freshV = await tx.variant.findUnique({ where: { id: variantId } });
       if (!freshV || !freshV.isActive) return { error: "unavailable" as const };
@@ -2342,7 +2354,7 @@ async function executePurchase(
         });
       }
 
-      if (!isRefGift && !isAdminPay && total > 0) {
+      if (!isRefGift && !isAdminPay && !isCardPay && total > 0) {
         await tx.botUser.update({ where: { id: user.id }, data: { balance: { decrement: total } } });
       }
       if (discountCost > 0) {
@@ -2357,7 +2369,7 @@ async function executePurchase(
         data: {
           userId: user.id, variantId, titleRu: label, priceUsdt: total, priceUzs: total,
           costPriceUzs: costPriceSnapshot, payload: "",
-          source: isAdminPay ? "admin" : isRefGift ? "referral" : "manual", status: "awaiting_delivery",
+          source: isAdminPay ? "admin" : isRefGift ? "referral" : isCardPay ? "card_humo" : "manual", status: "awaiting_delivery",
           targetUsername: targetUsername ?? null,
           recipientTgId: isFragmentItem ? recipient : null,
           deliveryState: isFragmentItem ? "PAID" : "",
@@ -2459,8 +2471,8 @@ async function executePurchase(
   const reserve = await db.$transaction(async (tx) => {
     const u = await tx.botUser.findUnique({ where: { id: user.id } });
     if (!u) return { error: "unavailable" as const };
-    if (!isRefGift && !isAdminPay && u.balance < total) return { error: "balance" as const };
-    if (!isRefGift && !isAdminPay && total > 0) {
+    if (!isRefGift && !isAdminPay && !isCardPay && u.balance < total) return { error: "balance" as const };
+    if (!isRefGift && !isAdminPay && !isCardPay && total > 0) {
       await tx.botUser.update({ where: { id: user.id }, data: { balance: { decrement: total } } });
     }
     if (discountCost > 0) {
@@ -2480,7 +2492,7 @@ async function executePurchase(
         priceUzs: total,
         costPriceUzs: costPriceSnapshot,
         payload: "", // populated below as we gather items
-        source: isAdminPay ? "admin" : isRefGift ? "referral" : "hybrid", // stock + supplier
+        source: isAdminPay ? "admin" : isRefGift ? "referral" : isCardPay ? "card_humo" : "hybrid", // stock + supplier
         status: "processing",
         targetUsername: targetUsername ?? null,
         paymentMethod: paymentMethod ?? null,
@@ -7389,7 +7401,8 @@ bot.on("callback_query:data", async (ctx) => {
       if (!requestId) return ctx.answerCallbackQuery().catch(() => {});
       const result = await triggerImmediateCheck(requestId, db, lang);
       if (result.isConfirmed) {
-        await ctx.answerCallbackQuery({ text: "✅ Оплата подтверждена!", show_alert: true }).catch(() => {});
+        const okMsg = lang === "uz" ? "✅ To‘lov tasdiqlandi!" : lang === "en" ? "✅ Payment confirmed!" : "✅ Оплата подтверждена!";
+        await ctx.answerCallbackQuery({ text: okMsg, show_alert: true }).catch(() => {});
       } else {
         await ctx.answerCallbackQuery({ text: result.message, show_alert: true }).catch(() => {});
       }
@@ -9178,6 +9191,46 @@ async function expireCardPaymentRequests() {
   }
 }
 
+async function fulfillPendingCardOrders() {
+  try {
+    const confirmedRequests = await db.cardPaymentRequest.findMany({
+      where: {
+        status: { in: ["confirmed", "manual_confirmed"] },
+        createdAt: { gte: new Date(Date.now() - 24 * 3600 * 1000) },
+      },
+      take: 10,
+      orderBy: { id: "desc" },
+    });
+
+    for (const req of confirmedRequests) {
+      const existingOrder = await db.botOrder.findFirst({
+        where: { paymentMethod: "card_humo", paymentId: String(req.id) },
+      });
+      if (!existingOrder) {
+        console.log(`[humo] Reconciling unfulfilled confirmed card payment #${req.id}...`);
+        const user = await db.botUser.findUnique({ where: { id: req.userId } });
+        if (user) {
+          await executePurchase(
+            user.tgId,
+            req.variantId,
+            req.qty,
+            undefined,
+            req.targetUsername ?? undefined,
+            req.refSpend ?? 0,
+            req.recipientTgId ?? undefined,
+            "card_humo",
+            String(req.id),
+          ).catch((e) => {
+            console.error(`[humo] Reconcile fulfill failed for #${req.id}:`, (e as Error).message);
+          });
+        }
+      }
+    }
+  } catch (e) {
+    console.error("[humo] fulfillPendingCardOrders error:", (e as Error).message);
+  }
+}
+
 async function bootstrap() {
   await ensureSchema();             // create missing tables before serving anything
   await ensureCourseCatalog(Boolean(await configuredCourseChannel())).catch((e) => {
@@ -9193,6 +9246,7 @@ async function bootstrap() {
     checkPromoExpiry().catch(() => {});
     checkGiveawayAutoDraw().catch(() => {});
     expireCardPaymentRequests().catch(() => {});
+    fulfillPendingCardOrders().catch(() => {});
   }, 12_000);
 
   // ---- HUMO Card Payment Monitor ----
