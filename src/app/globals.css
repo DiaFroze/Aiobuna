@@ -88,3 +88,15 @@ body {
 .prose-supplier :where(ol) { @apply list-decimal pl-5; }
 .prose-supplier :where(a) { @apply text-brand underline; }
 .prose-supplier :where(h1,h2,h3) { @apply font-semibold mt-3 mb-1; }
+
+/* Telegram Premium Custom Emoji styling */
+tg-emoji {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+  line-height: 1;
+  user-select: none;
+  font-style: normal;
+}
+

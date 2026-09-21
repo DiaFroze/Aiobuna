@@ -10,6 +10,13 @@ interface ProductDescriptionEditorProps {
 }
 
 const PRESET_EMOJIS = [
+  { id: "5897658922600240288", char: "⭐️", label: "Stars" },
+  { id: "5332606428068737460", char: "💳", label: "Click" },
+  { id: "5204128408463744787", char: "💸", label: "Payme" },
+  { id: "6269458311381258421", char: "👩‍💻", label: "Admin" },
+  { id: "5204242830687494041", char: "🧾", label: "Чек" },
+  { id: "5449872877929127395", char: "📈", label: "Статистика" },
+  { id: "5255860701133552970", char: "📦", label: "Склад" },
   { id: "5372917041193828849", char: "🚀", label: "Ракета" },
   { id: "5467512909909214089", char: "🎓", label: "Курс / Шапка" },
   { id: "5927026418616636353", char: "🧠", label: "Мозг / ИИ" },

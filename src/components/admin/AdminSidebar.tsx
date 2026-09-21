@@ -3,33 +3,34 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
+import { TgEmoji } from "@/components/admin/TgEmoji";
 
-const NAV: { href: string; label: string; icon: string }[] = [
+const NAV: { href: string; label: string; icon: React.ReactNode }[] = [
   { href: "/admin", label: "Dashboard", icon: "▤" },
-  { href: "/admin/statistics", label: "Статистика продаж", icon: "📊" },
+  { href: "/admin/statistics", label: "Статистика продаж", icon: <TgEmoji name="statistics" /> },
   { href: "/admin/bot-products", label: "Товары бота", icon: "🤖" },
   { href: "/admin/bot-suppliers", label: "Связки API и закупка", icon: "🔀" },
-  { href: "/admin/bot-fragment", label: "Stars и Premium", icon: "⭐" },
+  { href: "/admin/bot-fragment", label: "Stars и Premium", icon: <TgEmoji name="stars" /> },
   { href: "/admin/bot-methods", label: "Методы / Гайды", icon: "📘" },
   { href: "/admin/bot-import", label: "Импорт из API", icon: "⇩" },
   { href: "/admin/bot-apis", label: "API-источники", icon: "🔌" },
   { href: "/admin/bot-settings", label: "Тексты и меню бота", icon: "✎" },
   { href: "/admin/bot-channels", label: "Подписки бота", icon: "📢" },
-  { href: "/admin/bot-topups", label: "Пополнения бота", icon: "💳" },
+  { href: "/admin/bot-topups", label: "Пополнения бота", icon: <TgEmoji name="click" /> },
   { href: "/admin/bot-users", label: "Пользователи бота", icon: "👤" },
-  { href: "/admin/bot-ads", label: "Рекламные ссылки", icon: "📈" },
+  { href: "/admin/bot-ads", label: "Рекламные ссылки", icon: <TgEmoji name="statistics" /> },
   { href: "/admin/bot-vip-prices", label: "Индивидуальные цены", icon: "💎" },
   { href: "/admin/bot-deal-links", label: "Акционные ссылки", icon: "🏷" },
   { href: "/admin/bot-giveaways", label: "Розыгрыши", icon: "🎉" },
   { href: "/admin/bot-promo-codes", label: "Промокоды", icon: "🎟" },
   { href: "/admin/bot-promo", label: "Подарки", icon: "🎁" },
   { href: "/admin/bot-referrals", label: "Рефералы", icon: "🤝" },
-  { href: "/admin/bot-poll", label: "Опрос", icon: "📊" },
-  { href: "/admin/bot-stock", label: "Склад", icon: "📦" },
+  { href: "/admin/bot-poll", label: "Опрос", icon: <TgEmoji name="statistics" /> },
+  { href: "/admin/bot-stock", label: "Склад", icon: <TgEmoji name="stock" /> },
   { href: "/admin/bot-verify", label: "Проверка кодов", icon: "🔑" },
   { href: "/admin/link-formatter", label: "Форматирование ссылок", icon: "🔗" },
   { href: "/admin/settings", label: "Настройки", icon: "⚙" },
-  { href: "/admin/admins", label: "Администраторы", icon: "⛨" },
+  { href: "/admin/admins", label: "Администраторы", icon: <TgEmoji name="admin" /> },
   { href: "/admin/audit", label: "Audit logs", icon: "🗒" },
 ];
 
@@ -77,7 +78,7 @@ export function AdminSidebar({ admin }: { admin: { email: string; roleKey: strin
                   active ? "bg-brand text-brand-fg" : "text-muted hover:text-text hover:bg-surface-2"
                 }`}
               >
-                <span className="w-4 text-center opacity-70">{n.icon}</span>
+                <span className="w-4 flex items-center justify-center text-center opacity-80">{n.icon}</span>
                 {n.label}
               </Link>
             );

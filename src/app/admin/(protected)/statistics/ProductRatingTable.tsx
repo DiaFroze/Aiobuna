@@ -2,6 +2,7 @@
 
 import { useState, useMemo } from "react";
 import { ProductSalesRow, formatUzs } from "@/lib/domain/sales-statistics";
+import { TgEmoji } from "@/components/admin/TgEmoji";
 
 interface ProductRatingTableProps {
   products: ProductSalesRow[];
@@ -83,7 +84,7 @@ export function ProductRatingTable({ products }: ProductRatingTableProps) {
       <div className="p-4 sm:p-5 border-b border-border flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h2 className="font-semibold text-base sm:text-lg flex items-center gap-2">
-            🏆 Рейтинг товаров
+            <TgEmoji name="statistics" /> Рейтинг товаров
             <span className="badge bg-brand/10 text-brand text-xs font-normal">
               Всего товаров: {products.length}
             </span>
@@ -121,26 +122,26 @@ export function ProductRatingTable({ products }: ProductRatingTableProps) {
             <button
               type="button"
               onClick={() => handleSort("profit")}
-              className={`px-3 py-1.5 rounded-lg font-medium transition-all cursor-pointer flex items-center gap-1 ${
+              className={`px-3 py-1.5 rounded-lg font-medium transition-all cursor-pointer flex items-center gap-1.5 ${
                 sortField === "profit"
                   ? "bg-emerald-600 text-white shadow-sm"
                   : "text-muted hover:text-foreground hover:bg-surface-1"
               }`}
             >
-              <span>📈 По доходу</span>
+              <span className="inline-flex items-center gap-1"><TgEmoji name="statistics" /> По доходу</span>
               {sortField === "profit" && <span>{sortDirection === "desc" ? "↓" : "↑"}</span>}
             </button>
 
             <button
               type="button"
               onClick={() => handleSort("sales")}
-              className={`px-3 py-1.5 rounded-lg font-medium transition-all cursor-pointer flex items-center gap-1 ${
+              className={`px-3 py-1.5 rounded-lg font-medium transition-all cursor-pointer flex items-center gap-1.5 ${
                 sortField === "sales"
                   ? "bg-blue-600 text-white shadow-sm"
                   : "text-muted hover:text-foreground hover:bg-surface-1"
               }`}
             >
-              <span>📦 По заказам</span>
+              <span className="inline-flex items-center gap-1"><TgEmoji name="stock" /> По заказам</span>
               {sortField === "sales" && <span>{sortDirection === "desc" ? "↓" : "↑"}</span>}
             </button>
           </div>

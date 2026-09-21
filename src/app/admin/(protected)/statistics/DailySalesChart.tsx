@@ -2,6 +2,7 @@
 
 import { useState, useMemo } from "react";
 import { DailySalesRow, formatUzs } from "@/lib/domain/sales-statistics";
+import { TgEmoji } from "@/components/admin/TgEmoji";
 
 interface DailySalesChartProps {
   days: DailySalesRow[];
@@ -45,7 +46,7 @@ export function DailySalesChart({ days }: DailySalesChartProps) {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
         <div>
           <h2 className="font-semibold text-base sm:text-lg flex items-center gap-2">
-            📅 Продажи по дням
+            <TgEmoji name="statistics" /> Продажи по дням
             <span className="badge bg-brand/10 text-brand text-xs font-normal">
               Дней с продажами: {days.length}
             </span>
@@ -118,7 +119,7 @@ export function DailySalesChart({ days }: DailySalesChartProps) {
                       key={p.id}
                       className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono bg-surface-2 text-foreground"
                     >
-                      <span>{p.emoji}</span>
+                      <TgEmoji name={p.id as any} fallback={p.emoji} />
                       <span>{p.name}: {p.count}</span>
                     </span>
                   ))

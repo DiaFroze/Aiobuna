@@ -169,6 +169,7 @@ export interface NormalizedPaymentMethod {
   id: string;
   name: string;
   emoji: string;
+  tgEmojiId: string;
   color: string;
   bgColor: string;
 }
@@ -176,36 +177,42 @@ export interface NormalizedPaymentMethod {
 /**
  * Normalizes payment methods.
  * The store only uses Payme, Click, and Administrator.
- * "Баланс бота" is never returned.
+ * Uses official Telegram custom emoji IDs:
+ * Stars: 5897658922600240288 (⭐️)
+ * Click: 5332606428068737460 (💳)
+ * Payme: 5204128408463744787 (💸)
+ * Admin: 6269458311381258421 (👩‍💻)
+ * Receipt: 5204242830687494041 (🧾)
  */
 export function normalizePaymentMethod(method: string | null | undefined): NormalizedPaymentMethod {
   const m = (method || "").toLowerCase().trim();
   if (m === "click") {
-    return { id: "click", name: "Click", emoji: "🟢", color: "text-emerald-400", bgColor: "bg-emerald-500/15 border-emerald-500/30 text-emerald-400" };
+    return { id: "click", name: "Click", emoji: "💳", tgEmojiId: "5332606428068737460", color: "text-emerald-400", bgColor: "bg-emerald-500/15 border-emerald-500/30 text-emerald-400" };
   }
   if (m === "payme") {
-    return { id: "payme", name: "Payme", emoji: "🔵", color: "text-sky-400", bgColor: "bg-sky-500/15 border-sky-500/30 text-sky-400" };
+    return { id: "payme", name: "Payme", emoji: "💸", tgEmojiId: "5204128408463744787", color: "text-sky-400", bgColor: "bg-sky-500/15 border-sky-500/30 text-sky-400" };
   }
   if (m === "admin" || m === "administrator" || m === "manual") {
-    return { id: "admin", name: "Администратор", emoji: "⚡", color: "text-amber-400", bgColor: "bg-amber-500/15 border-amber-500/30 text-amber-400" };
+    return { id: "admin", name: "Администратор", emoji: "👩‍💻", tgEmojiId: "6269458311381258421", color: "text-amber-400", bgColor: "bg-amber-500/15 border-amber-500/30 text-amber-400" };
   }
   if (m === "stars" || m === "telegram_stars") {
-    return { id: "stars", name: "Telegram Stars", emoji: "⭐", color: "text-amber-400", bgColor: "bg-amber-500/15 border-amber-500/30 text-amber-400" };
+    return { id: "stars", name: "Telegram Stars", emoji: "⭐️", tgEmojiId: "5897658922600240288", color: "text-amber-400", bgColor: "bg-amber-500/15 border-amber-500/30 text-amber-400" };
   }
   if (m === "binance" || m === "binance_pay") {
-    return { id: "binance", name: "Binance Pay", emoji: "🪙", color: "text-yellow-400", bgColor: "bg-yellow-500/15 border-yellow-500/30 text-yellow-400" };
+    return { id: "binance", name: "Binance Pay", emoji: "🪙", tgEmojiId: "", color: "text-yellow-400", bgColor: "bg-yellow-500/15 border-yellow-500/30 text-yellow-400" };
   }
   if (m === "receipt") {
-    return { id: "receipt", name: "Чек / Перевод", emoji: "🧾", color: "text-purple-400", bgColor: "bg-purple-500/15 border-purple-500/30 text-purple-400" };
+    return { id: "receipt", name: "Чек / Перевод", emoji: "🧾", tgEmojiId: "5204242830687494041", color: "text-purple-400", bgColor: "bg-purple-500/15 border-purple-500/30 text-purple-400" };
   }
   // Default to Payme (primary merchant in the bot)
-  return { id: "payme", name: "Payme", emoji: "🔵", color: "text-sky-400", bgColor: "bg-sky-500/15 border-sky-500/30 text-sky-400" };
+  return { id: "payme", name: "Payme", emoji: "💸", tgEmojiId: "5204128408463744787", color: "text-sky-400", bgColor: "bg-sky-500/15 border-sky-500/30 text-sky-400" };
 }
 
 export interface NormalizedSourceApi {
   id: string;
   name: string;
   badge: string;
+  tgEmojiId?: string;
 }
 
 export function normalizeSourceApi(source: string | null | undefined, supplierKey?: string | null): NormalizedSourceApi {
@@ -225,7 +232,7 @@ export function normalizeSourceApi(source: string | null | undefined, supplierKe
     return { id: "hybrid", name: "Склад + Авто API", badge: "⚡ Склад + API" };
   }
   if (s === "stock") {
-    return { id: "stock", name: "Склад (ключи)", badge: "📦 Со склада" };
+    return { id: "stock", name: "Склад (ключи)", badge: "📦 Со склада", tgEmojiId: "5255860701133552970" };
   }
   if (s === "fragment") {
     return { id: "fragment", name: "Telegram Fragment", badge: "⭐ Fragment" };

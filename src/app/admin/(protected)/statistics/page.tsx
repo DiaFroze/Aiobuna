@@ -21,6 +21,7 @@ import {
 } from "@/lib/domain/sales-statistics";
 import { DailySalesChart } from "./DailySalesChart";
 import { ProductRatingTable } from "./ProductRatingTable";
+import { TgEmoji } from "@/components/admin/TgEmoji";
 
 export const dynamic = "force-dynamic";
 
@@ -80,7 +81,11 @@ export default async function StatisticsPage({
     return (
       <div className="space-y-4">
         <PageHeader
-          title="📊 Статистика продаж"
+          title={
+            <span className="inline-flex items-center gap-2">
+              <TgEmoji name="statistics" /> Статистика продаж
+            </span>
+          }
           subtitle="Реальные продажи, оплаты и закупки магазина"
         />
         <EmptyState>База данных бота недоступна.</EmptyState>
@@ -99,7 +104,7 @@ export default async function StatisticsPage({
     searchParams.to
   );
 
-  // Fetch real PostgreSQL orders with variant, supplier and ad relations
+  // Fetch real PostgreSQL orders
   const rawOrders = (await botDb.botOrder.findMany({
     where: {
       status: { in: SALE_STATUSES as unknown as string[] },
@@ -422,7 +427,7 @@ export default async function StatisticsPage({
         <div className="flex items-center justify-between">
           <div>
             <h2 className="font-semibold text-base sm:text-lg flex items-center gap-2">
-              💳 Способы оплаты
+              <TgEmoji name="click" /> Способы оплаты
               <span className="badge bg-surface-2 text-muted text-xs font-normal">
                 {paymentSummaries.length} способа
               </span>
@@ -463,7 +468,9 @@ export default async function StatisticsPage({
                 }`}
               >
                 <div className="flex items-center justify-between">
-                  <span className="text-xl">{p.emoji}</span>
+                  <span className="text-2xl">
+                    <TgEmoji name={p.id as any} fallback={p.emoji} />
+                  </span>
                   <span className="text-xs font-mono font-semibold text-foreground px-2 py-0.5 rounded bg-surface-1 border border-border">
                     {p.sharePct}%
                   </span>
@@ -523,9 +530,15 @@ export default async function StatisticsPage({
                 return (
                   <tr key={src.id} className="hover:bg-surface-2/30 transition-colors">
                     <td className="px-4 py-3 font-medium">
-                      <span className="badge bg-surface-2 text-foreground font-mono text-xs px-2 py-0.5">
-                        {src.badge}
-                      </span>
+                      {src.id === "stock" ? (
+                        <span className="badge bg-surface-2 text-foreground font-mono text-xs px-2 py-0.5 inline-flex items-center gap-1.5">
+                          <TgEmoji name="stock" /> Со склада
+                        </span>
+                      ) : (
+                        <span className="badge bg-surface-2 text-foreground font-mono text-xs px-2 py-0.5">
+                          {src.badge}
+                        </span>
+                      )}
                     </td>
                     <td className="px-3 py-3 text-right font-mono text-xs sm:text-sm">
                       {src.ordersCount}
@@ -635,7 +648,7 @@ export default async function StatisticsPage({
                       </td>
                       <td className="px-4 py-3 whitespace-nowrap">
                         <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold border ${pay.bgColor}`}>
-                          <span>{pay.emoji}</span>
+                          <TgEmoji name={pay.id as any} emojiId={pay.tgEmojiId} fallback={pay.emoji} />
                           <span>{pay.name}</span>
                         </span>
                       </td>
@@ -646,9 +659,15 @@ export default async function StatisticsPage({
                         {cost > 0 ? formatUzs(cost) : "0 сум"}
                       </td>
                       <td className="px-4 py-3 text-xs whitespace-nowrap">
-                        <span className="badge bg-surface-2 text-foreground font-mono text-[11px]">
-                          {src.badge}
-                        </span>
+                        {src.id === "stock" ? (
+                          <span className="badge bg-surface-2 text-foreground font-mono text-[11px] inline-flex items-center gap-1">
+                            <TgEmoji name="stock" /> Со склада
+                          </span>
+                        ) : (
+                          <span className="badge bg-surface-2 text-foreground font-mono text-[11px]">
+                            {src.badge}
+                          </span>
+                        )}
                       </td>
                       <td className="px-3 py-3 text-right font-bold font-mono text-xs whitespace-nowrap">
                         <span className={profit >= 0 ? "text-emerald-400" : "text-rose-400"}>
