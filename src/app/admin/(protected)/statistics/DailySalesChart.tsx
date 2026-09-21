@@ -1,14 +1,30 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { DailySalesRow, formatUzs } from "@/lib/domain/sales-statistics";
 
 interface DailySalesChartProps {
   days: DailySalesRow[];
 }
 
+function formatCompactUzs(val: number): string {
+  if (val >= 1_000_000) {
+    return `${(val / 1_000_000).toFixed(1)}M`;
+  }
+  if (val >= 1_000) {
+    return `${Math.round(val / 1_000)}k`;
+  }
+  return String(val);
+}
+
 export function DailySalesChart({ days }: DailySalesChartProps) {
-  const [hoveredDay, setHoveredDay] = useState<DailySalesRow | null>(null);
+  // Default selected day: highest revenue day or latest
+  const initialSelected = useMemo(() => {
+    if (days.length === 0) return null;
+    return [...days].sort((a, b) => b.revenue - a.revenue)[0];
+  }, [days]);
+
+  const [selectedDay, setSelectedDay] = useState<DailySalesRow | null>(initialSelected);
 
   if (days.length === 0) {
     return (
@@ -21,6 +37,7 @@ export function DailySalesChart({ days }: DailySalesChartProps) {
   // Chronological order for visual chart (left to right)
   const chartDays = [...days].reverse();
   const maxRevenue = Math.max(...days.map((d) => d.revenue), 1);
+  const activeDay = selectedDay || days[0];
 
   return (
     <div className="card p-4 sm:p-5 space-y-4">
@@ -34,7 +51,7 @@ export function DailySalesChart({ days }: DailySalesChartProps) {
             </span>
           </h2>
           <p className="text-xs text-muted mt-0.5">
-            Динамика продаж, затрат на закупку и заработка по дням
+            Нажмите на любой столбец для просмотра подробной информации за день
           </p>
         </div>
 
@@ -47,94 +64,122 @@ export function DailySalesChart({ days }: DailySalesChartProps) {
             <span className="w-3 h-3 rounded-sm bg-emerald-500 inline-block" />
             <span>Заработано</span>
           </div>
-          <div className="flex items-center gap-1.5">
-            <span className="w-3 h-3 rounded-sm bg-amber-500/80 inline-block" />
-            <span>Закупка</span>
-          </div>
         </div>
       </div>
 
-      {/* Visual Bar Chart */}
+      {/* Selected Day Inspector Box — Placed ABOVE the scroll area so it NEVER gets clipped */}
+      {activeDay && (
+        <div className="p-4 rounded-xl bg-surface-2/60 border border-border space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-border/60">
+            <div className="font-semibold text-sm sm:text-base text-foreground flex items-center gap-2">
+              <span>📅</span>
+              <span>{activeDay.dateFormatted}</span>
+              <span className="text-xs text-muted font-normal">
+                ({activeDay.ordersCount} зак. • {activeDay.itemsCount} шт.)
+              </span>
+            </div>
+            <span className="text-xs text-muted">
+              (выберите день на графике или в таблице)
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-1">
+            <div className="bg-surface-1 p-2.5 rounded-lg border border-border">
+              <span className="text-[11px] text-muted block">Продано на сумму</span>
+              <strong className="text-sm sm:text-base font-mono text-brand block mt-0.5">
+                {formatUzs(activeDay.revenue)}
+              </strong>
+            </div>
+
+            <div className="bg-surface-1 p-2.5 rounded-lg border border-border">
+              <span className="text-[11px] text-muted block">Затраты на закупку</span>
+              <strong className="text-sm sm:text-base font-mono text-muted block mt-0.5">
+                {formatUzs(activeDay.cost)}
+              </strong>
+            </div>
+
+            <div className="bg-surface-1 p-2.5 rounded-lg border border-border">
+              <span className="text-[11px] text-muted block">Заработано (доход)</span>
+              <strong
+                className={`text-sm sm:text-base font-mono block mt-0.5 ${
+                  activeDay.profit >= 0 ? "text-emerald-400" : "text-rose-400"
+                }`}
+              >
+                {activeDay.profit >= 0 ? `+${formatUzs(activeDay.profit)}` : formatUzs(activeDay.profit)}
+              </strong>
+            </div>
+
+            <div className="bg-surface-1 p-2.5 rounded-lg border border-border">
+              <span className="text-[11px] text-muted block">Способы оплаты</span>
+              <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                {activeDay.payments && activeDay.payments.length > 0 ? (
+                  activeDay.payments.map((p) => (
+                    <span
+                      key={p.id}
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono bg-surface-2 text-foreground"
+                    >
+                      <span>{p.emoji}</span>
+                      <span>{p.name}: {p.count}</span>
+                    </span>
+                  ))
+                ) : (
+                  <span className="text-xs text-muted">—</span>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Visual Bar Chart with ample headroom so labels are never cut off */}
       <div className="bg-surface-2/30 rounded-xl p-3 sm:p-4 border border-border">
         <div className="overflow-x-auto pb-2">
           <div
-            className="flex items-end gap-2 sm:gap-3 min-w-max h-48 pt-6 px-2"
-            style={{ minWidth: `${Math.max(100, chartDays.length * 52)}px` }}
+            className="flex items-end gap-3 sm:gap-4 min-w-max h-52 pt-10 px-2"
+            style={{ minWidth: `${Math.max(100, chartDays.length * 56)}px` }}
           >
             {chartDays.map((d) => {
-              const revHeight = Math.max(8, (d.revenue / maxRevenue) * 140);
+              const revHeight = Math.max(12, (d.revenue / maxRevenue) * 130);
               const profitHeight =
-                d.profit > 0 ? Math.max(4, (d.profit / maxRevenue) * 140) : 4;
-              const isNegativeProfit = d.profit < 0;
+                d.profit > 0 ? Math.max(6, (d.profit / maxRevenue) * 130) : 6;
+              const isSelected = activeDay?.dateKey === d.dateKey;
 
               return (
                 <div
                   key={d.dateKey}
-                  className="flex flex-col items-center group cursor-pointer relative"
-                  onMouseEnter={() => setHoveredDay(d)}
-                  onMouseLeave={() => setHoveredDay(null)}
+                  onClick={() => setSelectedDay(d)}
+                  className={`flex flex-col items-center group cursor-pointer p-1 rounded-lg transition-all ${
+                    isSelected ? "bg-brand/10 ring-2 ring-brand" : "hover:bg-surface-2"
+                  }`}
+                  title={`${d.dateFormatted}: Продажи ${formatUzs(d.revenue)}, Заработано ${formatUzs(d.profit)}`}
                 >
-                  {/* Tooltip on hover */}
-                  <div className="opacity-0 group-hover:opacity-100 transition-opacity absolute bottom-full mb-2 z-20 pointer-events-none bg-surface-1 border border-border shadow-xl rounded-lg p-2.5 text-xs whitespace-nowrap min-w-[180px]">
-                    <div className="font-semibold text-foreground border-b border-border pb-1 mb-1.5 flex items-center justify-between">
-                      <span>{d.dateFormatted}</span>
-                      <span className="text-muted font-normal">{d.ordersCount} зак.</span>
-                    </div>
-                    <div className="space-y-1 font-mono text-[11px]">
-                      <div className="flex justify-between gap-3 text-muted">
-                        <span>Продажи:</span>
-                        <span className="text-brand font-semibold">{formatUzs(d.revenue)}</span>
-                      </div>
-                      <div className="flex justify-between gap-3 text-muted">
-                        <span>Закупка:</span>
-                        <span className="text-foreground">{formatUzs(d.cost)}</span>
-                      </div>
-                      <div className="flex justify-between gap-3 text-muted">
-                        <span>Заработано:</span>
-                        <span
-                          className={`font-semibold ${
-                            d.profit >= 0 ? "text-emerald-400" : "text-rose-400"
-                          }`}
-                        >
-                          {formatUzs(d.profit)}
-                        </span>
-                      </div>
-                      {d.payments && d.payments.length > 0 && (
-                        <div className="pt-1 mt-1 border-t border-border/60 text-[10px]">
-                          <div className="text-muted mb-0.5">Оплаты:</div>
-                          {d.payments.map((p) => (
-                            <div key={p.id} className="flex justify-between text-muted">
-                              <span>{p.emoji} {p.name}:</span>
-                              <span className="text-foreground font-semibold">{p.count} зак.</span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
+                  {/* Revenue compact label directly on top of the bar */}
+                  <span className="text-[10px] font-mono text-muted group-hover:text-brand font-semibold mb-1">
+                    {formatCompactUzs(d.revenue)}
+                  </span>
 
                   {/* Dual Bar */}
                   <div className="flex items-end gap-1 h-36">
                     {/* Revenue Bar */}
                     <div
-                      className="w-3 sm:w-4 rounded-t bg-brand/80 group-hover:bg-brand transition-all"
+                      className="w-3.5 sm:w-4 rounded-t bg-brand/80 group-hover:bg-brand transition-all"
                       style={{ height: `${revHeight}px` }}
-                      title={`Продажи: ${formatUzs(d.revenue)}`}
                     />
                     {/* Profit Bar */}
                     <div
-                      className={`w-3 sm:w-4 rounded-t transition-all ${
-                        isNegativeProfit
-                          ? "bg-rose-500/80 group-hover:bg-rose-500"
-                          : "bg-emerald-500/80 group-hover:bg-emerald-500"
+                      className={`w-3.5 sm:w-4 rounded-t transition-all ${
+                        d.profit >= 0
+                          ? "bg-emerald-500/80 group-hover:bg-emerald-500"
+                          : "bg-rose-500/80 group-hover:bg-rose-500"
                       }`}
                       style={{ height: `${profitHeight}px` }}
-                      title={`Заработано: ${formatUzs(d.profit)}`}
                     />
                   </div>
 
                   {/* Day Label */}
-                  <div className="text-[10px] sm:text-xs text-muted mt-2 font-mono group-hover:text-foreground">
+                  <div className={`text-[10px] sm:text-xs mt-2 font-mono ${
+                    isSelected ? "text-brand font-bold" : "text-muted group-hover:text-foreground"
+                  }`}>
                     {d.dateFormatted.slice(0, 5)}
                   </div>
                 </div>
@@ -144,23 +189,6 @@ export function DailySalesChart({ days }: DailySalesChartProps) {
         </div>
       </div>
 
-      {/* Selected Day Bar details */}
-      {hoveredDay && (
-        <div className="p-3 rounded-lg bg-surface-2/40 border border-border flex flex-wrap items-center justify-between gap-3 text-xs">
-          <div className="font-semibold text-foreground">
-            Выбран день: <span className="font-mono">{hoveredDay.dateFormatted}</span>
-          </div>
-          <div className="flex flex-wrap items-center gap-4 font-mono">
-            <span>Заказов: <strong>{hoveredDay.ordersCount}</strong></span>
-            <span className="text-brand">Продажи: <strong>{formatUzs(hoveredDay.revenue)}</strong></span>
-            <span>Закупка: <strong>{formatUzs(hoveredDay.cost)}</strong></span>
-            <span className={hoveredDay.profit >= 0 ? "text-emerald-400" : "text-rose-400"}>
-              Заработано: <strong>{formatUzs(hoveredDay.profit)}</strong>
-            </span>
-          </div>
-        </div>
-      )}
-
       {/* Daily Table (Newest to Oldest) */}
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
@@ -168,7 +196,7 @@ export function DailySalesChart({ days }: DailySalesChartProps) {
             <tr className="border-b text-left text-xs font-semibold text-muted bg-surface-2/40 uppercase tracking-wider">
               <th className="px-4 py-2.5">Дата</th>
               <th className="px-3 py-2.5 text-right">Заказов</th>
-              <th className="px-4 py-2.5 text-right">Продажи</th>
+              <th className="px-4 py-2.5 text-right">Сумма продаж</th>
               <th className="px-4 py-2.5 text-right">Закупка</th>
               <th className="px-4 py-2.5 text-right">Заработано</th>
               <th className="px-4 py-2.5">Оплаты за день</th>
@@ -177,36 +205,43 @@ export function DailySalesChart({ days }: DailySalesChartProps) {
           <tbody className="divide-y divide-border">
             {days.map((row) => {
               const isProfitPositive = row.profit >= 0;
+              const isSelected = activeDay?.dateKey === row.dateKey;
 
               return (
-                <tr key={row.dateKey} className="hover:bg-surface-2/30 transition-colors">
-                  <td className="px-4 py-2.5 font-medium font-mono text-xs sm:text-sm whitespace-nowrap">
+                <tr
+                  key={row.dateKey}
+                  onClick={() => setSelectedDay(row)}
+                  className={`cursor-pointer transition-colors ${
+                    isSelected ? "bg-brand/10 font-medium" : "hover:bg-surface-2/30"
+                  }`}
+                >
+                  <td className="px-4 py-3 font-mono text-xs sm:text-sm whitespace-nowrap">
                     {row.dateFormatted}
                   </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-xs sm:text-sm">
-                    {row.ordersCount} ({row.itemsCount} шт.)
+                  <td className="px-3 py-3 text-right font-mono text-xs sm:text-sm">
+                    <strong>{row.ordersCount}</strong> ({row.itemsCount} шт.)
                   </td>
-                  <td className="px-4 py-2.5 text-right font-medium font-mono text-xs sm:text-sm text-brand whitespace-nowrap">
+                  <td className="px-4 py-3 text-right font-semibold font-mono text-xs sm:text-sm text-brand whitespace-nowrap">
                     {formatUzs(row.revenue)}
                   </td>
-                  <td className="px-4 py-2.5 text-right font-mono text-xs sm:text-sm text-muted whitespace-nowrap">
+                  <td className="px-4 py-3 text-right font-mono text-xs sm:text-sm text-muted whitespace-nowrap">
                     {formatUzs(row.cost)}
                   </td>
-                  <td className="px-4 py-2.5 text-right font-semibold font-mono text-xs sm:text-sm whitespace-nowrap">
+                  <td className="px-4 py-3 text-right font-bold font-mono text-xs sm:text-sm whitespace-nowrap">
                     <span className={isProfitPositive ? "text-emerald-400" : "text-rose-400"}>
-                      {formatUzs(row.profit)}
+                      {isProfitPositive ? `+${formatUzs(row.profit)}` : formatUzs(row.profit)}
                     </span>
                   </td>
-                  <td className="px-4 py-2.5 text-xs">
+                  <td className="px-4 py-3 text-xs">
                     <div className="flex flex-wrap items-center gap-1.5">
                       {row.payments && row.payments.length > 0 ? (
                         row.payments.map((p) => (
                           <span
                             key={p.id}
-                            className="badge bg-surface-2 text-foreground font-mono text-[11px] px-1.5 py-0.5"
+                            className="badge bg-surface-2 text-foreground font-mono text-[11px] px-2 py-0.5"
                             title={`${p.name}: ${formatUzs(p.sum)}`}
                           >
-                            {p.emoji} {p.name} ({p.count})
+                            {p.emoji} {p.name}: {p.count}
                           </span>
                         ))
                       ) : (

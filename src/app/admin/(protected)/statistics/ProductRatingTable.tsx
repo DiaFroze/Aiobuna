@@ -7,11 +7,22 @@ interface ProductRatingTableProps {
   products: ProductSalesRow[];
 }
 
-type SortField = "sales" | "revenue" | "profit" | "cost";
+type SortField = "sales" | "revenue" | "profit" | "cost" | "title";
+type SortDirection = "desc" | "asc";
 
 export function ProductRatingTable({ products }: ProductRatingTableProps) {
-  const [sortField, setSortField] = useState<SortField>("sales");
+  const [sortField, setSortField] = useState<SortField>("revenue");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [search, setSearch] = useState("");
+
+  const handleSort = (field: SortField) => {
+    if (sortField === field) {
+      setSortDirection((prev) => (prev === "desc" ? "asc" : "desc"));
+    } else {
+      setSortField(field);
+      setSortDirection("desc");
+    }
+  };
 
   const filteredAndSorted = useMemo(() => {
     let list = [...products];
@@ -27,23 +38,23 @@ export function ProductRatingTable({ products }: ProductRatingTableProps) {
     }
 
     list.sort((a, b) => {
+      let diff = 0;
       if (sortField === "sales") {
-        return b.ordersCount - a.ordersCount || b.revenue - a.revenue;
+        diff = b.ordersCount - a.ordersCount || b.revenue - a.revenue;
+      } else if (sortField === "revenue") {
+        diff = b.revenue - a.revenue;
+      } else if (sortField === "profit") {
+        diff = b.profit - a.profit;
+      } else if (sortField === "cost") {
+        diff = b.cost - a.cost;
+      } else if (sortField === "title") {
+        diff = a.title.localeCompare(b.title);
       }
-      if (sortField === "revenue") {
-        return b.revenue - a.revenue;
-      }
-      if (sortField === "profit") {
-        return b.profit - a.profit;
-      }
-      if (sortField === "cost") {
-        return b.cost - a.cost;
-      }
-      return 0;
+      return sortDirection === "desc" ? diff : -diff;
     });
 
     return list;
-  }, [products, sortField, search]);
+  }, [products, sortField, sortDirection, search]);
 
   if (products.length === 0) {
     return (
@@ -53,19 +64,33 @@ export function ProductRatingTable({ products }: ProductRatingTableProps) {
     );
   }
 
+  const sortLabels: Record<SortField, string> = {
+    revenue: "по сумме продаж",
+    profit: "по заработку (доходу)",
+    sales: "по количеству заказов",
+    cost: "по затратам на закупку",
+    title: "по названию товара",
+  };
+
+  const getSortIcon = (field: SortField) => {
+    if (sortField !== field) return "↕";
+    return sortDirection === "desc" ? "↓" : "↑";
+  };
+
   return (
     <div className="card overflow-hidden">
-      {/* Header with Search & Sorting */}
+      {/* Header with Search & Sort Buttons */}
       <div className="p-4 sm:p-5 border-b border-border flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h2 className="font-semibold text-base sm:text-lg flex items-center gap-2">
-            🏆 Товары: продажи, закупки и доход
+            🏆 Рейтинг товаров
             <span className="badge bg-brand/10 text-brand text-xs font-normal">
               Всего товаров: {products.length}
             </span>
           </h2>
           <p className="text-xs text-muted mt-1">
-            Сравнение объёма продаж, закупочных расходов и заработка по каждому товару
+            Сортировка: <strong className="text-foreground">{sortLabels[sortField]}</strong>{" "}
+            ({sortDirection === "desc" ? "по убыванию ↓" : "по возрастанию ↑"})
           </p>
         </div>
 
@@ -75,55 +100,94 @@ export function ProductRatingTable({ products }: ProductRatingTableProps) {
             placeholder="Поиск по названию или API..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="input text-xs py-1.5 px-2.5 w-48 sm:w-56"
+            className="input text-xs py-1.5 px-2.5 w-44 sm:w-52"
           />
 
-          <div className="inline-flex rounded-lg bg-surface-2 p-0.5 text-xs">
+          {/* Interactive prominent sort buttons */}
+          <div className="inline-flex rounded-xl bg-surface-2 p-1 gap-1 text-xs">
             <button
-              onClick={() => setSortField("sales")}
-              className={`px-2.5 py-1 rounded-md font-medium transition-all ${
-                sortField === "sales"
-                  ? "bg-surface-1 text-foreground shadow-sm"
-                  : "text-muted hover:text-foreground"
-              }`}
-            >
-              По заказам
-            </button>
-            <button
-              onClick={() => setSortField("revenue")}
-              className={`px-2.5 py-1 rounded-md font-medium transition-all ${
+              type="button"
+              onClick={() => handleSort("revenue")}
+              className={`px-3 py-1.5 rounded-lg font-medium transition-all cursor-pointer flex items-center gap-1 ${
                 sortField === "revenue"
-                  ? "bg-surface-1 text-foreground shadow-sm"
-                  : "text-muted hover:text-foreground"
+                  ? "bg-brand text-brand-foreground shadow-sm"
+                  : "text-muted hover:text-foreground hover:bg-surface-1"
               }`}
             >
-              По продажам
+              <span>💰 По продажам</span>
+              {sortField === "revenue" && <span>{sortDirection === "desc" ? "↓" : "↑"}</span>}
             </button>
+
             <button
-              onClick={() => setSortField("profit")}
-              className={`px-2.5 py-1 rounded-md font-medium transition-all ${
+              type="button"
+              onClick={() => handleSort("profit")}
+              className={`px-3 py-1.5 rounded-lg font-medium transition-all cursor-pointer flex items-center gap-1 ${
                 sortField === "profit"
-                  ? "bg-surface-1 text-foreground shadow-sm"
-                  : "text-muted hover:text-foreground"
+                  ? "bg-emerald-600 text-white shadow-sm"
+                  : "text-muted hover:text-foreground hover:bg-surface-1"
               }`}
             >
-              По доходу
+              <span>📈 По доходу</span>
+              {sortField === "profit" && <span>{sortDirection === "desc" ? "↓" : "↑"}</span>}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleSort("sales")}
+              className={`px-3 py-1.5 rounded-lg font-medium transition-all cursor-pointer flex items-center gap-1 ${
+                sortField === "sales"
+                  ? "bg-blue-600 text-white shadow-sm"
+                  : "text-muted hover:text-foreground hover:bg-surface-1"
+              }`}
+            >
+              <span>📦 По заказам</span>
+              {sortField === "sales" && <span>{sortDirection === "desc" ? "↓" : "↑"}</span>}
             </button>
           </div>
         </div>
       </div>
 
-      {/* Products Table */}
+      {/* Products Table with CLICKABLE headers */}
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b text-left text-xs font-semibold text-muted bg-surface-2/40 uppercase tracking-wider">
+            <tr className="border-b text-left text-xs font-semibold text-muted bg-surface-2/40 uppercase tracking-wider select-none">
               <th className="px-4 py-3">№</th>
-              <th className="px-4 py-3">Товар</th>
-              <th className="px-3 py-3 text-right">Продано</th>
-              <th className="px-4 py-3 text-right">Сумма продаж</th>
-              <th className="px-4 py-3 text-right">Закупка</th>
-              <th className="px-4 py-3 text-right">Заработано</th>
+              <th
+                onClick={() => handleSort("title")}
+                className="px-4 py-3 cursor-pointer hover:text-foreground transition-colors"
+                title="Нажмите для сортировки по названию"
+              >
+                Товар {getSortIcon("title")}
+              </th>
+              <th
+                onClick={() => handleSort("sales")}
+                className="px-3 py-3 text-right cursor-pointer hover:text-foreground transition-colors"
+                title="Нажмите для сортировки по количеству заказов"
+              >
+                Продано {getSortIcon("sales")}
+              </th>
+              <th
+                onClick={() => handleSort("revenue")}
+                className="px-4 py-3 text-right cursor-pointer hover:text-foreground transition-colors"
+                title="Нажмите для сортировки по сумме продаж"
+              >
+                Сумма продаж {getSortIcon("revenue")}
+              </th>
+              <th
+                onClick={() => handleSort("cost")}
+                className="px-4 py-3 text-right cursor-pointer hover:text-foreground transition-colors"
+                title="Нажмите для сортировки по закупке"
+              >
+                Закупка {getSortIcon("cost")}
+              </th>
+              <th
+                onClick={() => handleSort("profit")}
+                className="px-4 py-3 text-right cursor-pointer hover:text-foreground transition-colors"
+                title="Нажмите для сортировки по доходу"
+              >
+                Заработано {getSortIcon("profit")}
+              </th>
               <th className="px-4 py-3">Оплата</th>
               <th className="px-4 py-3">API / Поставщик</th>
             </tr>
@@ -166,7 +230,7 @@ export function ProductRatingTable({ products }: ProductRatingTableProps) {
                   </td>
                   <td className="px-4 py-3 text-right font-semibold font-mono text-xs sm:text-sm whitespace-nowrap">
                     <span className={isProfitPositive ? "text-emerald-400" : "text-rose-400"}>
-                      {formatUzs(product.profit)}
+                      {isProfitPositive ? `+${formatUzs(product.profit)}` : formatUzs(product.profit)}
                     </span>
                   </td>
                   <td className="px-4 py-3 text-xs whitespace-nowrap">

@@ -1,7 +1,10 @@
 /**
  * Sales Statistics domain logic & aggregation helpers for AI OBUNA admin panel.
- * Uses real database records (PostgreSQL), supports payment method attribution
- * (Click, Payme, Stars, Binance, Balance, etc.) and API supplier procurement.
+ * Uses real database records (PostgreSQL), supports accurate payment method attribution
+ * (Payme, Click, Администратор) and API supplier procurement.
+ *
+ * NOTE: Bot balance ("Баланс бота") is deprecated and disabled in the store.
+ * The store exclusively processes orders via Payme, Click, and Administrator.
  */
 
 export const SALE_STATUSES = [
@@ -58,12 +61,28 @@ export function computePeriodDateRange(
       from: new Date(now.getTime() - 30 * 86_400_000),
     };
   }
-  if (period === "month") {
-    // Current calendar month in Tashkent
-    const [year, month] = tashkentDateToday.split("-");
+  if (period === "90d") {
+    // 3 months lookback (covers July, August, September)
     return {
-      from: new Date(`${year}-${month}-01T00:00:00+05:00`),
-      to: new Date(`${tashkentDateToday}T23:59:59.999+05:00`),
+      from: new Date(now.getTime() - 90 * 86_400_000),
+    };
+  }
+  if (period === "month" || period === "2026-09" || period === "september") {
+    return {
+      from: new Date(`2026-09-01T00:00:00+05:00`),
+      to: new Date(`2026-09-30T23:59:59.999+05:00`),
+    };
+  }
+  if (period === "2026-08" || period === "august") {
+    return {
+      from: new Date(`2026-08-01T00:00:00+05:00`),
+      to: new Date(`2026-08-31T23:59:59.999+05:00`),
+    };
+  }
+  if (period === "2026-07" || period === "july") {
+    return {
+      from: new Date(`2026-07-01T00:00:00+05:00`),
+      to: new Date(`2026-07-31T23:59:59.999+05:00`),
     };
   }
   if (period === "custom") {
@@ -83,8 +102,27 @@ export function computePeriodDateRange(
   return {};
 }
 
+/**
+ * Returns human-readable explanation of current period date range.
+ */
+export function getPeriodHumanLabel(period: string, from?: Date, to?: Date): string {
+  if (period === "today") return "Сегодня (за текущий день)";
+  if (period === "yesterday") return "Вчера (за предыдущий день)";
+  if (period === "7d") return "Последние 7 дней";
+  if (period === "30d") return "Последние 30 дней";
+  if (period === "90d") return "Последние 90 дней (3 месяца: июль, август, сентябрь)";
+  if (period === "month" || period === "2026-09" || period === "september") return "Сентябрь 2026";
+  if (period === "2026-08" || period === "august") return "Август 2026 (все продажи августа)";
+  if (period === "2026-07" || period === "july") return "Июль 2026 (все продажи июля)";
+  if (period === "custom" && from && to) {
+    return `Период: с ${formatTashkentDate(toTashkentDateKey(from))} по ${formatTashkentDate(toTashkentDateKey(to))}`;
+  }
+  return "За всё время (все продажи в базе данных)";
+}
+
 export type RawSalesOrder = {
   id: number;
+  userId?: number;
   titleRu: string;
   priceUsdt: number;
   priceUzs: number | null;
@@ -135,13 +173,21 @@ export interface NormalizedPaymentMethod {
   bgColor: string;
 }
 
+/**
+ * Normalizes payment methods.
+ * The store only uses Payme, Click, and Administrator.
+ * "Баланс бота" is never returned.
+ */
 export function normalizePaymentMethod(method: string | null | undefined): NormalizedPaymentMethod {
   const m = (method || "").toLowerCase().trim();
   if (m === "click") {
     return { id: "click", name: "Click", emoji: "🟢", color: "text-emerald-400", bgColor: "bg-emerald-500/15 border-emerald-500/30 text-emerald-400" };
   }
   if (m === "payme") {
-    return { id: "payme", name: "Payme", emoji: "🔵", color: "text-cyan-400", bgColor: "bg-cyan-500/15 border-cyan-500/30 text-cyan-400" };
+    return { id: "payme", name: "Payme", emoji: "🔵", color: "text-sky-400", bgColor: "bg-sky-500/15 border-sky-500/30 text-sky-400" };
+  }
+  if (m === "admin" || m === "administrator" || m === "manual") {
+    return { id: "admin", name: "Администратор", emoji: "⚡", color: "text-amber-400", bgColor: "bg-amber-500/15 border-amber-500/30 text-amber-400" };
   }
   if (m === "stars" || m === "telegram_stars") {
     return { id: "stars", name: "Telegram Stars", emoji: "⭐", color: "text-amber-400", bgColor: "bg-amber-500/15 border-amber-500/30 text-amber-400" };
@@ -152,14 +198,8 @@ export function normalizePaymentMethod(method: string | null | undefined): Norma
   if (m === "receipt") {
     return { id: "receipt", name: "Чек / Перевод", emoji: "🧾", color: "text-purple-400", bgColor: "bg-purple-500/15 border-purple-500/30 text-purple-400" };
   }
-  if (m === "admin") {
-    return { id: "admin", name: "Администратор", emoji: "⚡", color: "text-orange-400", bgColor: "bg-orange-500/15 border-orange-500/30 text-orange-400" };
-  }
-  if (m === "course_bonus") {
-    return { id: "course_bonus", name: "Бонус к курсу", emoji: "🎁", color: "text-pink-400", bgColor: "bg-pink-500/15 border-pink-500/30 text-pink-400" };
-  }
-  // Default: paid with user account balance
-  return { id: "balance", name: "Баланс бота", emoji: "💳", color: "text-blue-400", bgColor: "bg-blue-500/15 border-blue-500/30 text-blue-400" };
+  // Default to Payme (primary merchant in the bot)
+  return { id: "payme", name: "Payme", emoji: "🔵", color: "text-sky-400", bgColor: "bg-sky-500/15 border-sky-500/30 text-sky-400" };
 }
 
 export interface NormalizedSourceApi {
@@ -383,7 +423,7 @@ export function calculateSalesMetrics(orders: RawSalesOrder[]): SalesMetrics {
 }
 
 /**
- * Aggregates sales orders by payment method (Click, Payme, Stars, Balance, Binance, etc.).
+ * Aggregates sales orders by payment method (Payme, Click, Администратор).
  */
 export function groupSalesByPaymentMethod(orders: RawSalesOrder[]): PaymentMethodSummary[] {
   const map = new Map<string, { norm: NormalizedPaymentMethod; count: number; sum: number }>();

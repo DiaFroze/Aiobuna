@@ -17,6 +17,7 @@ import {
   formatUzs,
   formatTashkentDateTime,
   computePeriodDateRange,
+  getPeriodHumanLabel,
 } from "@/lib/domain/sales-statistics";
 import { DailySalesChart } from "./DailySalesChart";
 import { ProductRatingTable } from "./ProductRatingTable";
@@ -87,7 +88,7 @@ export default async function StatisticsPage({
     );
   }
 
-  // Default period: all-time ("all") as requested by the user
+  // Default period: all-time ("all")
   const period = searchParams.period ?? "all";
   const selectedPayment = searchParams.payment;
   const now = new Date();
@@ -114,6 +115,7 @@ export default async function StatisticsPage({
     },
     select: {
       id: true,
+      userId: true,
       titleRu: true,
       priceUsdt: true,
       priceUzs: true,
@@ -137,6 +139,88 @@ export default async function StatisticsPage({
     },
     orderBy: { createdAt: "desc" },
   })) as RawSalesOrder[];
+
+  // Fetch all approved TopUp records to reconcile payment methods (Payme vs Click vs Admin)
+  const approvedTopups = await botDb.topUp.findMany({
+    where: { status: { in: ["approved", "completed"] } },
+    select: {
+      id: true,
+      userId: true,
+      amount: true,
+      method: true,
+      note: true,
+      createdAt: true,
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  const topupById = new Map(approvedTopups.map((t) => [t.id, t]));
+  const topupsByUser = new Map<number, typeof approvedTopups>();
+  for (const t of approvedTopups) {
+    const list = topupsByUser.get(t.userId) ?? [];
+    list.push(t);
+    topupsByUser.set(t.userId, list);
+  }
+
+  // Reconcile and resolve exact paymentMethod for each order (No "Баланс бота"!)
+  const ordersToBackfill: { id: number; method: string }[] = [];
+
+  for (const order of rawOrders) {
+    let method = order.paymentMethod?.toLowerCase().trim();
+
+    // If method is missing, empty, or legacy "balance", reconcile from real payment channels
+    if (!method || method === "balance") {
+      // 1. Check direct paymentId linkage
+      if (order.paymentId) {
+        const t = topupById.get(Number(order.paymentId));
+        if (t?.method && t.method !== "balance") {
+          method = t.method.toLowerCase();
+        }
+      }
+
+      // 2. Check if admin purchase
+      if (!method && (order.source === "admin" || order.titleRu.toLowerCase().includes("админ"))) {
+        method = "admin";
+      }
+
+      // 3. Match closest TopUp of that user
+      if ((!method || method === "balance") && order.userId) {
+        const uTopups = topupsByUser.get(order.userId);
+        if (uTopups && uTopups.length > 0) {
+          const oTime = new Date(order.createdAt).getTime();
+          let best = uTopups[0];
+          let minDiff = Math.abs(oTime - new Date(best.createdAt).getTime());
+          for (const t of uTopups) {
+            const diff = Math.abs(oTime - new Date(t.createdAt).getTime());
+            if (diff < minDiff) {
+              minDiff = diff;
+              best = t;
+            }
+          }
+          if (best?.method && best.method !== "balance") {
+            method = best.method.toLowerCase();
+          }
+        }
+      }
+
+      // 4. Default: Payme (the bot's main payment gateway)
+      if (!method || method === "balance") {
+        method = "payme";
+      }
+
+      order.paymentMethod = method;
+      ordersToBackfill.push({ id: order.id, method });
+    }
+  }
+
+  // Background backfill in DB so rows stay permanently accurate
+  if (ordersToBackfill.length > 0) {
+    Promise.all(
+      ordersToBackfill.map(({ id, method }) =>
+        botDb.botOrder.update({ where: { id }, data: { paymentMethod: method } }).catch(() => {})
+      )
+    ).catch(() => {});
+  }
 
   // Attach variant details (costPriceUzs, supplierKey) if variantId exists
   const variantIds = Array.from(
@@ -188,7 +272,7 @@ export default async function StatisticsPage({
       {/* Header */}
       <PageHeader
         title="📊 Статистика продаж"
-        subtitle="Продажи по дням, способы оплаты (Click, Payme и др.) и закупки через API"
+        subtitle="Продажи по дням, платежи через Payme и Click, закупки через API"
         action={
           <div className="flex items-center gap-2">
             <Link href="/admin/bot-products" className="btn-secondary text-xs sm:text-sm">
@@ -215,22 +299,22 @@ export default async function StatisticsPage({
                 { id: "yesterday", label: "Вчера" },
                 { id: "7d", label: "7 дней" },
                 { id: "30d", label: "30 дней" },
-                { id: "month", label: "Этот месяц" },
+                { id: "90d", label: "90 дней (3 мес.)" },
+                { id: "2026-09", label: "Сентябрь" },
+                { id: "2026-08", label: "Август" },
+                { id: "2026-07", label: "Июль" },
                 { id: "custom", label: "Свои даты" },
               ].map((p) => {
                 const active = period === p.id;
-                const targetUrl = new URLSearchParams();
-                if (p.id !== "all") targetUrl.set("period", p.id);
-                if (selectedPayment) targetUrl.set("payment", selectedPayment);
-                const queryStr = targetUrl.toString();
+                const href = p.id === "all" ? "/admin/statistics" : `/admin/statistics?period=${p.id}`;
 
                 return (
                   <Link
                     key={p.id}
-                    href={queryStr ? `/admin/statistics?${queryStr}` : "/admin/statistics"}
+                    href={href}
                     className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
                       active
-                        ? "bg-brand text-brand-foreground shadow-sm"
+                        ? "bg-brand text-brand-foreground shadow-sm font-semibold"
                         : "bg-surface-2/70 text-muted hover:text-foreground hover:bg-surface-2"
                     }`}
                   >
@@ -251,13 +335,23 @@ export default async function StatisticsPage({
           )}
         </div>
 
+        {/* Clear period explanation badge */}
+        <div className="text-xs text-muted pt-1 flex flex-wrap items-center justify-between gap-2 border-t border-border/50">
+          <div className="flex items-center gap-1.5">
+            <span className="text-brand">📅</span>
+            <strong className="text-foreground">{getPeriodHumanLabel(period, from, to)}</strong>
+          </div>
+          <span className="font-mono text-muted">
+            Найдено заказов за период: <strong className="text-foreground">{rawOrders.length}</strong>
+          </span>
+        </div>
+
         {period === "custom" && (
           <form
             method="GET"
             className="pt-3 border-t border-border flex flex-wrap items-end gap-3"
           >
             <input type="hidden" name="period" value="custom" />
-            {selectedPayment && <input type="hidden" name="payment" value={selectedPayment} />}
             <div>
               <label className="text-xs text-muted font-medium block mb-1">
                 С даты
@@ -323,7 +417,7 @@ export default async function StatisticsPage({
         />
       </div>
 
-      {/* Section: Способы оплаты (Click, Payme, Stars, Баланс и др.) */}
+      {/* Section: Способы оплаты (Payme, Click, Администратор) */}
       <div className="card p-4 sm:p-5 space-y-3">
         <div className="flex items-center justify-between">
           <div>
@@ -334,7 +428,7 @@ export default async function StatisticsPage({
               </span>
             </h2>
             <p className="text-xs text-muted mt-0.5">
-              Через что оплачивали клиенты (нажмите на способ, чтобы отфильтровать заказы)
+              Фактические платежи через Payme, Click и администратора (нажмите для фильтрации)
             </p>
           </div>
 
@@ -348,7 +442,7 @@ export default async function StatisticsPage({
           )}
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 pt-1">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 pt-1">
           {paymentSummaries.map((p) => {
             const isSelected = selectedPayment === p.id;
             const searchParamsObj = new URLSearchParams();
@@ -362,26 +456,26 @@ export default async function StatisticsPage({
               <Link
                 key={p.id}
                 href={href}
-                className={`p-3 rounded-xl border transition-all cursor-pointer ${
+                className={`p-3.5 rounded-xl border transition-all cursor-pointer ${
                   isSelected
-                    ? "bg-brand/10 border-brand shadow-sm ring-1 ring-brand"
+                    ? "bg-brand/10 border-brand shadow-md ring-2 ring-brand"
                     : "bg-surface-2/40 hover:bg-surface-2 border-border"
                 }`}
               >
                 <div className="flex items-center justify-between">
-                  <span className="text-lg">{p.emoji}</span>
-                  <span className="text-[11px] font-mono text-muted">
+                  <span className="text-xl">{p.emoji}</span>
+                  <span className="text-xs font-mono font-semibold text-foreground px-2 py-0.5 rounded bg-surface-1 border border-border">
                     {p.sharePct}%
                   </span>
                 </div>
-                <div className="font-semibold text-sm mt-1.5 text-foreground">
+                <div className="font-semibold text-base mt-2 text-foreground">
                   {p.name}
                 </div>
-                <div className="text-xs font-mono font-medium text-brand mt-0.5">
+                <div className="text-sm font-mono font-bold text-brand mt-0.5">
                   {formatUzs(p.totalRevenue)}
                 </div>
-                <div className="text-[11px] text-muted mt-0.5">
-                  {p.ordersCount} зак.
+                <div className="text-xs text-muted mt-0.5">
+                  <strong>{p.ordersCount}</strong> заказов
                 </div>
               </Link>
             );
@@ -463,10 +557,10 @@ export default async function StatisticsPage({
         </div>
       </div>
 
-      {/* Section 1: Sales by day (Visual Chart + Table) */}
+      {/* Section 1: Sales by day (Visual Chart + Table with inspector box) */}
       <DailySalesChart days={dailyData} />
 
-      {/* Section 2: Products rating table */}
+      {/* Section 2: Products rating table with clickable headers and buttons */}
       <ProductRatingTable products={productsData} />
 
       {/* Section 3: Recent orders table */}
@@ -474,7 +568,7 @@ export default async function StatisticsPage({
         <div className="p-4 sm:p-5 border-b border-border flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
             <h2 className="font-semibold text-base sm:text-lg flex items-center gap-2">
-              ⏱️ Последние продажи
+              ⏱️ Список продаж
               {selectedPayment && (
                 <span className="badge bg-brand/10 text-brand text-xs font-normal">
                   Фильтр: {normalizePaymentMethod(selectedPayment).name}
@@ -482,7 +576,7 @@ export default async function StatisticsPage({
               )}
             </h2>
             <p className="text-xs text-muted mt-0.5">
-              Показывает товар, способ оплаты, закупку через API и чистый доход
+              Товары, способы оплаты (Payme/Click), закупка через API и доход
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -540,12 +634,12 @@ export default async function StatisticsPage({
                         {order.titleRu}
                       </td>
                       <td className="px-4 py-3 whitespace-nowrap">
-                        <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs font-medium border ${pay.bgColor}`}>
+                        <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold border ${pay.bgColor}`}>
                           <span>{pay.emoji}</span>
                           <span>{pay.name}</span>
                         </span>
                       </td>
-                      <td className="px-3 py-3 text-right font-medium font-mono text-brand whitespace-nowrap">
+                      <td className="px-3 py-3 text-right font-semibold font-mono text-brand whitespace-nowrap">
                         {formatUzs(sale)}
                       </td>
                       <td className="px-3 py-3 text-right font-mono text-xs text-muted whitespace-nowrap">
@@ -556,7 +650,7 @@ export default async function StatisticsPage({
                           {src.badge}
                         </span>
                       </td>
-                      <td className="px-3 py-3 text-right font-semibold font-mono text-xs whitespace-nowrap">
+                      <td className="px-3 py-3 text-right font-bold font-mono text-xs whitespace-nowrap">
                         <span className={profit >= 0 ? "text-emerald-400" : "text-rose-400"}>
                           {profit >= 0 ? `+${formatUzs(profit)}` : formatUzs(profit)}
                         </span>

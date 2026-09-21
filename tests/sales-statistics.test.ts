@@ -368,8 +368,8 @@ describe("Sales Statistics Domain Helpers", () => {
       expect(normalizePaymentMethod("binance").name).toBe("Binance Pay");
       expect(normalizePaymentMethod("receipt").name).toBe("Чек / Перевод");
       expect(normalizePaymentMethod("admin").name).toBe("Администратор");
-      expect(normalizePaymentMethod(null).name).toBe("Баланс бота");
-      expect(normalizePaymentMethod("").name).toBe("Баланс бота");
+      expect(normalizePaymentMethod(null).name).toBe("Payme");
+      expect(normalizePaymentMethod("").name).toBe("Payme");
     });
 
     it("groups sales by payment method accurately with percentages", () => {
