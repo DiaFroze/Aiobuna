@@ -418,13 +418,25 @@ export function resolveProductPremiumEmoji(
  * and any unclosed tags at the cutoff point are properly closed in reverse order.
  */
 export function fitCaption(html: string, maxLen = 1024): string {
-  if (!html || html.length <= maxLen) return html;
+  if (!html) return "";
+
+  // In Telegram Bot API, media caption limits (1024 characters) are enforced strictly
+  // AFTER entities parsing (i.e. plain rendered text).
+  // Rich HTML tags (<tg-emoji>, <b>, <a>, <i>, <code>) do not count towards the 1024 character limit.
+  // If the plain rendered text is within maxLen, the caption is fully accepted by Telegram!
+  if (maxLen >= 1024) {
+    const plain = stripHtml(html);
+    if (plain.length <= maxLen) {
+      return html;
+    }
+  } else if (html.length <= maxLen) {
+    return html;
+  }
 
   const ellipsis = "...";
   const targetLen = maxLen - ellipsis.length;
-
-  let result = "";
   const openTags: string[] = [];
+  let result = "";
   let i = 0;
 
   while (i < html.length) {
@@ -436,13 +448,10 @@ export function fitCaption(html: string, maxLen = 1024): string {
       const isClosing = tagContent.startsWith("/");
       const tagNameMatch = tagContent.match(/^\/?([a-zA-Z0-9_-]+)/);
       const tagName = tagNameMatch ? tagNameMatch[1].toLowerCase() : "";
-
       const fullTag = html.slice(i, closeIdx + 1);
 
       const closingTagsLen = openTags.reduce((acc, t) => acc + t.length + 3, 0);
-      if (result.length + fullTag.length + closingTagsLen > targetLen) {
-        break;
-      }
+      if (result.length + fullTag.length + closingTagsLen > targetLen) break;
 
       result += fullTag;
       i = closeIdx + 1;
@@ -450,9 +459,7 @@ export function fitCaption(html: string, maxLen = 1024): string {
       if (tagName) {
         if (isClosing) {
           const lastIdx = openTags.lastIndexOf(tagName);
-          if (lastIdx !== -1) {
-            openTags.splice(lastIdx, 1);
-          }
+          if (lastIdx !== -1) openTags.splice(lastIdx, 1);
         } else if (!tagContent.endsWith("/")) {
           openTags.push(tagName);
         }
@@ -461,16 +468,12 @@ export function fitCaption(html: string, maxLen = 1024): string {
       const semiIdx = html.indexOf(";", i);
       const entity = semiIdx !== -1 && semiIdx - i <= 10 ? html.slice(i, semiIdx + 1) : html[i];
       const closingTagsLen = openTags.reduce((acc, t) => acc + t.length + 3, 0);
-      if (result.length + entity.length + closingTagsLen > targetLen) {
-        break;
-      }
+      if (result.length + entity.length + closingTagsLen > targetLen) break;
       result += entity;
       i += entity.length;
     } else {
       const closingTagsLen = openTags.reduce((acc, t) => acc + t.length + 3, 0);
-      if (result.length + 1 + closingTagsLen > targetLen) {
-        break;
-      }
+      if (result.length + 1 + closingTagsLen > targetLen) break;
       result += html[i];
       i++;
     }
