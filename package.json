@@ -14,6 +14,7 @@
     "setup": "prisma db push && tsx --conditions=react-server prisma/seed.ts",
     "bot": "tsx --conditions=react-server src/bot/index.ts",
     "admin:create": "node --env-file=.env scripts/create-admin.mjs",
+    "humo:session": "tsx scripts/generate-humo-session.ts",
     "test": "vitest run",
     "test:audit": "node scripts/test-audit.mjs",
     "test:watch": "vitest",
