@@ -225,18 +225,17 @@ const RU: Dict = {
   btn_pay_card: "💳 Оплата на карту",
   card_pay_unavailable: "⚠️ Оплата на карту временно недоступна. Пожалуйста, обратитесь к администратору или выберите другой способ оплаты.",
   card_pay_instructions:
-    "💳 <b>Оплата переводом на карту HUMO</b>\n\n" +
     "Товар: <b>{item}</b>\n" +
     "Количество: <b>{qty}</b>\n\n" +
-    "📋 <b>Реквизиты для оплаты:</b>\n" +
-    "Номер карты: <code>{cardNumber}</code>\n" +
-    "Сумма к переводу: <code>{totalAmount}</code> сум\n" +
-    "<i>(Базовая цена: {baseAmount} сум + уникальный код: {extraAmount} сум)</i>\n\n" +
-    "⏳ <b>Срок действия заявки: 5 минут!</b>\n\n" +
-    "⚠️ <b>ВНИМАНИЕ! КРИТИЧЕСКИ ВАЖНО:</b>\n" +
-    "1. Переведите <b>РОВНО {totalAmount} сум</b> одним платежом.\n" +
-    "2. <b>НЕ округляйте</b> сумму и не переводите базовую цену ({baseAmount} сум) без уникальных {extraAmount} сум — иначе платеж не определится автоматически!\n" +
-    "3. После перевода нажмите кнопку «✅ Я оплатил — проверить».",
+    '<tg-emoji emoji-id="5199800546013233179">🇺🇿</tg-emoji> <b>Точная сумма к оплате: {totalAmount} сум</b>\n\n' +
+    '<tg-emoji emoji-id="5445353829304387411">💳</tg-emoji> <b>Номер карты:</b>\n' +
+    "<code>{cardNumber}</code>\n\n" +
+    '<tg-emoji emoji-id="5420323339723881652">⚠️</tg-emoji> <b>Важно:</b>\n' +
+    "• Переводите ровно <b>{totalAmount} сум</b>.\n" +
+    "• <b>Не отправляйте {baseAmount} сум</b> — платёж не определится автоматически.\n" +
+    "• Не округляйте сумму и не отправляйте другую сумму.\n" +
+    "• Оплачивайте одним переводом.\n" +
+    "• На оплату даётся <b>5 минут</b>.",
   btn_copy_card: "📋 Скопировать карту",
   btn_copy_amount: "📋 Скопировать сумму",
   btn_check_payment: "✅ Я оплатил — проверить",
@@ -466,18 +465,17 @@ const EN: Dict = {
   btn_pay_card: "💳 Pay by Card",
   card_pay_unavailable: "⚠️ Card payment is temporarily unavailable. Please contact the administrator or select another payment method.",
   card_pay_instructions:
-    "💳 <b>Payment by transfer to HUMO card</b>\n\n" +
-    "Item: <b>{item}</b>\n" +
-    "Quantity: <b>{qty}</b>\n\n" +
-    "📋 <b>Payment requisites:</b>\n" +
-    "Card number: <code>{cardNumber}</code>\n" +
-    "Amount to transfer: <code>{totalAmount}</code> UZS\n" +
-    "<i>(Base price: {baseAmount} UZS + unique tag: {extraAmount} UZS)</i>\n\n" +
-    "⏳ <b>Payment deadline: 5 minutes!</b>\n\n" +
-    "⚠️ <b>CRITICAL NOTICE:</b>\n" +
-    "1. Transfer <b>EXACTLY {totalAmount} UZS</b> in a single transaction.\n" +
-    "2. <b>DO NOT round</b> the amount and do not send the base price ({baseAmount} UZS) without the unique {extraAmount} UZS — automated confirmation requires the exact amount!\n" +
-    "3. After paying, tap “✅ I paid — check”.",
+    "Product: <b>{item}</b>\n" +
+    "Quantity: <b>{qty} pcs</b>\n\n" +
+    '<tg-emoji emoji-id="5199800546013233179">🇺🇿</tg-emoji> <b>Exact amount to pay: {totalAmount} UZS</b>\n\n' +
+    '<tg-emoji emoji-id="5445353829304387411">💳</tg-emoji> <b>Card number:</b>\n' +
+    "<code>{cardNumber}</code>\n\n" +
+    '<tg-emoji emoji-id="5420323339723881652">⚠️</tg-emoji> <b>Important:</b>\n' +
+    "• Transfer strictly <b>{totalAmount} UZS</b>.\n" +
+    "• <b>Do not send {baseAmount} UZS</b> — payment may not be detected automatically.\n" +
+    "• Do not round the amount and do not send a different amount.\n" +
+    "• Complete the payment in a single transfer.\n" +
+    "• You have <b>5 minutes</b> to complete payment.",
   btn_copy_card: "📋 Copy card number",
   btn_copy_amount: "📋 Copy amount",
   btn_check_payment: "✅ I paid — verify",
@@ -707,18 +705,17 @@ const UZ: Dict = {
   btn_pay_card: "💳 Kartaga to'lash",
   card_pay_unavailable: "⚠️ Kartaga to'lash vaqtincha mavjud emas. Iltimos, administrator bilan bog'laning yoki boshqa to'lov usulini tanlang.",
   card_pay_instructions:
-    "💳 <b>HUMO kartasiga o'tkazma orqali to'lov</b>\n\n" +
     "Mahsulot: <b>{item}</b>\n" +
-    "Miqdor: <b>{qty}</b>\n\n" +
-    "📋 <b>To'lov rekvizitlari:</b>\n" +
-    "Karta raqami: <code>{cardNumber}</code>\n" +
-    "O'tkaziladigan summa: <code>{totalAmount}</code> so'm\n" +
-    "<i>(Asosiy narx: {baseAmount} so'm + noyob buyurtma kodi: {extraAmount} so'm)</i>\n\n" +
-    "⏳ <b>To'lov muddati: 5 daqiqa!</b>\n\n" +
-    "⚠️ <b>DIQQAT! JUDA MUHIM:</b>\n" +
-    "1. Bitta to'lov bilan <b>ANIQ {totalAmount} so'm</b> o'tkazing.\n" +
-    "2. Summani <b>yaxlitlamang</b> va qo'shimchasiz asosiy narxni ({baseAmount} so'm) o'tkazmang — aks holda to'lov avtomatik tasdiqlanmaydi!\n" +
-    "3. O'tkazgach, «✅ To'ladim — tekshirish» tugmasini bosing.",
+    "Miqdor: <b>{qty} dona</b>\n\n" +
+    '<tg-emoji emoji-id="5199800546013233179">🇺🇿</tg-emoji><b>To‘lov uchun aniq summa: {totalAmount} so‘m</b>\n\n' +
+    '<tg-emoji emoji-id="5445353829304387411">💳</tg-emoji> <b>Karta raqami:</b>\n' +
+    "<code>{cardNumber}</code>\n\n" +
+    '<tg-emoji emoji-id="5420323339723881652">⚠️</tg-emoji> <b>Muhim:</b>\n' +
+    "• Faqat <b>{totalAmount} so‘m</b> yuboring.\n" +
+    "• <b>{baseAmount} so‘m yubormang</b> — bu to‘lov avtomatik aniqlanmasligi mumkin.\n" +
+    "• Summani yaxlitlamang va boshqa summa yubormang.\n" +
+    "• To‘lovni bitta o‘tkazma bilan amalga oshiring.\n" +
+    "• To‘lov uchun <b>5 daqiqa</b> vaqt beriladi.",
   btn_copy_card: "📋 Kartani nusxalash",
   btn_copy_amount: "📋 Summani nusxalash",
   btn_check_payment: "✅ To'ladim — tekshirish",

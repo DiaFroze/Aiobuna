@@ -7335,21 +7335,20 @@ bot.on("callback_query:data", async (ctx) => {
             recipientTgId: recipientTgId ?? null,
           },
         });
+        const formatSum = (n: number) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
         const cardDigitsOnly = config.cardDigitsOnly || config.cardNumber.replace(/\s+/g, "");
         const kb = new InlineKeyboard();
         kb.add({ text: t(lang, "btn_copy_card"), copy_text: { text: cardDigitsOnly } }).row();
         kb.add({ text: t(lang, "btn_copy_amount"), copy_text: { text: String(totalAmount) } }).row();
         kb.text(t(lang, "btn_check_payment"), `card_chk:${request.id}`).row();
-        kb.url(t(lang, "btn_contact_admin"), `https://t.me/${adminUser}`).row();
-        kb.text(t(lang, "btn_cancel_payment"), `card_cancel:${request.id}`).row();
         const msg = await ctx.reply(
           t(lang, "card_pay_instructions", {
             item: itemTitle,
             qty: String(qty),
             cardNumber: config.cardNumber,
-            totalAmount: String(totalAmount),
-            baseAmount: String(baseAmount),
-            extraAmount: String(extraAmount),
+            totalAmount: formatSum(totalAmount),
+            baseAmount: formatSum(baseAmount),
+            extraAmount: formatSum(extraAmount),
           }),
           { parse_mode: "HTML", reply_markup: kb }
         );
