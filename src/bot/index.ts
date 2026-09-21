@@ -39,6 +39,7 @@ import {
   stripRichText,
   safeTruncateHtml,
   stripHtml,
+  fitCaption,
   resolveProductPremiumEmoji,
   sanitizeTextCustomEmojis,
   OFFICIAL_TEXT_EMOJI_IDS,
@@ -180,48 +181,91 @@ async function sendOrEdit(ctx: Context, text: string, opts: SendOrEditOpts = {})
   const video = opts.video ?? null;
 
   if (video) {
-    if (chatId && messageId) await ctx.api.deleteMessage(chatId, messageId).catch(() => {});
-    if (text.length <= 1024) {
+    const caption = fitCaption(text, 1024);
+    if (chatId && messageId) {
+      const currentMsg = ctx.callbackQuery?.message;
+      if (currentMsg && "video" in currentMsg) {
+        try {
+          await ctx.api.editMessageCaption(chatId, messageId, {
+            caption,
+            parse_mode: "HTML",
+            reply_markup: kb,
+          });
+          return;
+        } catch {
+          try {
+            await ctx.api.editMessageCaption(chatId, messageId, {
+              caption: stripHtml(caption).slice(0, 1024),
+              reply_markup: kb,
+            });
+            return;
+          } catch {}
+        }
+      }
+      await ctx.api.deleteMessage(chatId, messageId).catch(() => {});
+    }
+
+    try {
+      await ctx.replyWithVideo(video, { caption, parse_mode: "HTML", reply_markup: kb });
+      return;
+    } catch (err) {
+      console.warn("[bot] replyWithVideo with HTML caption failed, retrying plain text caption:", (err as Error)?.message || err);
       try {
-        await ctx.replyWithVideo(video, { caption: text, parse_mode: "HTML", reply_markup: kb });
+        await ctx.replyWithVideo(video, { caption: stripHtml(caption).slice(0, 1024), reply_markup: kb });
         return;
-      } catch (err) {
-        console.warn("[bot] replyWithVideo with caption failed, falling back to separate video + text:", (err as Error)?.message || err);
+      } catch (err2) {
+        console.error("[bot] replyWithVideo completely failed, falling back to text:", (err2 as Error)?.message || err2);
       }
     }
-    await ctx.replyWithVideo(video).catch(() => null);
-    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: opts.link_preview_options }).catch(async (err) => {
-      console.error("[bot] reply text failed after video, retrying plain:", (err as Error)?.message || err);
-      await ctx.reply(stripHtml(text), { reply_markup: kb, link_preview_options: opts.link_preview_options }).catch((plainErr) => {
-        console.error("[bot] plain text reply also failed after video:", (plainErr as Error)?.message || plainErr);
-      });
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: opts.link_preview_options }).catch(async () => {
+      await ctx.reply(stripHtml(text), { reply_markup: kb, link_preview_options: opts.link_preview_options }).catch(() => {});
     });
     return;
   }
 
   if (photo) {
-    if (chatId && messageId) await ctx.api.deleteMessage(chatId, messageId).catch(() => {});
-    if (text.length <= 1024) {
+    const caption = fitCaption(text, 1024);
+    if (chatId && messageId) {
+      const currentMsg = ctx.callbackQuery?.message;
+      if (currentMsg && "photo" in currentMsg) {
+        try {
+          const msg = await ctx.api.editMessageCaption(chatId, messageId, {
+            caption,
+            parse_mode: "HTML",
+            reply_markup: kb,
+          });
+          opts.onPhotoSent?.(msg);
+          return;
+        } catch {
+          try {
+            const msg = await ctx.api.editMessageCaption(chatId, messageId, {
+              caption: stripHtml(caption).slice(0, 1024),
+              reply_markup: kb,
+            });
+            opts.onPhotoSent?.(msg);
+            return;
+          } catch {}
+        }
+      }
+      await ctx.api.deleteMessage(chatId, messageId).catch(() => {});
+    }
+
+    try {
+      const msg = await ctx.replyWithPhoto(photo, { caption, parse_mode: "HTML", reply_markup: kb });
+      opts.onPhotoSent?.(msg);
+      return;
+    } catch (err) {
+      console.warn("[bot] replyWithPhoto with HTML caption failed, retrying plain text caption:", (err as Error)?.message || err);
       try {
-        const msg = await ctx.replyWithPhoto(photo, { caption: text, parse_mode: "HTML", reply_markup: kb });
+        const msg = await ctx.replyWithPhoto(photo, { caption: stripHtml(caption).slice(0, 1024), reply_markup: kb });
         opts.onPhotoSent?.(msg);
         return;
-      } catch (err) {
-        console.warn("[bot] replyWithPhoto with caption failed, falling back to separate photo + text:", (err as Error)?.message || err);
+      } catch (err2) {
+        console.error("[bot] replyWithPhoto completely failed, falling back to text:", (err2 as Error)?.message || err2);
       }
     }
-    // If text exceeds Telegram's 1024 caption limit or single photo+caption failed:
-    // Send photo first so banner is never lost, followed by the full text and keyboard.
-    const photoMsg = await ctx.replyWithPhoto(photo).catch((err) => {
-      console.error("[bot] replyWithPhoto (standalone) failed:", (err as Error)?.message || err);
-      return null;
-    });
-    if (photoMsg) opts.onPhotoSent?.(photoMsg);
-    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: opts.link_preview_options }).catch(async (err) => {
-      console.error("[bot] reply text failed after photo, retrying plain:", (err as Error)?.message || err);
-      await ctx.reply(stripHtml(text), { reply_markup: kb, link_preview_options: opts.link_preview_options }).catch((plainErr) => {
-        console.error("[bot] plain text reply also failed after photo:", (plainErr as Error)?.message || plainErr);
-      });
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: opts.link_preview_options }).catch(async () => {
+      await ctx.reply(stripHtml(text), { reply_markup: kb, link_preview_options: opts.link_preview_options }).catch(() => {});
     });
     return;
   }
@@ -1682,15 +1726,14 @@ async function showProduct(ctx: Context, id: number, back: string) {
 
   const photo = resolveProductBanner(p.bannerFileId);
   const video = p.videoFileId ?? null;
+  const hasMedia = Boolean(photo || video);
+
   const pd = await pick3(p.descRu ?? "", p.descEn, p.descUz, lang);
   const rawFormatted = pd?.trim() ? tgHtml(formatRichText(pd.trim())) : "";
-  const fullFormattedDesc = rawFormatted ? sanitizeTextCustomEmojis(rawFormatted) : "";
-  // Telegram captions are limited to 1024 characters. Keep enough room for
-  // the title, stock rows and plan prompt so media product cards remain one
-  // valid message instead of degrading to a standalone video/photo.
-  const formattedDesc = (photo || video)
-    ? safeTruncateHtml(fullFormattedDesc, 600)
-    : safeTruncateHtml(fullFormattedDesc, 3000);
+  let formattedDesc = rawFormatted ? sanitizeTextCustomEmojis(rawFormatted) : "";
+  if (hasMedia && formattedDesc && formattedDesc.length > 550) {
+    formattedDesc = fitCaption(formattedDesc, 500);
+  }
 
   let text = `${pe.textTag} <b>${esc(cleanPt)}</b>`;
   if (formattedDesc) {
@@ -1924,6 +1967,9 @@ async function buildQtyChooser(
   } else {
     desc = safeTruncateHtml(formattedDesc, 3000);
   }
+  if (hasMedia && desc && desc.length > 550) {
+    desc = fitCaption(desc, 500);
+  }
   const offers = describeBulk(unitPrice, deal.tiers, deal.bonuses, (n) => money(n, lang));
 
   const flashBlock = promo && flashPct > 0
@@ -1973,24 +2019,35 @@ async function showQtyChooser(ctx: Context, variantId: number, qty: number, back
   if (!edit) {
     // Fresh message (e.g. after typing a quantity).
     if (video) {
-      await ctx.replyWithVideo(video, { caption: built.text, parse_mode: "HTML", reply_markup: built.kb }).catch(async () => {
-        await ctx.reply(built.text, { parse_mode: "HTML", reply_markup: built.kb }).catch(() => {});
-      });
-    } else if (photo) {
-      if (built.text.length <= 1024) {
+      const caption = fitCaption(built.text, 1024);
+      try {
+        await ctx.replyWithVideo(video, { caption, parse_mode: "HTML", reply_markup: built.kb });
+      } catch {
         try {
-          const msg = await ctx.replyWithPhoto(photo, { caption: built.text, parse_mode: "HTML", reply_markup: built.kb });
+          await ctx.replyWithVideo(video, { caption: stripHtml(caption).slice(0, 1024), reply_markup: built.kb });
+        } catch {
+          await ctx.reply(built.text, { parse_mode: "HTML", reply_markup: built.kb }).catch(() => {});
+        }
+      }
+    } else if (photo) {
+      const caption = fitCaption(built.text, 1024);
+      try {
+        const msg = await ctx.replyWithPhoto(photo, { caption, parse_mode: "HTML", reply_markup: built.kb });
+        if (built.isCourse && typeof photo !== "string" && msg && "photo" in msg && Array.isArray(msg.photo) && msg.photo.length > 0) {
+          cachedCourseBannerFileId = msg.photo[msg.photo.length - 1].file_id;
+        }
+        return;
+      } catch {
+        try {
+          const msg = await ctx.replyWithPhoto(photo, { caption: stripHtml(caption).slice(0, 1024), reply_markup: built.kb });
           if (built.isCourse && typeof photo !== "string" && msg && "photo" in msg && Array.isArray(msg.photo) && msg.photo.length > 0) {
             cachedCourseBannerFileId = msg.photo[msg.photo.length - 1].file_id;
           }
           return;
-        } catch {}
+        } catch {
+          await ctx.reply(built.text, { parse_mode: "HTML", reply_markup: built.kb }).catch(() => {});
+        }
       }
-      const photoMsg = await ctx.replyWithPhoto(photo).catch(() => null);
-      if (built.isCourse && typeof photo !== "string" && photoMsg && "photo" in photoMsg && Array.isArray(photoMsg.photo) && photoMsg.photo.length > 0) {
-        cachedCourseBannerFileId = photoMsg.photo[photoMsg.photo.length - 1].file_id;
-      }
-      await ctx.reply(built.text, { parse_mode: "HTML", reply_markup: built.kb }).catch(() => {});
     } else {
       await ctx.reply(built.text, { parse_mode: "HTML", reply_markup: built.kb });
     }
@@ -2008,7 +2065,7 @@ async function showQtyChooser(ctx: Context, variantId: number, qty: number, back
     });
   } else {
     // ± re-render: edit text/caption in place — keeps the media, no flicker.
-    await sendOrEdit(ctx, built.text, { reply_markup: built.kb });
+    await sendOrEdit(ctx, built.text, { reply_markup: built.kb, video, photo });
   }
   await ack();
 }
@@ -4062,6 +4119,13 @@ bot.use(async (ctx, next) => {
     return next();
   }
 
+  const user = await getUser(ctx);
+  // Fast-path: if user is already verified in DB, populate cache and let them through!
+  if (user.channelVerifiedAt !== null) {
+    subsOkCache.set(tgId, Date.now() + SUBS_CACHE_TTL_MS);
+    return next();
+  }
+
   const active = await db.requiredChannel.findMany({ where: { isActive: true } });
   if (active.length === 0) {
     // No channels configured → nothing to gate on, so the requirement is
@@ -4083,7 +4147,11 @@ bot.use(async (ctx, next) => {
     return next();
   }
 
-  const user = await getUser(ctx);
+  // Remember callback data if user tapped product or buy button so it opens upon verification
+  if (data && (data.startsWith("p:") || data.startsWith("b:") || data.startsWith("deal_"))) {
+    pendingIntent.set(tgId, "cb:" + data);
+  }
+
   const lang = user.lang;
 
   const kb = new InlineKeyboard();
@@ -4103,6 +4171,43 @@ bot.use(async (ctx, next) => {
   const sent = await ctx.reply(msgText, { parse_mode: "HTML", reply_markup: kb }).catch(() => null);
   if (sent?.message_id) subsGateMsg.set(tgId, sent.message_id);
 });
+
+// ---------- deliver intent helper ----------
+// Delivers a user's target destination from a deep link, promo deal link, or saved callback intent.
+async function deliverIntent(ctx: Context, user: any, intent: string) {
+  if (intent === "gifts") return showGifts(ctx, false);
+  if (intent === "boost" || intent === "booster") return showBoosterHub(ctx);
+  if (intent.startsWith("buy_")) {
+    const vid = Number(intent.slice(4));
+    if (vid > 0) return showQtyChooser(ctx, vid, 1, "0:all", false, true);
+  }
+  if (intent.startsWith("p_")) {
+    const pid = Number(intent.slice(2));
+    if (pid > 0) return showProduct(ctx, pid, "0:all");
+  }
+  if (intent === "promo") return showMenu(ctx, 0, "all", false);
+  if (intent.startsWith("deal_") || intent.startsWith("offer_") || intent.startsWith("promo_")) {
+    return handleDealLinkStart(ctx, user, intent);
+  }
+  if (intent.startsWith("gw_") || intent.startsWith("giveaway_")) {
+    return handleGiveawayStart(ctx, user, intent);
+  }
+  if (intent.startsWith("cb:")) {
+    const cbData = intent.slice(3);
+    if (cbData.startsWith("p:")) {
+      const parts = cbData.split(":");
+      return showProduct(ctx, Number(parts[1]), `${Number(parts[2]) || 0}:${parts[3] ?? "all"}`);
+    }
+    if (cbData.startsWith("b:")) {
+      const parts = cbData.split(":");
+      return showQtyChooser(ctx, Number(parts[1]), 1, `${parts[2] ?? "0"}:${parts[3] ?? "all"}`, false, true);
+    }
+    if (cbData.startsWith("deal_")) {
+      return handleDealLinkStart(ctx, user, cbData);
+    }
+  }
+  return enterShop(ctx, user);
+}
 
 // ---------- commands & reply-keyboard ----------
 bot.command("start", async (ctx) => {
@@ -4130,11 +4235,17 @@ bot.command("start", async (ctx) => {
   // not stall on it.
   if (!existing && user.referredBy) notifyReferrerPending(user).catch(() => {});
 
+  // ALWAYS remember intent before channel gate so it survives subscription verification!
+  if (payload) {
+    pendingIntent.set(tgId, payload);
+  }
+
   // Check required channels BEFORE showing anything else (except for admin).
   if (!isAdmin(ctx)) {
     const active = await db.requiredChannel.findMany({ where: { isActive: true } });
     const cachedUntil = subsOkCache.get(tgId);
-    if (active.length > 0 && (!cachedUntil || cachedUntil <= Date.now())) {
+    const isAlreadyVerified = user.channelVerifiedAt !== null;
+    if (!isAlreadyVerified && active.length > 0 && (!cachedUntil || cachedUntil <= Date.now())) {
       const results = await Promise.all(active.map((ch) => isSubscribedTo(ctx, tgId, ch.chatId)));
       const unsubscribed = active.filter((_, i) => !results[i]);
       if (unsubscribed.length > 0) {
@@ -4153,32 +4264,13 @@ bot.command("start", async (ctx) => {
   }
 
   // Deep links:
-  // - start=gifts → opens gifts
-  // - start=buy_<variantId> → opens buy card for specific discounted variant
-  // - start=p_<productId> → opens specific product
-  // - start=promo → opens shop with flash sale
   if (!existing) {
-    // A first-time visitor still has to pick a language and accept the terms.
-    // Remember why they came so the last onboarding step lands on their intent.
-    if (payload) pendingIntent.set(tgId, payload);
+    // A first-time visitor still has to pick a language.
     return showLangPicker(ctx, false);
   }
-  if (payload === "gifts") return showGifts(ctx, false);
-  if (payload === "boost" || payload === "booster") return showBoosterHub(ctx);
-  if (payload.startsWith("buy_")) {
-    const vid = Number(payload.slice(4));
-    if (vid > 0) return showQtyChooser(ctx, vid, 1, "0:all", false);
-  }
-  if (payload.startsWith("p_")) {
-    const pid = Number(payload.slice(2));
-    if (pid > 0) return showProduct(ctx, pid, "0:all");
-  }
-  if (payload === "promo") return showMenu(ctx, 0, "all", false);
-  if (payload.startsWith("deal_") || payload.startsWith("offer_") || payload.startsWith("promo_")) {
-    return handleDealLinkStart(ctx, user, payload);
-  }
-  if (payload.startsWith("gw_") || payload.startsWith("giveaway_")) {
-    return handleGiveawayStart(ctx, user, payload);
+  if (payload) {
+    pendingIntent.delete(tgId);
+    return deliverIntent(ctx, user, payload);
   }
   await enterShop(ctx, user);
 });
@@ -6940,6 +7032,11 @@ bot.on("callback_query:data", async (ctx) => {
           await ctx.api.deleteMessage(user.tgId, gateId).catch(() => {});
           subsGateMsg.delete(user.tgId);
         }
+        const intent = pendingIntent.get(user.tgId);
+        if (intent) {
+          pendingIntent.delete(user.tgId);
+          return deliverIntent(ctx, user, intent);
+        }
         return enterShop(ctx, user);
       } else {
         await ctx.answerCallbackQuery({ text: t(user.lang, "subs_missing_toast"), show_alert: true }).catch(() => {});
@@ -6999,30 +7096,18 @@ bot.on("callback_query:data", async (ctx) => {
       const lang = normalizeLang(data.split(":")[1]);
       await db.botUser.update({ where: { tgId: String(ctx.from?.id) }, data: { lang, termsAcceptedAt: new Date() } }).catch(() => {});
       await ctx.answerCallbackQuery({ text: t(lang, "lang_set") }).catch(() => {});
-      await ctx.editMessageText(t(lang, "lang_set")).catch(() => {});
       const user = await getUser(ctx);
-      await sendHome(ctx, user);
-      // Onboarding complete — deliver what the deep link promised immediately!
       const intent = pendingIntent.get(user.tgId);
       if (intent) {
         pendingIntent.delete(user.tgId);
-        if (intent === "gifts") {
-          await showGifts(ctx, false).catch(() => {});
-        } else if (intent.startsWith("buy_")) {
-          const vid = Number(intent.slice(4));
-          if (vid > 0) await showQtyChooser(ctx, vid, 1, "0:all", false).catch(() => {});
-        } else if (intent.startsWith("p_")) {
-          const pid = Number(intent.slice(2));
-          if (pid > 0) await showProduct(ctx, pid, "0:all").catch(() => {});
-        } else if (intent === "promo") {
-          await showMenu(ctx, 0, "all", false).catch(() => {});
-        } else if (intent.startsWith("deal_") || intent.startsWith("offer_") || intent.startsWith("promo_")) {
-          await handleDealLinkStart(ctx, user, intent).catch(() => {});
-        } else if (intent.startsWith("gw_") || intent.startsWith("giveaway_")) {
-          await handleGiveawayStart(ctx, user, intent).catch(() => {});
+        if (ctx.callbackQuery?.message?.message_id && ctx.chat?.id) {
+          await ctx.api.deleteMessage(ctx.chat.id, ctx.callbackQuery.message.message_id).catch(() => {});
         }
+        await ctx.reply(`✅ <b>${t(lang, "lang_set")}</b>`, { parse_mode: "HTML", reply_markup: mainKeyboard(lang) }).catch(() => {});
+        return deliverIntent(ctx, user, intent);
       }
-      return;
+      await ctx.editMessageText(t(lang, "lang_set")).catch(() => {});
+      return sendHome(ctx, user);
     }
     if (data === "terms_accept") {
       // Legacy fallback if an old button is tapped in history

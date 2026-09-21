@@ -397,3 +397,76 @@ export function resolveProductPremiumEmoji(
     buttonIcon: fallbackId,
   };
 }
+
+/**
+ * Safely truncates an HTML string to fit within maxLen characters (Telegram media caption limit is 1024),
+ * ensuring that HTML tags (<b/i/code/s/u/tg-emoji/a/tg-spoiler/pre/blockquote>) are never cut in half,
+ * and any unclosed tags at the cutoff point are properly closed in reverse order.
+ */
+export function fitCaption(html: string, maxLen = 1024): string {
+  if (!html || html.length <= maxLen) return html;
+
+  const ellipsis = "...";
+  const targetLen = maxLen - ellipsis.length;
+
+  let result = "";
+  const openTags: string[] = [];
+  let i = 0;
+
+  while (i < html.length) {
+    if (html[i] === "<") {
+      const closeIdx = html.indexOf(">", i);
+      if (closeIdx === -1) break;
+
+      const tagContent = html.slice(i + 1, closeIdx);
+      const isClosing = tagContent.startsWith("/");
+      const tagNameMatch = tagContent.match(/^\/?([a-zA-Z0-9_-]+)/);
+      const tagName = tagNameMatch ? tagNameMatch[1].toLowerCase() : "";
+
+      const fullTag = html.slice(i, closeIdx + 1);
+
+      const closingTagsLen = openTags.reduce((acc, t) => acc + t.length + 3, 0);
+      if (result.length + fullTag.length + closingTagsLen > targetLen) {
+        break;
+      }
+
+      result += fullTag;
+      i = closeIdx + 1;
+
+      if (tagName) {
+        if (isClosing) {
+          const lastIdx = openTags.lastIndexOf(tagName);
+          if (lastIdx !== -1) {
+            openTags.splice(lastIdx, 1);
+          }
+        } else if (!tagContent.endsWith("/")) {
+          openTags.push(tagName);
+        }
+      }
+    } else if (html[i] === "&") {
+      const semiIdx = html.indexOf(";", i);
+      const entity = semiIdx !== -1 && semiIdx - i <= 10 ? html.slice(i, semiIdx + 1) : html[i];
+      const closingTagsLen = openTags.reduce((acc, t) => acc + t.length + 3, 0);
+      if (result.length + entity.length + closingTagsLen > targetLen) {
+        break;
+      }
+      result += entity;
+      i += entity.length;
+    } else {
+      const closingTagsLen = openTags.reduce((acc, t) => acc + t.length + 3, 0);
+      if (result.length + 1 + closingTagsLen > targetLen) {
+        break;
+      }
+      result += html[i];
+      i++;
+    }
+  }
+
+  result = result.trimEnd() + ellipsis;
+  while (openTags.length > 0) {
+    const t = openTags.pop()!;
+    result += `</${t}>`;
+  }
+
+  return result;
+}
