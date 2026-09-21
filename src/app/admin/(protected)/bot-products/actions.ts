@@ -218,6 +218,7 @@ export async function addVariantAction(formData: FormData) {
       titleUz: str(formData.get("titleUz")) || titleRu,
       durationDays: Math.round(num(formData.get("durationDays"))) || 30,
       priceUzs: Math.round(num(formData.get("priceUzs"))),
+      costPriceUzs: formData.get("costPriceUzs") ? Math.round(num(formData.get("costPriceUzs"))) : null,
       priceUsdt: num(formData.get("priceUsdt")),
       priceStars: Math.round(num(formData.get("priceStars"))),
       manualDelivery: manual,
@@ -234,6 +235,8 @@ export async function updateVariantAction(formData: FormData) {
   const id = Number(formData.get("variantId"));
   const productId = str(formData.get("productId"));
   const priceUzs = Math.round(num(formData.get("priceUzs")));
+  const rawCostPrice = formData.get("costPriceUzs");
+  const costPriceUzs = rawCostPrice !== null && String(rawCostPrice).trim() !== "" ? Math.round(num(rawCostPrice)) : null;
   
   const manual = formData.get("manual") === "on";
   const manualStockLimit = manual
@@ -256,6 +259,7 @@ export async function updateVariantAction(formData: FormData) {
       titleRu: str(formData.get("titleRu")) || undefined,
       durationDays: Math.round(num(formData.get("durationDays"))),
       priceUzs, // сум — the only price the bot uses
+      costPriceUzs,
       priceStars: Math.round(num(formData.get("priceStars"))),
       pointsCost: Math.max(0, Math.round(num(formData.get("pointsCost")))),
       bulkPrices,

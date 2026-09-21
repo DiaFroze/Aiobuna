@@ -668,6 +668,7 @@ model Variant {
   boostDiscountEnabled Boolean @default(true)
   boostDiscountPercent Int?
   boostPriceUzs        Int?
+  costPriceUzs         Int?
 
   stockItems   StockItem[]
   customPrices UserVariantPrice[]
@@ -728,6 +729,15 @@ model BotUser {
   customPrices     UserVariantPrice[]
   promoRedemptions PromoRedemption[]
   adStarts BotAdStart[]
+  firstAdId   Int?
+  firstAd     AdLink?          @relation("UserFirstAd", fields: [firstAdId], references: [id])
+  firstAdCode String?
+  firstAdAt   DateTime?
+  lastAdId    Int?
+  lastAd      AdLink?          @relation("UserLastAd", fields: [lastAdId], references: [id])
+  lastAdCode  String?
+  lastAdAt    DateTime?
+  adTouches   AdStartEvent[]
   promoLinkUsages  PromoLinkUsage[]
   dealClaims       UserDealClaim[]
   giveawayEntries  GiveawayParticipant[]
@@ -766,6 +776,8 @@ model BotOrder {
   variantId Int?
   titleRu   String
   priceUsdt Float
+  priceUzs  Int?     @default(0)
+  costPriceUzs Int?
   payload   String
   source    String   @default("stock")
   status    String   @default("delivered")
@@ -790,7 +802,96 @@ model BotOrder {
   deliveredAt      DateTime?
   paymentMethod    String?
   paymentId        String?
+
+  // --- Ad attribution fields ---
+  firstAdCode      String?
+  lastAdCode       String?
+  attributedAdId   Int?
+  attributedAd     AdLink?  @relation(fields: [attributedAdId], references: [id])
+  attributedAdCode String?
+  adAttributedAt   DateTime?
+
   createdAt DateTime @default(now())
+
+  @@index([attributedAdId])
+  @@index([attributedAdCode])
+}
+
+model AdLink {
+  id            Int             @id @default(autoincrement())
+  name          String
+  code          String          @unique
+  platform      String          @default("Meta") // "Meta", "Instagram", "Facebook", "Telegram Ads", "Other"
+  campaignName  String?
+  adGroupName   String?
+  adName        String?
+  creativeUrl   String?
+  note          String?
+  budget        Float           @default(0)
+  startDate     DateTime?
+  endDate       DateTime?
+  isActive      Boolean         @default(true)
+  targetType    String          @default("shop") // "shop", "product", "deal"
+  targetPayload String?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  clicks        AdClick[]
+  touches       AdStartEvent[]
+  expenses      AdExpense[]
+  orders        BotOrder[]
+  firstUsers    BotUser[]       @relation("UserFirstAd")
+  lastUsers     BotUser[]       @relation("UserLastAd")
+
+  @@index([platform])
+  @@index([isActive])
+  @@index([createdAt])
+}
+
+model AdClick {
+  id        Int      @id @default(autoincrement())
+  adLinkId  Int
+  adLink    AdLink   @relation(fields: [adLinkId], references: [id], onDelete: Cascade)
+  ipHash    String?
+  userAgent String?
+  referer   String?
+  isUnique  Boolean  @default(true)
+  isBot     Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([adLinkId, createdAt])
+  @@index([adLinkId, ipHash])
+}
+
+model AdStartEvent {
+  id        Int      @id @default(autoincrement())
+  adLinkId  Int?
+  adLink    AdLink?  @relation(fields: [adLinkId], references: [id], onDelete: SetNull)
+  adCode    String
+  userId    Int
+  user      BotUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  isNewUser Boolean
+  createdAt DateTime @default(now())
+
+  @@index([adLinkId, createdAt])
+  @@index([userId, createdAt])
+  @@index([adCode])
+}
+
+model AdExpense {
+  id        Int      @id @default(autoincrement())
+  adLinkId  Int
+  adLink    AdLink   @relation(fields: [adLinkId], references: [id], onDelete: Cascade)
+  amount    Float
+  currency  String   @default("USD") // "USD" | "UZS"
+  amountUzs Float?
+  startDate DateTime
+  endDate   DateTime
+  comment   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([adLinkId, startDate, endDate])
 }
 
 model ApiSource {

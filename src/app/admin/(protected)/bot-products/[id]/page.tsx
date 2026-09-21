@@ -303,6 +303,10 @@ export default async function BotProductEditPage({ params }: { params: { id: str
                         <label className="text-[11px] text-muted">Цена (сум) 💰</label>
                         <input name="priceUzs" type="number" step="1" min="0" defaultValue={v.priceUzs} className="input mt-1 text-sm" />
                       </div>
+                      <div className="md:col-span-2">
+                        <label className="text-[11px] text-muted" title="Себестоимость товара в сумах для расчета чистой прибыли с рекламы">Себестоимость (сум)</label>
+                        <input name="costPriceUzs" type="number" step="1" min="0" defaultValue={v.costPriceUzs ?? ""} placeholder="напр. 25000" className="input mt-1 text-sm" />
+                      </div>
                       <div className="md:col-span-1">
                         <label className="text-[11px] text-muted">Stars</label>
                         <input name="priceStars" type="number" step="1" min="0" defaultValue={v.priceStars} className="input mt-1 text-sm" />
@@ -648,6 +652,10 @@ export default async function BotProductEditPage({ params }: { params: { id: str
             <div className="md:col-span-2">
               <label className="text-xs text-muted">Цена (сум) 💰</label>
               <input name="priceUzs" type="number" min="0" step="1" className="input mt-1 text-sm" defaultValue={0} />
+            </div>
+            <div className="md:col-span-2">
+              <label className="text-xs text-muted">Себестоимость (сум)</label>
+              <input name="costPriceUzs" type="number" min="0" step="1" className="input mt-1 text-sm" placeholder="напр. 25000" />
             </div>
             <div className="md:col-span-1">
               <label className="text-xs text-muted">Stars</label>

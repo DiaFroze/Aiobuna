@@ -10,7 +10,7 @@ try {
 import { Bot, InlineKeyboard, Keyboard, InputFile, type Context } from "grammy";
 import type { MessageEntity, UserFromGetMe } from "grammy/types";
 import { db } from "./db";
-import { adSource } from "../lib/domain/ad-attribution";
+import { adSource, parseAdStartPayload } from "../lib/domain/ad-attribution";
 import { sourceOrder, envVexSource, envBuyerSource, envQamifySource, sourceBalance, type Source } from "../lib/supplier";
 import { sortSuppliersByStrategy, type SupplierCandidate, type RoutingStrategy } from "../lib/domain/supplier-routing";
 import { geminiTranslate } from "../lib/gemini";
@@ -1384,17 +1384,25 @@ async function executeCoursePurchase(
         if (!freshUser || !freshVariant || !isVariantBuyable(freshVariant) || !isCourseProduct(freshVariant)) throw new Error("COURSE_UNAVAILABLE");
         if (freshUser.balance < total) throw new Error("COURSE_BALANCE");
         if (total > 0) await tx.botUser.update({ where: { id: user.id }, data: { balance: { decrement: total } } });
+        const costPriceSnapshot = freshVariant.costPriceUzs ?? (freshVariant.supplierPriceUsdt > 0 ? Math.round(freshVariant.supplierPriceUsdt * UZS_PER_USDT) : null);
         return tx.botOrder.create({
           data: {
             userId: user.id,
             variantId,
             titleRu: label,
-            priceUsdt: 0,
+            priceUsdt: total,
+            priceUzs: total,
+            costPriceUzs: costPriceSnapshot,
             payload: "",
             source: "course",
             status: "awaiting_course_link",
             paymentMethod,
             paymentId,
+            firstAdCode: freshUser.firstAdCode ?? null,
+            lastAdCode: freshUser.lastAdCode ?? null,
+            attributedAdId: freshUser.lastAdId ?? freshUser.firstAdId ?? null,
+            attributedAdCode: freshUser.lastAdCode ?? freshUser.firstAdCode ?? null,
+            adAttributedAt: (freshUser.lastAdId || freshUser.firstAdId) ? new Date() : null,
           },
         });
       });
@@ -2336,15 +2344,26 @@ async function executePurchase(
       if (discountCost > 0) {
         await tx.botUser.update({ where: { id: user.id }, data: { spentReferrals: { increment: discountCost } } });
       }
+      const costPriceSnapshot = freshV.costPriceUzs !== null && freshV.costPriceUzs !== undefined
+        ? freshV.costPriceUzs * finalQty
+        : freshV.supplierPriceUsdt > 0
+          ? Math.round(freshV.supplierPriceUsdt * UZS_PER_USDT * finalQty)
+          : null;
       const order = await tx.botOrder.create({
         data: {
-          userId: user.id, variantId, titleRu: label, priceUsdt: 0, payload: "",
+          userId: user.id, variantId, titleRu: label, priceUsdt: total, priceUzs: total,
+          costPriceUzs: costPriceSnapshot, payload: "",
           source: isAdminPay ? "admin" : isRefGift ? "referral" : "manual", status: "awaiting_delivery",
           targetUsername: targetUsername ?? null,
           recipientTgId: isFragmentItem ? recipient : null,
           deliveryState: isFragmentItem ? "PAID" : "",
           paymentMethod: paymentMethod ?? null,
           paymentId: paymentId ?? null,
+          firstAdCode: u.firstAdCode ?? null,
+          lastAdCode: u.lastAdCode ?? null,
+          attributedAdId: u.lastAdId ?? u.firstAdId ?? null,
+          attributedAdCode: u.lastAdCode ?? u.firstAdCode ?? null,
+          adAttributedAt: (u.lastAdId || u.firstAdId) ? new Date() : null,
         },
       });
       return { orderId: order.id };
@@ -2443,18 +2462,30 @@ async function executePurchase(
     if (discountCost > 0) {
       await tx.botUser.update({ where: { id: user.id }, data: { spentReferrals: { increment: discountCost } } });
     }
+    const costPriceSnapshot = v.costPriceUzs !== null && v.costPriceUzs !== undefined
+      ? v.costPriceUzs * finalQty
+      : v.supplierPriceUsdt > 0
+        ? Math.round(v.supplierPriceUsdt * UZS_PER_USDT * finalQty)
+        : null;
     const order = await tx.botOrder.create({
       data: {
         userId: user.id,
         variantId,
         titleRu: label,
-        priceUsdt: 0,
+        priceUsdt: total,
+        priceUzs: total,
+        costPriceUzs: costPriceSnapshot,
         payload: "", // populated below as we gather items
         source: isAdminPay ? "admin" : isRefGift ? "referral" : "hybrid", // stock + supplier
         status: "processing",
         targetUsername: targetUsername ?? null,
         paymentMethod: paymentMethod ?? null,
         paymentId: paymentId ?? null,
+        firstAdCode: u.firstAdCode ?? null,
+        lastAdCode: u.lastAdCode ?? null,
+        attributedAdId: u.lastAdId ?? u.firstAdId ?? null,
+        attributedAdCode: u.lastAdCode ?? u.firstAdCode ?? null,
+        adAttributedAt: (u.lastAdId || u.firstAdId) ? new Date() : null,
       },
     });
     return { orderId: order.id, order };
@@ -4219,14 +4250,51 @@ bot.command("start", async (ctx) => {
   // actually pass the subscription gate below.
   const user = await getUser(ctx, payload || undefined);
   const tgId = user.tgId;
-  const source = adSource(payload);
-  if (source) {
-    // Record an actual Telegram /start before the onboarding gates. The unique
-    // key prevents retries and repeat starts from inflating visitor counts.
-    await db.botAdStart.createMany({
-      data: [{ userId: user.id, source, isNewUser: !existing }],
-      skipDuplicates: true,
-    }).catch(() => console.error("[bot] ad attribution write failed"));
+  const candidateCode = parseAdStartPayload(payload);
+  if (candidateCode) {
+    const adLink = await db.adLink.findUnique({
+      where: { code: candidateCode },
+      select: { id: true, code: true, isActive: true },
+    }).catch(() => null);
+
+    if (adLink && adLink.isActive) {
+      const now = new Date();
+      const firstTouchPatch = !user.firstAdId ? {
+        firstAdId: adLink.id,
+        firstAdCode: adLink.code,
+        firstAdAt: now,
+      } : {};
+
+      await db.botUser.update({
+        where: { id: user.id },
+        data: {
+          ...firstTouchPatch,
+          lastAdId: adLink.id,
+          lastAdCode: adLink.code,
+          lastAdAt: now,
+        },
+      }).catch((e) => console.error("[bot] failed updating ad touch on user:", e));
+
+      await db.adStartEvent.create({
+        data: {
+          adLinkId: adLink.id,
+          adCode: adLink.code,
+          userId: user.id,
+          isNewUser: !existing,
+        },
+      }).catch(() => {});
+
+      await db.botAdStart.createMany({
+        data: [{ userId: user.id, source: adLink.code, isNewUser: !existing }],
+        skipDuplicates: true,
+      }).catch(() => {});
+    } else if (adSource(payload)) {
+      const legacySource = adSource(payload)!;
+      await db.botAdStart.createMany({
+        data: [{ userId: user.id, source: legacySource, isNewUser: !existing }],
+        skipDuplicates: true,
+      }).catch(() => {});
+    }
   }
 
   // Freshly created AND attributed to someone → tell the inviter it landed, so
@@ -8595,6 +8663,85 @@ async function ensureSchema() {
     `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "boostDiscountEnabled" BOOLEAN NOT NULL DEFAULT true`,
     `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "boostDiscountPercent" INTEGER`,
     `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "boostPriceUzs" INTEGER`,
+    `ALTER TABLE "Variant" ADD COLUMN IF NOT EXISTS "costPriceUzs" INTEGER`,
+    `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "firstAdId" INTEGER`,
+    `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "firstAdCode" TEXT`,
+    `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "firstAdAt" TIMESTAMP(3)`,
+    `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "lastAdId" INTEGER`,
+    `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "lastAdCode" TEXT`,
+    `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "lastAdAt" TIMESTAMP(3)`,
+    `ALTER TABLE "BotOrder" ADD COLUMN IF NOT EXISTS "priceUzs" INTEGER DEFAULT 0`,
+    `ALTER TABLE "BotOrder" ADD COLUMN IF NOT EXISTS "costPriceUzs" INTEGER`,
+    `ALTER TABLE "BotOrder" ADD COLUMN IF NOT EXISTS "firstAdCode" TEXT`,
+    `ALTER TABLE "BotOrder" ADD COLUMN IF NOT EXISTS "lastAdCode" TEXT`,
+    `ALTER TABLE "BotOrder" ADD COLUMN IF NOT EXISTS "attributedAdId" INTEGER`,
+    `ALTER TABLE "BotOrder" ADD COLUMN IF NOT EXISTS "attributedAdCode" TEXT`,
+    `ALTER TABLE "BotOrder" ADD COLUMN IF NOT EXISTS "adAttributedAt" TIMESTAMP(3)`,
+    `CREATE TABLE IF NOT EXISTS "AdLink" (
+      "id" SERIAL NOT NULL,
+      "name" TEXT NOT NULL,
+      "code" TEXT NOT NULL,
+      "platform" TEXT NOT NULL DEFAULT 'Meta',
+      "campaignName" TEXT,
+      "adGroupName" TEXT,
+      "adName" TEXT,
+      "creativeUrl" TEXT,
+      "note" TEXT,
+      "budget" DOUBLE PRECISION NOT NULL DEFAULT 0,
+      "startDate" TIMESTAMP(3),
+      "endDate" TIMESTAMP(3),
+      "isActive" BOOLEAN NOT NULL DEFAULT true,
+      "targetType" TEXT NOT NULL DEFAULT 'shop',
+      "targetPayload" TEXT,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "AdLink_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "AdLink_code_key" ON "AdLink"("code")`,
+    `CREATE INDEX IF NOT EXISTS "AdLink_platform_idx" ON "AdLink"("platform")`,
+    `CREATE INDEX IF NOT EXISTS "AdLink_isActive_idx" ON "AdLink"("isActive")`,
+    `CREATE INDEX IF NOT EXISTS "AdLink_createdAt_idx" ON "AdLink"("createdAt")`,
+    `CREATE TABLE IF NOT EXISTS "AdClick" (
+      "id" SERIAL NOT NULL,
+      "adLinkId" INTEGER NOT NULL,
+      "ipHash" TEXT,
+      "userAgent" TEXT,
+      "referer" TEXT,
+      "isUnique" BOOLEAN NOT NULL DEFAULT true,
+      "isBot" BOOLEAN NOT NULL DEFAULT false,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "AdClick_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE INDEX IF NOT EXISTS "AdClick_adLinkId_createdAt_idx" ON "AdClick"("adLinkId", "createdAt")`,
+    `CREATE INDEX IF NOT EXISTS "AdClick_adLinkId_ipHash_idx" ON "AdClick"("adLinkId", "ipHash")`,
+    `CREATE TABLE IF NOT EXISTS "AdStartEvent" (
+      "id" SERIAL NOT NULL,
+      "adLinkId" INTEGER,
+      "adCode" TEXT NOT NULL,
+      "userId" INTEGER NOT NULL,
+      "isNewUser" BOOLEAN NOT NULL,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "AdStartEvent_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE INDEX IF NOT EXISTS "AdStartEvent_adLinkId_createdAt_idx" ON "AdStartEvent"("adLinkId", "createdAt")`,
+    `CREATE INDEX IF NOT EXISTS "AdStartEvent_userId_createdAt_idx" ON "AdStartEvent"("userId", "createdAt")`,
+    `CREATE INDEX IF NOT EXISTS "AdStartEvent_adCode_idx" ON "AdStartEvent"("adCode")`,
+    `CREATE TABLE IF NOT EXISTS "AdExpense" (
+      "id" SERIAL NOT NULL,
+      "adLinkId" INTEGER NOT NULL,
+      "amount" DOUBLE PRECISION NOT NULL,
+      "currency" TEXT NOT NULL DEFAULT 'USD',
+      "amountUzs" DOUBLE PRECISION,
+      "startDate" TIMESTAMP(3) NOT NULL,
+      "endDate" TIMESTAMP(3) NOT NULL,
+      "comment" TEXT,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "AdExpense_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE INDEX IF NOT EXISTS "AdExpense_adLinkId_startDate_endDate_idx" ON "AdExpense"("adLinkId", "startDate", "endDate")`,
+    `CREATE INDEX IF NOT EXISTS "BotOrder_attributedAdId_idx" ON "BotOrder"("attributedAdId")`,
+    `CREATE INDEX IF NOT EXISTS "BotOrder_attributedAdCode_idx" ON "BotOrder"("attributedAdCode")`,
   ];
   for (const sql of statements) {
     try {
