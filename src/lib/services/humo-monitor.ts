@@ -545,16 +545,14 @@ export async function triggerImmediateCheck(
     return { isConfirmed: false, message: "Срок действия заявки (5 минут) истёк." };
   }
 
-  const remMin = Math.max(1, Math.ceil(remMs / 60000));
-  const l = lang === "uz" || lang === "en" ? lang : "ru";
   const messages: Record<string, string> = {
-    ru: `Платёж пока не найден. Заявка активна, осталось: ${remMin} мин. Повторно переводить деньги не нужно.`,
-    uz: `To‘lov hozircha topilmadi. Ariza faol, qoldi: ${remMin} daqiqa. Pulni qayta o‘tkazish shart emas.`,
-    en: `Payment not found yet. Request is active, remaining: ${remMin} min. No need to send money again.`,
+    ru: "Платёж пока не найден. Заявка активна, повторно переводить деньги не нужно.",
+    uz: "To‘lov hozircha topilmadi. Ariza faol, pulni qayta o‘tkazish shart emas.",
+    en: "Payment not found yet. Request is active, no need to send money again.",
   };
 
   return {
     isConfirmed: false,
-    message: messages[l] || messages.ru,
+    message: messages[lang] || messages.ru,
   };
 }

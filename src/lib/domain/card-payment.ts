@@ -7,9 +7,9 @@ export const CARD_PREMIUM_EMOJI_1 = "5472296756152644790";
 export const CARD_PREMIUM_EMOJI_2 = "5346328681075712891";
 
 export const CARD_PAY_BUTTON_TEXT: Record<string, string> = {
-  uz: "Karta orqali to‘lash 💳 / 💳",
-  ru: "Оплата картой 💳 / 💳",
-  en: "Pay by card 💳 / 💳",
+  uz: `Karta orqali to‘lash <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_1}">💳</tg-emoji> / <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_2}">💳</tg-emoji>`,
+  ru: `Оплата картой <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_1}">💳</tg-emoji> / <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_2}">💳</tg-emoji>`,
+  en: `Pay by card <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_1}">💳</tg-emoji> / <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_2}">💳</tg-emoji>`,
 };
 
 export const CARD_PAY_BUTTON_HTML: Record<string, string> = {
@@ -352,9 +352,11 @@ export async function claimPaymentExpiration(
       id: requestId,
       status: "pending",
       expiresAt: { lte: now },
+      expirationNotifiedAt: null,
     },
     data: {
       status: "expired",
+      expirationNotifiedAt: now,
     },
   });
   return res.count === 1;
@@ -389,15 +391,14 @@ export function buildCardPaymentSupportText(params: CardPaymentSupportParams): s
   const now = params.now || new Date();
   const remMs = params.expiresAt.getTime() - now.getTime();
   const isActive = params.status === "pending" && remMs > 0;
-  const remMin = Math.max(1, Math.ceil(remMs / 60000));
 
-  let statusText = "платёж отправлен, но ещё не подтверждён";
-  if (isActive) {
-    statusText = `платёж отправлен, но ещё не подтверждён (осталось: ${remMin} мин.)`;
-  } else if (params.status === "expired" || remMs <= 0) {
-    statusText = "время оплаты истекло";
+  let statusText = "платёж отправлен, но автоматически не подтверждён";
+  if (params.status === "expired" || remMs <= 0) {
+    statusText = "время оплаты истекло, но платёж отправлен";
   } else if (params.status === "confirmed" || params.status === "manual_confirmed") {
     statusText = "платёж подтверждён";
+  } else if (isActive) {
+    statusText = "платёж отправлен, но автоматически не подтверждён";
   }
 
   const createdStr = formatDateTime(params.createdAt);

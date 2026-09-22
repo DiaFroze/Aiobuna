@@ -88,8 +88,12 @@ class FakeCardDb {
           args.where.expiresAt?.lte
             ? r.expiresAt <= args.where.expiresAt.lte
             : true;
+        const matchesExpirationNotified =
+          "expirationNotifiedAt" in args.where
+            ? (r.expirationNotifiedAt ?? null) === args.where.expirationNotifiedAt
+            : true;
 
-        if (matchesId && matchesStatus && matchesExpires) {
+        if (matchesId && matchesStatus && matchesExpires && matchesExpirationNotified) {
           Object.assign(r, args.data);
           count++;
         }
@@ -507,6 +511,33 @@ describe("Card Payment Domain & Service", () => {
       expect(db.cardPaymentRequests[0].status).toBe("pending");
     });
 
+    it("incorrect amount (+1 or -1 UZS) does not confirm request and leaves it pending", async () => {
+      db.cardPaymentRequests.push({
+        id: 1021,
+        userId: 1,
+        variantId: 10,
+        qty: 1,
+        totalAmount: 50017,
+        cardLast4: "5678",
+        status: "pending",
+        expiresAt: new Date(Date.now() + 60000),
+      });
+
+      // +1 UZS difference
+      const msgPlus1 = "Karta *5678: Kirim +50 018 UZS";
+      const resPlus1 = await processBankMessage(db, "-100123", 1021, msgPlus1, new Date());
+      expect(resPlus1.matched).toBe(false);
+      const reqAfterPlus1 = db.cardPaymentRequests.find((r) => r.id === 1021);
+      expect(reqAfterPlus1.status).toBe("pending");
+
+      // -1 UZS difference
+      const msgMinus1 = "Karta *5678: Kirim +50 016 UZS";
+      const resMinus1 = await processBankMessage(db, "-100123", 1022, msgMinus1, new Date());
+      expect(resMinus1.matched).toBe(false);
+      const reqAfterMinus1 = db.cardPaymentRequests.find((r) => r.id === 1021);
+      expect(reqAfterMinus1.status).toBe("pending");
+    });
+
     it("records unmatched notification when card does not match", async () => {
       db.cardPaymentRequests.push({
         id: 103,
@@ -673,6 +704,7 @@ describe("Card Payment Domain & Service", () => {
 
       expect(expired).toBe(true);
       expect(db.cardPaymentRequests[0].status).toBe("expired");
+      expect(db.cardPaymentRequests[0].expirationNotifiedAt).toEqual(timeAt5m1s);
     });
 
     it("confirmed request never transitions to expired even after TTL expires", async () => {
@@ -696,6 +728,35 @@ describe("Card Payment Domain & Service", () => {
 
       expect(expired).toBe(false);
       expect(db.cardPaymentRequests[0].status).toBe("confirmed");
+      expect(db.cardPaymentRequests[0].expirationNotifiedAt).toBeUndefined();
+    });
+
+    it("two parallel timers send only one message (claimPaymentExpiration returns true once, false second time)", async () => {
+      const createdAt = new Date("2026-09-22T10:00:00.000Z");
+      const expiresAt = calculatePaymentExpiry(createdAt, 300);
+
+      db.cardPaymentRequests.push({
+        id: 207,
+        userId: 1,
+        variantId: 10,
+        qty: 1,
+        totalAmount: 50020,
+        cardLast4: "5678",
+        status: "pending",
+        createdAt,
+        expiresAt,
+      });
+
+      const timePastTtl = new Date(createdAt.getTime() + 301 * 1000);
+      const [first, second] = await Promise.all([
+        claimPaymentExpiration(db, 207, timePastTtl),
+        claimPaymentExpiration(db, 207, timePastTtl),
+      ]);
+
+      expect([first, second].filter(Boolean).length).toBe(1);
+      const req = db.cardPaymentRequests.find((r) => r.id === 207);
+      expect(req.status).toBe("expired");
+      expect(req.expirationNotifiedAt).toBeDefined();
     });
 
     it("repeated timer run does not modify already expired request", async () => {
@@ -817,7 +878,7 @@ describe("Card Payment Domain & Service", () => {
   });
 
   describe("User On-Demand Check (triggerImmediateCheck)", () => {
-    it("returns active message with remaining minutes when payment not found yet", async () => {
+    it("returns active message without remaining minutes when payment not found yet", async () => {
       const now = Date.now();
       const expiresAt = new Date(now + 240 * 1000); // 4 minutes left
 
@@ -830,15 +891,15 @@ describe("Card Payment Domain & Service", () => {
 
       const resRu = await triggerImmediateCheck(401, db, "ru");
       expect(resRu.isConfirmed).toBe(false);
-      expect(resRu.message).toBe("Платёж пока не найден. Заявка активна, осталось: 4 мин. Повторно переводить деньги не нужно.");
+      expect(resRu.message).toBe("Платёж пока не найден. Заявка активна, повторно переводить деньги не нужно.");
 
       const resUz = await triggerImmediateCheck(401, db, "uz");
       expect(resUz.isConfirmed).toBe(false);
-      expect(resUz.message).toBe("To‘lov hozircha topilmadi. Ariza faol, qoldi: 4 daqiqa. Pulni qayta o‘tkazish shart emas.");
+      expect(resUz.message).toBe("To‘lov hozircha topilmadi. Ariza faol, pulni qayta o‘tkazish shart emas.");
 
       const resEn = await triggerImmediateCheck(401, db, "en");
       expect(resEn.isConfirmed).toBe(false);
-      expect(resEn.message).toBe("Payment not found yet. Request is active, remaining: 4 min. No need to send money again.");
+      expect(resEn.message).toBe("Payment not found yet. Request is active, no need to send money again.");
 
       // Verify expiresAt was not modified / extended
       expect(db.cardPaymentRequests[0].expiresAt.getTime()).toBe(expiresAt.getTime());
@@ -870,6 +931,51 @@ describe("Card Payment Domain & Service", () => {
       expect(res.isConfirmed).toBe(true);
       expect(res.message).toContain("подтверждена");
     });
+
+    it("repeated clicking 'Я оплатил' does not alter confirmed or expired state", async () => {
+      const now = Date.now();
+      db.cardPaymentRequests.push(
+        {
+          id: 404,
+          status: "confirmed",
+          expiresAt: new Date(now + 60000),
+        },
+        {
+          id: 405,
+          status: "expired",
+          expiresAt: new Date(now - 60000),
+        },
+        {
+          id: 406,
+          status: "pending",
+          expiresAt: new Date(now + 120000),
+        }
+      );
+
+      // Multiple clicks on confirmed
+      for (let i = 0; i < 5; i++) {
+        const res = await triggerImmediateCheck(404, db, "ru");
+        expect(res.isConfirmed).toBe(true);
+      }
+      expect(db.cardPaymentRequests.find((r) => r.id === 404).status).toBe("confirmed");
+
+      // Multiple clicks on expired
+      for (let i = 0; i < 5; i++) {
+        const res = await triggerImmediateCheck(405, db, "ru");
+        expect(res.isConfirmed).toBe(false);
+      }
+      expect(db.cardPaymentRequests.find((r) => r.id === 405).status).toBe("expired");
+
+      // Multiple clicks on pending
+      const initialExpires = db.cardPaymentRequests.find((r) => r.id === 406).expiresAt.getTime();
+      for (let i = 0; i < 5; i++) {
+        const res = await triggerImmediateCheck(406, db, "ru");
+        expect(res.isConfirmed).toBe(false);
+      }
+      const pendingReq = db.cardPaymentRequests.find((r) => r.id === 406);
+      expect(pendingReq.status).toBe("pending");
+      expect(pendingReq.expiresAt.getTime()).toBe(initialExpires);
+    });
   });
 
   describe("Ready-Made Admin Support Link & Secrets Protection", () => {
@@ -894,7 +1000,7 @@ describe("Card Payment Domain & Service", () => {
       expect(text).toContain("Товар: Sinov Mahsuloti");
       expect(text).toContain("Сумма: 6 053 сум");
       expect(text).toContain("Время создания: 2026-09-22");
-      expect(text).toContain("Статус: платёж отправлен, но ещё не подтверждён (осталось: 4 мин.).");
+      expect(text).toContain("Статус: платёж отправлен, но автоматически не подтверждён.");
       expect(text).toContain("Прошу проверить оплату.");
     });
 
@@ -917,7 +1023,7 @@ describe("Card Payment Domain & Service", () => {
       expect(text).toContain("Номер заявки: #124");
       expect(text).toContain("Товар: Telegram Premium 12 oy");
       expect(text).toContain("Сумма: 350 050 сум");
-      expect(text).toContain("Статус: время оплаты истекло.");
+      expect(text).toContain("Статус: время оплаты истекло, но платёж отправлен.");
     });
 
     it("generates url-encoded telegram link without secrets", () => {
@@ -1015,9 +1121,15 @@ describe("Card Payment Domain & Service", () => {
       expect(CARD_PREMIUM_EMOJI_1).toBe("5472296756152644790");
       expect(CARD_PREMIUM_EMOJI_2).toBe("5346328681075712891");
 
-      expect(t("uz", "btn_pay_card")).toBe("Karta orqali to‘lash 💳 / 💳");
-      expect(t("ru", "btn_pay_card")).toBe("Оплата картой 💳 / 💳");
-      expect(t("en", "btn_pay_card")).toBe("Pay by card 💳 / 💳");
+      expect(t("uz", "btn_pay_card")).toBe(
+        `Karta orqali to‘lash <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_1}">💳</tg-emoji> / <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_2}">💳</tg-emoji>`
+      );
+      expect(t("ru", "btn_pay_card")).toBe(
+        `Оплата картой <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_1}">💳</tg-emoji> / <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_2}">💳</tg-emoji>`
+      );
+      expect(t("en", "btn_pay_card")).toBe(
+        `Pay by card <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_1}">💳</tg-emoji> / <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_2}">💳</tg-emoji>`
+      );
 
       const htmlUz = renderCardPayButtonHtml("uz");
       expect(htmlUz).toBe('Karta orqali to‘lash <tg-emoji emoji-id="5472296756152644790">💳</tg-emoji> / <tg-emoji emoji-id="5346328681075712891">💳</tg-emoji>');

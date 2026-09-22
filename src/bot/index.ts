@@ -1861,7 +1861,7 @@ async function appendCardPayButtons(
     kb.text(stripLeadEmoji(t(lang, "pay_stars", { n: soumToStars(total) })), `tstar_buy:${total}:${variantId}:${qty}`).icon(STARS_BTN_EMOJI).row();
     // Card payment button (HUMO) — gated by PAYMENT_MONITOR_MODE
     if (canAccessCardPayment(userTgId)) {
-      kb.text(stripLeadEmoji(t(lang, "btn_pay_card")), `pay_card:${variantId}:${qty}`).icon(CARD_PREMIUM_EMOJI_1).row();
+      kb.text(t(lang, "btn_pay_card"), `pay_card:${variantId}:${qty}`).row();
     }
     const adminUser = (await setting("support_username", "Aiobuna_support")).replace(/^@/, "");
     kb.url(stripLeadEmoji(t(lang, "admin_topup")), `https://t.me/${adminUser}?text=${encodeURIComponent(`${label} — ${money(total, lang)}`)}`).icon(ADMIN_BTN_EMOJI).row();
@@ -2986,7 +2986,7 @@ async function showBankPicker(
     }
     // Card payment button (HUMO) — gated by PAYMENT_MONITOR_MODE
     if (canAccessCardPayment(user.tgId)) {
-      kb.text(stripLeadEmoji(t(lang, "btn_pay_card")), `pay_card:${v.id}:${qty}${suffix}`).icon(CARD_PREMIUM_EMOJI_1).row();
+      kb.text(t(lang, "btn_pay_card"), `pay_card:${v.id}:${qty}${suffix}`).row();
     }
     // Contact admin: a URL button that opens the admin's personal chat with the
     // product name pre-filled, so the customer only has to hit send.
@@ -7363,10 +7363,21 @@ bot.on("callback_query:data", async (ctx) => {
         });
         const formatSum = (n: number) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
         const cardDigitsOnly = config.cardDigitsOnly || config.cardNumber.replace(/\s+/g, "");
+        const supportUrl = buildCardPaymentSupportUrl({
+          adminUsername: adminUser,
+          requestId: request.id,
+          itemTitle,
+          totalAmount,
+          createdAt,
+          expiresAt,
+          status: "pending",
+          now: createdAt,
+        });
         const kb = new InlineKeyboard();
         kb.text(t(lang, "btn_check_payment"), `card_chk:${request.id}`).row();
         kb.add({ text: t(lang, "btn_copy_amount"), copy_text: { text: String(totalAmount) } }).row();
         kb.add({ text: t(lang, "btn_copy_card"), copy_text: { text: cardDigitsOnly } }).row();
+        kb.url(t(lang, "btn_contact_admin"), supportUrl).row();
         const msg = await ctx.reply(
           t(lang, "card_pay_instructions", {
             item: itemTitle,
@@ -7394,6 +7405,25 @@ bot.on("callback_query:data", async (ctx) => {
       if (result.isConfirmed) {
         const okMsg = lang === "uz" ? "✅ To‘lov tasdiqlandi!" : lang === "en" ? "✅ Payment confirmed!" : "✅ Оплата подтверждена!";
         await ctx.answerCallbackQuery({ text: okMsg, show_alert: true }).catch(() => {});
+        const req = await db.cardPaymentRequest.findUnique({ where: { id: requestId } });
+        if (req?.chatId && req?.messageId) {
+          await ctx.api.deleteMessage(req.chatId, req.messageId).catch(() => {});
+        }
+        if (req) {
+          await executePurchase(
+            user.tgId,
+            req.variantId,
+            req.qty,
+            undefined,
+            req.targetUsername ?? undefined,
+            req.refSpend ?? 0,
+            req.recipientTgId ?? undefined,
+            "card_humo",
+            String(req.id),
+          ).catch((e) => {
+            console.error(`[humo] card_chk executePurchase failed for #${req.id}:`, (e as Error).message);
+          });
+        }
       } else {
         await ctx.answerCallbackQuery({ text: result.message, show_alert: true }).catch(() => {});
       }
@@ -8944,6 +8974,8 @@ async function ensureSchema() {
       CONSTRAINT "CardPaymentRequest_pkey" PRIMARY KEY ("id")
     )`,
     `CREATE INDEX IF NOT EXISTS "CardPaymentRequest_status_expiresAt_idx" ON "CardPaymentRequest"("status", "expiresAt")`,
+    `ALTER TABLE "CardPaymentRequest" ADD COLUMN IF NOT EXISTS "expirationNotifiedAt" TIMESTAMP(3)`,
+    `CREATE INDEX IF NOT EXISTS "CardPaymentRequest_status_expiresAt_expirationNotifiedAt_idx" ON "CardPaymentRequest"("status", "expiresAt", "expirationNotifiedAt")`,
     `CREATE INDEX IF NOT EXISTS "CardPaymentRequest_totalAmount_cardLast4_status_idx" ON "CardPaymentRequest"("totalAmount", "cardLast4", "status")`,
     `CREATE INDEX IF NOT EXISTS "CardPaymentRequest_userId_idx" ON "CardPaymentRequest"("userId")`,
     `CREATE UNIQUE INDEX IF NOT EXISTS "CardPaymentRequest_matchedNotificationId_key" ON "CardPaymentRequest"("matchedNotificationId")`,
@@ -9141,7 +9173,7 @@ async function deliverPaidPaymeTopUps() {
 async function expireCardPaymentRequests() {
   const now = new Date();
   const expired = await db.cardPaymentRequest.findMany({
-    where: { status: "pending", expiresAt: { lte: now } },
+    where: { status: "pending", expiresAt: { lte: now }, expirationNotifiedAt: null },
     take: 20,
   });
   for (const req of expired) {

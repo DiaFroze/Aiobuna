@@ -1335,10 +1335,12 @@ model CardPaymentRequest {
   targetUsername        String?
   recipientTgId         String?
   adminNote             String?
+  expirationNotifiedAt  DateTime?         // Set atomically when expiration message is sent
   createdAt             DateTime          @default(now())
   updatedAt             DateTime          @updatedAt
 
   @@index([status, expiresAt])
+  @@index([status, expiresAt, expirationNotifiedAt])
   @@index([totalAmount, cardLast4, status])
   @@index([userId])
 }
