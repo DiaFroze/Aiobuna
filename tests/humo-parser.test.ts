@@ -140,5 +140,41 @@ describe("HUMO Notification Parser", () => {
       expect(parsed.cardLast4).toBe("");
       expect(parsed.error).toBe("card_not_found");
     });
+
+    it("parses exact Zoomrad P2P deposit notification from HUMO Card bot with ➕ and dot thousands", () => {
+      const text =
+        "🎉 Пополнение\n" +
+        "➕ 6.014,00 UZS\n" +
+        "📍 ZOOMRAD P2P HU2HU>TO\n" +
+        "💳 HUMOCARD *8767\n" +
+        "🕒 05:01 22.09.2026\n" +
+        "💰 304.246,75 UZS";
+
+      const parsed = parseHumoNotification(text);
+
+      expect(parsed.isDeposit).toBe(true);
+      expect(parsed.operationType).toBe("deposit");
+      expect(parsed.amount).toBe(6014);
+      expect(parsed.cardLast4).toBe("8767");
+      // Timestamp in Tashkent (UTC+5): 05:01 is 00:01 UTC
+      expect(parsed.operationTime.getUTCHours()).toBe(0);
+      expect(parsed.operationTime.getUTCMinutes()).toBe(1);
+    });
+
+    it("correctly identifies debit notification with - and operation keyword without mistaking balance", () => {
+      const text =
+        "Операция\n" +
+        "- 10.000,00 UZS\n" +
+        "📍 PAYME AJ P2P HUMO2H\n" +
+        "💳 HUMOCARD *8767\n" +
+        "🕒 05:00 22.09.2026\n" +
+        "💰 298.232,75 UZS";
+
+      const parsed = parseHumoNotification(text);
+
+      expect(parsed.isDeposit).toBe(false);
+      expect(parsed.amount).toBe(10000);
+      expect(parsed.cardLast4).toBe("8767");
+    });
   });
 });

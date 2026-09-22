@@ -115,13 +115,36 @@ export function extractAmount(rawText: string): number | null {
   const text = rawText.replace(/[\u00A0\u202F\u2007\u200B\uFEFF]/g, " ");
 
   const CURRENCY_SUFFIX = `(?:so['’\`]?m|uzs|сум|sum)(?![a-zA-Zа-яА-ЯёЁ0-9])`;
+  const PLUS_PREFIX = `(?:[+\\u2795\\uFE62\\uFF0B]|\\bplus\\b)`;
+
+  // Match amount with thousand separators:
+  // 1. Dot thousands, comma decimals: 6.014,00 or 304.246,75
+  // 2. Comma thousands, dot decimals: 6,014.00 or 75,025.00
+  // 3. Space thousands, dot or comma decimals: 6 014,00 or 6 014.00 or 50 077
+  // 4. Dot thousands without decimals: 6.014 or 10.000
+  // 5. Plain integer or decimal: 6014 or 6014.00 or 6014,00
+  const AMOUNT_CAPTURE = `(` +
+    `\\d{1,3}(?:\\.\\d{3})+(?:,\\d{1,2})?|` +
+    `\\d{1,3}(?:,\\d{3})+(?:\\.\\d{1,2})?|` +
+    `\\d{1,3}(?:[ \\t]\\d{3})+(?:[.,]\\d{1,2})?|` +
+    `\\d{1,3}(?:\\.\\d{3})+|` +
+    `\\d+(?:[.,]\\d{1,2})?` +
+  `)`;
+
   const amountPatterns = [
-    // "+ 6 056,00 UZS", "+50 017 UZS", "+ 50 017.00 so'm", "+50017"
-    new RegExp(`[+]\\s*(\\d{1,3}(?:[ \\t,]\\d{3})*(?:[.,]\\d{1,2})?|\\d+)\\s*(?:${CURRENCY_SUFFIX})?`, "i"),
-    // "6 056,00 UZS", "50 017.00 UZS", "75,025.00 сум", "50 017 so'm"
-    new RegExp(`(\\d{1,3}(?:[ \\t,]\\d{3})*(?:[.,]\\d{1,2})?|\\d+)\\s*${CURRENCY_SUFFIX}`, "i"),
-    // "Summa: 50 017,00", "Kirim: 50 017.00", "Сумма: 50000", "Пополнение: 6 056,00", "Зачисление: 75,025.00"
-    /(?:summa|сумма|kirim|кирим|miqdor|пополнение|зачисление)[\s:]*([+]?\d{1,3}(?:[ \t,]\d{3})*(?:[.,]\d{1,2})?|[+]?\d+)/i,
+    // Pattern 1: Explicit '+' or '➕' followed by amount:
+    // e.g. "➕ 6.014,00 UZS", "+ 6 056,00 UZS", "+50 017 UZS", "+50017"
+    new RegExp(`${PLUS_PREFIX}\\s*${AMOUNT_CAPTURE}\\s*(?:${CURRENCY_SUFFIX})?`, "i"),
+
+    // Pattern 2: Keyword followed by amount (excluding balance):
+    // e.g. "Пополнение: 6.014,00", "Зачисление: 75,025.00", "Kirim: 50 017.00"
+    new RegExp(`(?:kirim|кирим|miqdor|пополнение|зачисление)[\\s:]*${PLUS_PREFIX}?\\s*${AMOUNT_CAPTURE}\\s*(?:${CURRENCY_SUFFIX})?`, "i"),
+
+    // Pattern 3: Amount followed by currency suffix on a line without balance markers:
+    new RegExp(`(?<!(?:💰|баланс|balance|qoldiq|ostatok)[^\\n]*)${AMOUNT_CAPTURE}\\s*${CURRENCY_SUFFIX}`, "i"),
+
+    // Pattern 4: "Summa: 50 017,00" or "Сумма: 50000"
+    new RegExp(`(?:summa|сумма)[\\s:]*${PLUS_PREFIX}?\\s*${AMOUNT_CAPTURE}`, "i"),
   ];
 
   for (const pattern of amountPatterns) {
@@ -134,10 +157,14 @@ export function extractAmount(rawText: string): number | null {
     }
   }
 
-  // Fallback: look for 4 to 8 digits with thousand separators, or 4-9 digits NOT preceded by card indicators or *
-  // Strip card references so card last 4 digits (e.g. *8767) are NEVER mistaken for an amount
-  const cleanedForFallback = text.replace(/(?:karta|карта|card|humo)[^\d\n]*?[*xX•·\d]+/gi, " ");
-  const fallbackMatch = cleanedForFallback.match(/(?<![*•\d])\b(\d{1,3}(?:[ \t,]\d{3})+(?:[.,]\d{1,2})?|\d{4,9})\b(?![*•\d])/);
+  // Fallback: search on lines that are NOT balance lines
+  const nonBalanceLines = text
+    .split("\n")
+    .filter((line) => !/[💰]|\b(?:баланс|balance|qoldiq|ostatok)\b/i.test(line))
+    .join("\n");
+
+  const cleanedForFallback = nonBalanceLines.replace(/(?:karta|карта|card|humo)[^\d\n]*?[*xX•·\d]+/gi, " ");
+  const fallbackMatch = cleanedForFallback.match(/(?<![*•\d])\b(\d{1,3}(?:[ \t,.]\d{3})+(?:[.,]\d{1,2})?|\d{4,9})\b(?![*•\d])/);
   if (fallbackMatch && fallbackMatch[1]) {
     const parsed = parseAmountString(fallbackMatch[1]);
     if (parsed !== null && parsed > 0) {
@@ -149,22 +176,32 @@ export function extractAmount(rawText: string): number | null {
 }
 
 /**
- * Normalizes number string like "50 017.00" or "6 056,00" or "50017" into integer UZS.
+ * Normalizes number string like "6.014,00", "50 017.00", "6 056,00", "6,014.00" or "50017" into integer UZS.
  */
-function parseAmountString(raw: string): number | null {
+export function parseAmountString(raw: string): number | null {
+  if (!raw) return null;
   let cleaned = raw.replace(/[\u00A0\u202F\u2007\u200B\uFEFF]/g, " ").trim();
-  // Strip leading '+'
-  if (cleaned.startsWith("+")) {
-    cleaned = cleaned.slice(1).trim();
+  // Strip leading plus/minus symbols
+  cleaned = cleaned.replace(/^[+\u2795\uFE62\uFF0B\-➖\u2796\uFE63\uFF0D\s]+/, "").trim();
+
+  // Case 1: Dot as thousand separator, comma as decimal: e.g. "6.014,00" or "304.246,75" or "1.000.000,50"
+  if (/^\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?$/.test(cleaned)) {
+    cleaned = cleaned.replace(/\./g, "").replace(/,/, ".");
   }
-  // Strip decimals like .00 or ,00
-  cleaned = cleaned.replace(/[.,]00$/, "");
-  // Replace comma decimal with dot if 1-2 decimal digits exist
-  cleaned = cleaned.replace(/,(\d{1,2})$/, ".$1");
-  // Remove spaces, tabs, apostrophes used as thousand separators
-  cleaned = cleaned.replace(/[\s'`_]/g, "");
-  // If there is still a comma, remove it
-  cleaned = cleaned.replace(/,/g, "");
+  // Case 2: Comma as thousand separator, dot as decimal: e.g. "6,014.00" or "75,025.00"
+  else if (/^\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?$/.test(cleaned)) {
+    cleaned = cleaned.replace(/,/g, "");
+  }
+  // Case 3: Dot as thousand separator without decimal: e.g. "6.014" or "50.077" or "10.000"
+  else if (/^\d{1,3}(?:\.\d{3})+$/.test(cleaned)) {
+    cleaned = cleaned.replace(/\./g, "");
+  }
+  // Case 4: Space/tab as thousand separator with comma or dot decimal: e.g. "6 014,00" or "6 014.00" or "50 077"
+  else {
+    cleaned = cleaned.replace(/[.,]00$/, "");
+    cleaned = cleaned.replace(/,(\d{1,2})$/, ".$1");
+    cleaned = cleaned.replace(/[\s'`_,]/g, "");
+  }
 
   const num = Math.round(Number.parseFloat(cleaned));
   if (Number.isFinite(num) && num > 0) {
@@ -178,11 +215,21 @@ function parseAmountString(raw: string): number | null {
  * Converts to Date in Asia/Tashkent context.
  */
 export function extractOperationTime(text: string, fallbackDate: Date = new Date()): Date {
-  // Try to find DD.MM.YYYY HH:mm[:ss] or YYYY-MM-DD HH:mm
-  const dateMatch = text.match(/\b(\d{2})[./](\d{2})[./](\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?\b/);
-  if (dateMatch) {
-    const [, d, m, y, h, min, sec] = dateMatch;
-    // Tashkent is UTC+5. Construct an ISO string with +05:00
+  // Support both "HH:mm[:ss] DD.MM.YYYY" (e.g. "05:01 22.09.2026") and "DD.MM.YYYY HH:mm[:ss]"
+  const timeFirstMatch = text.match(/\b(\d{2}):(\d{2})(?::(\d{2}))?\s+(\d{2})[./](\d{2})[./](\d{4})\b/);
+  if (timeFirstMatch) {
+    const [, h, min, sec, d, m, y] = timeFirstMatch;
+    const s = sec || "00";
+    const isoString = `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}T${h.padStart(2, "0")}:${min.padStart(2, "0")}:${s.padStart(2, "0")}+05:00`;
+    const parsed = new Date(isoString);
+    if (!isNaN(parsed.getTime())) {
+      return parsed;
+    }
+  }
+
+  const dateFirstMatch = text.match(/\b(\d{2})[./](\d{2})[./](\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?\b/);
+  if (dateFirstMatch) {
+    const [, d, m, y, h, min, sec] = dateFirstMatch;
     const s = sec || "00";
     const isoString = `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}T${h.padStart(2, "0")}:${min.padStart(2, "0")}:${s.padStart(2, "0")}+05:00`;
     const parsed = new Date(isoString);
@@ -195,7 +242,6 @@ export function extractOperationTime(text: string, fallbackDate: Date = new Date
   const timeMatch = text.match(/\b(\d{2}):(\d{2})(?::(\d{2}))?\b/);
   if (timeMatch) {
     const [, h, min, sec] = timeMatch;
-    // Use fallbackDate's date part in Tashkent
     const tzFormatter = new Intl.DateTimeFormat("en-US", {
       timeZone: "Asia/Tashkent",
       year: "numeric",
@@ -233,6 +279,8 @@ export function parseHumoNotification(
   // Check debit first: if debit keywords are found, it cannot be a deposit
   const hasDebitKeyword = DEBIT_KEYWORDS.some((kw) => lower.includes(kw));
   const hasDepositKeyword = DEPOSIT_KEYWORDS.some((kw) => lower.includes(kw));
+  const hasPlusSymbol = /[+\u2795\uFE62\uFF0B]/.test(rawText);
+  const hasMinusSymbol = /[-\u2796\uFE63\uFF0D]/.test(rawText);
 
   let isDeposit = false;
   let operationType: "deposit" | "debit" | "unknown" = "unknown";
@@ -244,21 +292,18 @@ export function parseHumoNotification(
     operationType = "deposit";
     isDeposit = true;
   } else if (hasDepositKeyword && hasDebitKeyword) {
-    // If both keywords exist, check if '+' or '-' is in the message
-    if (rawText.includes("+")) {
+    if (hasPlusSymbol) {
       operationType = "deposit";
       isDeposit = true;
-    } else if (rawText.includes("-")) {
+    } else if (hasMinusSymbol) {
       operationType = "debit";
       isDeposit = false;
     } else {
-      // Ambiguous
       operationType = "unknown";
       isDeposit = false;
     }
   } else {
-    // Neither keyword found, check for explicit '+'
-    if (rawText.includes("+")) {
+    if (hasPlusSymbol) {
       operationType = "deposit";
       isDeposit = true;
     } else {

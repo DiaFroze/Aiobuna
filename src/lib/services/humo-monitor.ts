@@ -62,28 +62,42 @@ export function registerPaymentConfirmedHandler(handler: PaymentConfirmedHandler
 export function isMatchingChatId(
   incomingChatId: string | number | bigint | undefined | null,
   incomingPeerId: any,
-  targetChatId: string
+  targetChatId: string,
+  resolvedNumericId?: string | null,
+  senderId?: any
 ): boolean {
   if (!targetChatId) return false;
   const targetClean = String(targetChatId).trim();
   const targetWithout100 = targetClean.replace(/^-100/, "").replace(/^-/, "");
+  const targetLower = targetClean.toLowerCase().replace(/^@/, "");
 
+  const candidates: string[] = [];
   if (incomingChatId !== undefined && incomingChatId !== null) {
-    const strChatId = String(incomingChatId).trim();
-    if (strChatId === targetClean || strChatId.replace(/^-100/, "").replace(/^-/, "") === targetWithout100) {
-      return true;
-    }
+    candidates.push(String(incomingChatId).trim());
   }
-
+  if (senderId !== undefined && senderId !== null) {
+    candidates.push(String(senderId).trim());
+  }
   if (incomingPeerId) {
     const rawPeer = String(
       incomingPeerId.channelId ?? incomingPeerId.chatId ?? incomingPeerId.userId ?? ""
     ).trim();
-    if (rawPeer) {
-      const peerWithout100 = rawPeer.replace(/^-100/, "").replace(/^-/, "");
-      if (rawPeer === targetClean || peerWithout100 === targetWithout100) {
-        return true;
-      }
+    if (rawPeer) candidates.push(rawPeer);
+  }
+
+  for (const c of candidates) {
+    const without100 = c.replace(/^-100/, "").replace(/^-/, "");
+    const lower = c.toLowerCase().replace(/^@/, "");
+    if (
+      c === targetClean ||
+      without100 === targetWithout100 ||
+      lower === targetLower ||
+      (resolvedNumericId && (
+        c === resolvedNumericId ||
+        without100 === resolvedNumericId.replace(/^-100/, "").replace(/^-/, "")
+      ))
+    ) {
+      return true;
     }
   }
 
@@ -303,12 +317,23 @@ export async function startHumoMonitor(db: any): Promise<void> {
       console.warn("[humo-monitor] getDialogs warning:", (e as Error).message || e);
     });
 
+    let resolvedChatNumericId: string | null = null;
+    try {
+      const entity = await client.getEntity(rawChatId);
+      if (entity && (entity as any).id) {
+        resolvedChatNumericId = String((entity as any).id);
+        console.log(`[humo-monitor] Resolved target chat ${rawChatId} to numeric id: ${resolvedChatNumericId}`);
+      }
+    } catch (e: any) {
+      console.warn(`[humo-monitor] getEntity for ${rawChatId} note:`, e?.message || e);
+    }
+
     // Event listener for incoming bank notification messages
     client.addEventHandler(async (event: any) => {
       const message = event.message;
       if (!message || message.out) return;
 
-      const isTarget = isMatchingChatId(message.chatId, message.peerId, rawChatId);
+      const isTarget = isMatchingChatId(message.chatId, message.peerId, rawChatId, resolvedChatNumericId, message.senderId);
       if (!isTarget) {
         return;
       }

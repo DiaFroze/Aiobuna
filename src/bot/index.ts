@@ -9225,7 +9225,7 @@ async function fulfillPendingCardOrders() {
 async function repairUnmatchedBankNotifications() {
   try {
     const unmatched = await db.bankNotification.findMany({
-      where: { status: "unmatched" },
+      where: { status: { in: ["unmatched", "late"] } },
       orderBy: { id: "desc" },
       take: 50,
     });
@@ -9242,37 +9242,58 @@ async function repairUnmatchedBankNotifications() {
             cardLast4: parsed.cardLast4 || notif.cardLast4,
           },
         });
+      }
 
-        // Try to match with any pending request for this exact amount
-        const now = new Date();
-        const matchedPending = await db.cardPaymentRequest.findFirst({
+      const finalAmount = parsed.isDeposit && parsed.amount > 0 ? parsed.amount : notif.amount;
+      const finalCardLast4 = parsed.cardLast4 || notif.cardLast4;
+      if (finalAmount > 0) {
+        // Try to match with any pending or expired request for this exact amount
+        const matchedRequest = await db.cardPaymentRequest.findFirst({
           where: {
-            cardLast4: parsed.cardLast4,
-            totalAmount: parsed.amount,
-            status: "pending",
-            expiresAt: { gt: now },
+            cardLast4: finalCardLast4,
+            totalAmount: finalAmount,
+            status: { in: ["pending", "expired"] },
           },
           orderBy: { createdAt: "desc" },
         });
-        if (matchedPending) {
-          const success = await claimPaymentConfirmation(db, matchedPending.id, notif.id);
-          if (success) {
-            console.log(`[humo] Retroactively matched notification #${notif.id} with request #${matchedPending.id}!`);
-            const user = await db.botUser.findUnique({ where: { id: matchedPending.userId } });
+
+        if (matchedRequest) {
+          console.log(`[humo] Reconciling notification #${notif.id} with request #${matchedRequest.id} (${finalAmount} UZS, status: ${matchedRequest.status})`);
+          let confirmed = false;
+          if (matchedRequest.status === "pending") {
+            confirmed = await claimPaymentConfirmation(db, matchedRequest.id, notif.id);
+          } else if (matchedRequest.status === "expired") {
+            // Atomically recover expired request since actual payment was verified
+            await db.$transaction(async (tx: any) => {
+              await tx.bankNotification.update({
+                where: { id: notif.id },
+                data: { status: "matched", matchedRequestId: matchedRequest.id },
+              });
+              await tx.cardPaymentRequest.update({
+                where: { id: matchedRequest.id },
+                data: { status: "confirmed", matchedNotificationId: notif.id },
+              });
+            });
+            confirmed = true;
+          }
+
+          if (confirmed) {
+            console.log(`[humo] Retroactively matched notification #${notif.id} with request #${matchedRequest.id}! Delivering product...`);
+            const user = await db.botUser.findUnique({ where: { id: matchedRequest.userId } });
             if (user) {
               await bot.api.sendMessage(user.tgId, t(user.lang, "card_pay_confirmed"), { parse_mode: "HTML" }).catch(() => {});
               await executePurchase(
                 user.tgId,
-                matchedPending.variantId,
-                matchedPending.qty,
+                matchedRequest.variantId,
+                matchedRequest.qty,
                 undefined,
-                matchedPending.targetUsername ?? undefined,
-                matchedPending.refSpend ?? 0,
-                matchedPending.recipientTgId ?? undefined,
+                matchedRequest.targetUsername ?? undefined,
+                matchedRequest.refSpend ?? 0,
+                matchedRequest.recipientTgId ?? undefined,
                 "card_humo",
-                String(matchedPending.id),
+                String(matchedRequest.id),
               ).catch((e) => {
-                console.error(`[humo] Retroactive executePurchase failed for #${matchedPending.id}:`, (e as Error).message);
+                console.error(`[humo] Retroactive executePurchase failed for #${matchedRequest.id}:`, (e as Error).message);
               });
             }
           }
