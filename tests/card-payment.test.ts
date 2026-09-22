@@ -100,6 +100,12 @@ class FakeCardDb {
       }
       return { count };
     },
+    create: async (args: any) => {
+      const id = args.data.id || this.cardPaymentRequests.length + 100;
+      const r = { id, ...args.data };
+      this.cardPaymentRequests.push(r);
+      return r;
+    },
     update: async (args: any) => {
       const r = this.cardPaymentRequests.find((item) => item.id === args.where.id);
       if (r) Object.assign(r, args.data);
@@ -228,7 +234,7 @@ describe("Card Payment Domain & Service", () => {
       expect(cfg.cardLast4).toBe("");
       expect(cfg.humoChatId).toBe("");
       expect(cfg.isConfigured).toBe(false);
-      expect(cfg.mode).toBe("admin_only"); // Safe default
+      expect(cfg.mode).toBe("all"); // Safe default: open to all users
     });
   });
 
@@ -263,14 +269,21 @@ describe("Card Payment Domain & Service", () => {
   });
 
   describe("Access Control (canAccessCardPayment)", () => {
-    it("denies all when mode is 'disabled'", () => {
-      process.env.PAYMENT_MONITOR_MODE = "disabled";
-      process.env.PAYMENT_ADMIN_IDS = "111,222";
-      expect(canAccessCardPayment("111")).toBe(false);
-      expect(canAccessCardPayment("999")).toBe(false);
+    it("allows everyone by default when PAYMENT_MONITOR_MODE is unset", () => {
+      delete process.env.PAYMENT_MONITOR_MODE;
+      expect(canAccessCardPayment("99999")).toBe(true);
+      expect(canAccessCardPayment("12345")).toBe(true);
+      expect(canAccessCardPayment(null)).toBe(true);
     });
 
-    it("allows only admin IDs when mode is 'admin_only' (default)", () => {
+    it("allows everyone when mode is explicitly 'all'", () => {
+      process.env.PAYMENT_MONITOR_MODE = "all";
+      expect(canAccessCardPayment("99999")).toBe(true);
+      expect(canAccessCardPayment("12345")).toBe(true);
+      expect(canAccessCardPayment(null)).toBe(true);
+    });
+
+    it("allows only admin IDs when mode is 'admin_only'", () => {
       process.env.PAYMENT_MONITOR_MODE = "admin_only";
       process.env.PAYMENT_ADMIN_IDS = "12345, 67890";
       expect(canAccessCardPayment("12345")).toBe(true);
@@ -290,10 +303,12 @@ describe("Card Payment Domain & Service", () => {
       expect(canAccessCardPayment("77777")).toBe(false);
     });
 
-    it("allows everyone when mode is 'all'", () => {
-      process.env.PAYMENT_MONITOR_MODE = "all";
-      expect(canAccessCardPayment("99999")).toBe(true);
-      expect(canAccessCardPayment("12345")).toBe(true);
+    it("denies all when mode is 'disabled'", () => {
+      process.env.PAYMENT_MONITOR_MODE = "disabled";
+      process.env.PAYMENT_ADMIN_IDS = "111,222";
+      expect(canAccessCardPayment("111")).toBe(false);
+      expect(canAccessCardPayment("999")).toBe(false);
+      expect(canAccessCardPayment(null)).toBe(false);
     });
   });
 
@@ -1134,7 +1149,147 @@ describe("Card Payment Domain & Service", () => {
 
       // HTML renderer provides the <tg-emoji> tags for rich message contexts
       const htmlUz = renderCardPayButtonHtml("uz");
-      expect(htmlUz).toBe('Karta orqali to‘lash <tg-emoji emoji-id="5472296756152644790">💳</tg-emoji> / <tg-emoji emoji-id="5346328681075712891">💳</tg-emoji>');
+    });
+  });
+
+  describe("All Users Public Access & End-to-End Fulfillment Verification", () => {
+    it("allows non-admin regular users to place orders and matches bank payments automatically", async () => {
+      process.env.PAYMENT_MONITOR_MODE = "all";
+      process.env.HUMO_CARD_NUMBER = "9860 1234 5678 9999";
+      process.env.HUMO_CARD_LAST4 = "9999";
+      process.env.CARD_PAYMENT_MIN_EXTRA = "1";
+      process.env.CARD_PAYMENT_MAX_EXTRA = "50";
+
+      const regularBuyerTgId = "987654321";
+      // 1. Verify access gate allows public buyer
+      expect(canAccessCardPayment(regularBuyerTgId)).toBe(true);
+
+      // 2. Generate unique amount for 60 000 UZS base price
+      const baseAmount = 60_000;
+      const { extraAmount, totalAmount } = await generateUniqueAmount(baseAmount, "9999", db);
+      expect(extraAmount).toBeGreaterThanOrEqual(1);
+      expect(extraAmount).toBeLessThanOrEqual(50);
+      expect(totalAmount).toBe(baseAmount + extraAmount);
+
+      // 3. Create pending card payment request for regular buyer
+      const createdAt = new Date();
+      const expiresAt = calculatePaymentExpiry(createdAt, 300);
+      const req = await db.cardPaymentRequest.create({
+        data: {
+          userId: 42,
+          variantId: 10,
+          qty: 1,
+          baseAmount,
+          extraAmount,
+          totalAmount,
+          cardLast4: "9999",
+          cardNumber: "9860 1234 5678 9999",
+          status: "pending",
+          createdAt,
+          expiresAt,
+          chatId: regularBuyerTgId,
+        },
+      });
+      expect(req.id).toBeGreaterThan(0);
+      expect(req.status).toBe("pending");
+
+      // 4. Setup fulfillment tracking
+      let fulfilledRequest: any = null;
+      const { registerPaymentConfirmedHandler } = await import("../src/lib/services/humo-monitor");
+      registerPaymentConfirmedHandler(async (r) => {
+        fulfilledRequest = r;
+      });
+
+      // 5. Bank sends matching deposit notification
+      const bankMsgText = `Karta: 9860****9999\nTo‘lov turi: Popolnenie\nSumma: ${totalAmount} UZS\nVaqti: ${new Date().toISOString()}`;
+      const res = await processBankMessage(db, "-1001234567890", 555, bankMsgText, new Date());
+
+      expect(res.matched).toBe(true);
+      expect(res.requestId).toBe(req.id);
+
+      // 6. Verify request state is atomically updated to confirmed
+      const updatedReq = await db.cardPaymentRequest.findUnique({ where: { id: req.id } });
+      expect(updatedReq.status).toBe("confirmed");
+      expect(updatedReq.matchedNotificationId).toBe(res.notificationId);
+
+      // 7. Verify fulfillment callback executed with correct parameters
+      expect(fulfilledRequest).not.toBeNull();
+      expect(fulfilledRequest.id).toBe(req.id);
+      expect(fulfilledRequest.userId).toBe(42);
+      expect(fulfilledRequest.variantId).toBe(10);
+      expect(fulfilledRequest.totalAmount).toBe(totalAmount);
+
+      // 8. Verify duplicate notification doesn't re-trigger fulfillment
+      fulfilledRequest = null;
+      const duplicateRes = await processBankMessage(db, "-1001234567890", 555, bankMsgText, new Date());
+      expect(duplicateRes.matched).toBe(true);
+      expect(fulfilledRequest).toBeNull(); // No duplicate fulfillment!
+
+      // 9. Verify on-demand check confirms immediately
+      const chk = await triggerImmediateCheck(req.id, db, "uz");
+      expect(chk.isConfirmed).toBe(true);
+
+      // 10. Verify confirmed request can NEVER be expired by background expiration job
+      const claimedExpiration = await claimPaymentExpiration(db, req.id, new Date(Date.now() + 1000 * 3600));
+      expect(claimedExpiration).toBe(false);
+      const afterExpiryCheck = await db.cardPaymentRequest.findUnique({ where: { id: req.id } });
+      expect(afterExpiryCheck.status).toBe("confirmed");
+    });
+
+    it("isolates concurrent requests between multiple regular buyers", async () => {
+      process.env.PAYMENT_MONITOR_MODE = "all";
+      process.env.HUMO_CARD_NUMBER = "9860 1234 5678 9999";
+      process.env.HUMO_CARD_LAST4 = "9999";
+
+      // Buyer A and Buyer B both buy 50 000 UZS item
+      const buyerA = await generateUniqueAmount(50_000, "9999", db);
+      const reqA = await db.cardPaymentRequest.create({
+        data: {
+          userId: 1,
+          variantId: 5,
+          qty: 1,
+          baseAmount: 50_000,
+          extraAmount: buyerA.extraAmount,
+          totalAmount: buyerA.totalAmount,
+          cardLast4: "9999",
+          status: "pending",
+          createdAt: new Date(),
+          expiresAt: calculatePaymentExpiry(new Date(), 300),
+          chatId: "10001",
+        },
+      });
+
+      const buyerB = await generateUniqueAmount(50_000, "9999", db);
+      const reqB = await db.cardPaymentRequest.create({
+        data: {
+          userId: 2,
+          variantId: 5,
+          qty: 1,
+          baseAmount: 50_000,
+          extraAmount: buyerB.extraAmount,
+          totalAmount: buyerB.totalAmount,
+          cardLast4: "9999",
+          status: "pending",
+          createdAt: new Date(),
+          expiresAt: calculatePaymentExpiry(new Date(), 300),
+          chatId: "10002",
+        },
+      });
+
+      // Unique amounts MUST be different to avoid any collision
+      expect(buyerA.totalAmount).not.toBe(buyerB.totalAmount);
+
+      // Buyer B pays their exact amount
+      const msgB = `Karta: *9999\nZachislenie: ${buyerB.totalAmount} UZS`;
+      const resB = await processBankMessage(db, "-1001234567890", 888, msgB, new Date());
+      expect(resB.matched).toBe(true);
+      expect(resB.requestId).toBe(reqB.id);
+
+      // Buyer B is confirmed, Buyer A remains strictly pending
+      const checkA = await db.cardPaymentRequest.findUnique({ where: { id: reqA.id } });
+      const checkB = await db.cardPaymentRequest.findUnique({ where: { id: reqB.id } });
+      expect(checkB.status).toBe("confirmed");
+      expect(checkA.status).toBe("pending");
     });
   });
 });

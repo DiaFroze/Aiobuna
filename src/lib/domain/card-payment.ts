@@ -119,7 +119,7 @@ export function maskChatId(chatId: string): string {
 export function getCardPaymentConfig(): CardPaymentConfig {
   const modeRaw = getEnvTolerant("PAYMENT_MONITOR_MODE", ["payment_monitor_mode", "MONITOR_MODE"]).toLowerCase();
   const mode: PaymentMonitorMode =
-    modeRaw === "all" ? "all" : modeRaw === "disabled" ? "disabled" : "admin_only";
+    modeRaw === "disabled" ? "disabled" : modeRaw === "admin_only" ? "admin_only" : "all";
 
   const ttlSeconds = Math.max(
     60,
