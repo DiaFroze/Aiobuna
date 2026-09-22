@@ -7,9 +7,9 @@ export const CARD_PREMIUM_EMOJI_1 = "5472296756152644790";
 export const CARD_PREMIUM_EMOJI_2 = "5346328681075712891";
 
 export const CARD_PAY_BUTTON_TEXT: Record<string, string> = {
-  uz: `Karta orqali to‘lash <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_1}">💳</tg-emoji> / <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_2}">💳</tg-emoji>`,
-  ru: `Оплата картой <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_1}">💳</tg-emoji> / <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_2}">💳</tg-emoji>`,
-  en: `Pay by card <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_1}">💳</tg-emoji> / <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_2}">💳</tg-emoji>`,
+  uz: "Karta orqali to‘lash 💳 / 💳",
+  ru: "Оплата картой 💳 / 💳",
+  en: "Pay by card 💳 / 💳",
 };
 
 export const CARD_PAY_BUTTON_HTML: Record<string, string> = {

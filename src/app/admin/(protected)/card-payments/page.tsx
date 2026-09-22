@@ -6,6 +6,19 @@ import { manualConfirmAction, manualRejectAction, linkNotificationAction } from 
 
 export const dynamic = "force-dynamic";
 
+// Railway's start command runs `prisma db push`, but the admin UI may be
+// deployed separately (for example on Vercel). Keep this additive, idempotent
+// guard here so a newly-added expiration field cannot make the whole page fail
+// before the next bot deployment updates the shared database.
+async function ensureCardPaymentSchemaForAdmin() {
+  await prisma.$executeRawUnsafe(
+    'ALTER TABLE "CardPaymentRequest" ADD COLUMN IF NOT EXISTS "expirationNotifiedAt" TIMESTAMP(3)',
+  );
+  await prisma.$executeRawUnsafe(
+    'CREATE INDEX IF NOT EXISTS "CardPaymentRequest_status_expiresAt_expirationNotifiedAt_idx" ON "CardPaymentRequest"("status", "expiresAt", "expirationNotifiedAt")',
+  );
+}
+
 const STATUS_BADGE: Record<string, string> = {
   pending: "bg-warning/10 text-warning border-warning/20",
   confirmed: "bg-success/10 text-success border-success/20",
@@ -23,6 +36,7 @@ const NOTIF_STATUS_BADGE: Record<string, string> = {
 };
 
 export default async function CardPaymentsAdminPage() {
+  await ensureCardPaymentSchemaForAdmin();
   const config = getCardPaymentConfig();
   const monitorStatus = await getHumoMonitorStatus(prisma);
 

@@ -1121,16 +1121,16 @@ describe("Card Payment Domain & Service", () => {
       expect(CARD_PREMIUM_EMOJI_1).toBe("5472296756152644790");
       expect(CARD_PREMIUM_EMOJI_2).toBe("5346328681075712891");
 
-      expect(t("uz", "btn_pay_card")).toBe(
-        `Karta orqali to‘lash <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_1}">💳</tg-emoji> / <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_2}">💳</tg-emoji>`
-      );
-      expect(t("ru", "btn_pay_card")).toBe(
-        `Оплата картой <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_1}">💳</tg-emoji> / <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_2}">💳</tg-emoji>`
-      );
-      expect(t("en", "btn_pay_card")).toBe(
-        `Pay by card <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_1}">💳</tg-emoji> / <tg-emoji emoji-id="${CARD_PREMIUM_EMOJI_2}">💳</tg-emoji>`
-      );
+      // Buttons in Telegram Bot API must be plain text (no raw <tg-emoji> tags)
+      expect(t("uz", "btn_pay_card")).toBe("Karta orqali to‘lash 💳 / 💳");
+      expect(t("ru", "btn_pay_card")).toBe("Оплата картой 💳 / 💳");
+      expect(t("en", "btn_pay_card")).toBe("Pay by card 💳 / 💳");
 
+      expect(t("uz", "btn_pay_card")).not.toContain("<tg-emoji");
+      expect(t("ru", "btn_pay_card")).not.toContain("<tg-emoji");
+      expect(t("en", "btn_pay_card")).not.toContain("<tg-emoji");
+
+      // HTML renderer provides the <tg-emoji> tags for rich message contexts
       const htmlUz = renderCardPayButtonHtml("uz");
       expect(htmlUz).toBe('Karta orqali to‘lash <tg-emoji emoji-id="5472296756152644790">💳</tg-emoji> / <tg-emoji emoji-id="5346328681075712891">💳</tg-emoji>');
     });

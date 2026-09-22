@@ -1861,7 +1861,7 @@ async function appendCardPayButtons(
     kb.text(stripLeadEmoji(t(lang, "pay_stars", { n: soumToStars(total) })), `tstar_buy:${total}:${variantId}:${qty}`).icon(STARS_BTN_EMOJI).row();
     // Card payment button (HUMO) — gated by PAYMENT_MONITOR_MODE
     if (canAccessCardPayment(userTgId)) {
-      kb.text(t(lang, "btn_pay_card"), `pay_card:${variantId}:${qty}`).row();
+      kb.text(t(lang, "btn_pay_card"), `pay_card:${variantId}:${qty}`).icon(CARD_PREMIUM_EMOJI_1).row();
     }
     const adminUser = (await setting("support_username", "Aiobuna_support")).replace(/^@/, "");
     kb.url(stripLeadEmoji(t(lang, "admin_topup")), `https://t.me/${adminUser}?text=${encodeURIComponent(`${label} — ${money(total, lang)}`)}`).icon(ADMIN_BTN_EMOJI).row();
@@ -2986,7 +2986,7 @@ async function showBankPicker(
     }
     // Card payment button (HUMO) — gated by PAYMENT_MONITOR_MODE
     if (canAccessCardPayment(user.tgId)) {
-      kb.text(t(lang, "btn_pay_card"), `pay_card:${v.id}:${qty}${suffix}`).row();
+      kb.text(t(lang, "btn_pay_card"), `pay_card:${v.id}:${qty}${suffix}`).icon(CARD_PREMIUM_EMOJI_1).row();
     }
     // Contact admin: a URL button that opens the admin's personal chat with the
     // product name pre-filled, so the customer only has to hit send.
@@ -8464,6 +8464,14 @@ bot.api.config.use(async (prev, method, payload, signal) => {
       for (const btn of row as Array<{ text?: string; callback_data?: string; style?: string; icon_custom_emoji_id?: string }>) {
         const st = styleFor(btn.callback_data);
         if (st && !btn.style) btn.style = st;
+        if (btn.callback_data && btn.callback_data.startsWith("pay_card:")) {
+          if (!btn.icon_custom_emoji_id) {
+            btn.icon_custom_emoji_id = CARD_PREMIUM_EMOJI_1;
+          }
+        }
+        if (btn.text && /<tg-emoji[^>]*>/i.test(btn.text)) {
+          btn.text = stripRichText(btn.text);
+        }
         // Premium icon on known nav buttons (back / support / invite / gifts).
         // The plain leading emoji is stripped so it isn't shown twice.
         if (btn.text && !btn.icon_custom_emoji_id) {
