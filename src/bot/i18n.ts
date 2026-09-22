@@ -222,9 +222,10 @@ const RU: Dict = {
   gw_winner_card: "🏆 <b>Поздравляем! Вы победили в розыгрыше!</b>\n\nВам доступен приз по акционной цене:\nТовар: <b>{product}</b>\nЦена: <b>{price}</b>\nСрок действия скидки: <b>до {expires}</b>",
   gw_claim_btn: "🎁 Забрать / купить приз",
   gw_not_winner: "К сожалению, в этом розыгрыше вы не попали в число победителей. Следите за новыми розыгрышами!",
-  btn_pay_card: "Оплата картой 💳 / 💳",
+  btn_pay_card: "Оплата картой",
   card_pay_unavailable: "⚠️ Оплата на карту временно недоступна. Пожалуйста, обратитесь к администратору или выберите другой способ оплаты.",
   card_pay_instructions:
+    'Оплата картой <tg-emoji emoji-id="5472296756152644790">💳</tg-emoji> / <tg-emoji emoji-id="5346328681075712891">💳</tg-emoji>\n\n' +
     "Товар: <b>{item}</b>\n" +
     "Количество: <b>{qty}</b>\n\n" +
     '<tg-emoji emoji-id="5199800546013233179">🇺🇿</tg-emoji> <b>Точная сумма к оплате: {totalAmount} сум</b>\n\n' +
@@ -463,9 +464,10 @@ const EN: Dict = {
   gw_winner_card: "🏆 <b>Congratulations! You won the giveaway!</b>\n\nYour prize is available at the special price:\nProduct: <b>{product}</b>\nPrice: <b>{price}</b>\nDiscount valid: <b>until {expires}</b>",
   gw_claim_btn: "🎁 Claim / buy prize",
   gw_not_winner: "Unfortunately, you were not among the winners this time. Stay tuned for future giveaways!",
-  btn_pay_card: "Pay by card 💳 / 💳",
+  btn_pay_card: "Pay by card",
   card_pay_unavailable: "⚠️ Card payment is temporarily unavailable. Please contact the administrator or select another payment method.",
   card_pay_instructions:
+    'Pay by card <tg-emoji emoji-id="5472296756152644790">💳</tg-emoji> / <tg-emoji emoji-id="5346328681075712891">💳</tg-emoji>\n\n' +
     "Product: <b>{item}</b>\n" +
     "Quantity: <b>{qty} pcs</b>\n\n" +
     '<tg-emoji emoji-id="5199800546013233179">🇺🇿</tg-emoji> <b>Exact amount to pay: {totalAmount} UZS</b>\n\n' +
@@ -704,9 +706,10 @@ const UZ: Dict = {
   gw_winner_card: "🏆 <b>Tabriklaymiz! Siz tanlov g‘olibi bo‘ldingiz!</b>\n\nSizga maxsus narxdagi sovg‘a berildi:\nMahsulot: <b>{product}</b>\nNarx: <b>{price}</b>\nChegirma muddati: <b>{expires} gacha</b>",
   gw_claim_btn: "🎁 Sovg‘ani olish / xarid qilish",
   gw_not_winner: "Afsuski, bu safar g‘oliblar qatoriga kirmadingiz. Yangi tanlovlarni kuzatib boring!",
-  btn_pay_card: "Karta orqali to‘lash 💳 / 💳",
+  btn_pay_card: "Karta orqali to‘lash",
   card_pay_unavailable: "⚠️ Kartaga to'lash vaqtincha mavjud emas. Iltimos, administrator bilan bog'laning yoki boshqa to'lov usulini tanlang.",
   card_pay_instructions:
+    'Karta orqali to‘lash <tg-emoji emoji-id="5472296756152644790">💳</tg-emoji> / <tg-emoji emoji-id="5346328681075712891">💳</tg-emoji>\n\n' +
     "Mahsulot: <b>{item}</b>\n" +
     "Miqdor: <b>{qty} dona</b>\n\n" +
     '<tg-emoji emoji-id="5199800546013233179">🇺🇿</tg-emoji><b>To‘lov uchun aniq summa: {totalAmount} so‘m</b>\n\n' +

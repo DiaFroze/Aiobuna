@@ -7,9 +7,9 @@ export const CARD_PREMIUM_EMOJI_1 = "5472296756152644790";
 export const CARD_PREMIUM_EMOJI_2 = "5346328681075712891";
 
 export const CARD_PAY_BUTTON_TEXT: Record<string, string> = {
-  uz: "Karta orqali to‘lash 💳 / 💳",
-  ru: "Оплата картой 💳 / 💳",
-  en: "Pay by card 💳 / 💳",
+  uz: "Karta orqali to‘lash",
+  ru: "Оплата картой",
+  en: "Pay by card",
 };
 
 export const CARD_PAY_BUTTON_HTML: Record<string, string> = {

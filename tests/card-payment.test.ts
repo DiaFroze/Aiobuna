@@ -1082,6 +1082,8 @@ describe("Card Payment Domain & Service", () => {
       expect(text).toContain("<b>50 000 so‘m yubormang</b>");
       expect(text).not.toContain("50 000 + 77");
       expect(text).not.toContain("extraAmount");
+      expect(text).toContain(CARD_PREMIUM_EMOJI_1);
+      expect(text).toContain(CARD_PREMIUM_EMOJI_2);
     });
 
     it("instruction text in ru contains exact total without formula", () => {
@@ -1122,9 +1124,9 @@ describe("Card Payment Domain & Service", () => {
       expect(CARD_PREMIUM_EMOJI_2).toBe("5346328681075712891");
 
       // Buttons in Telegram Bot API must be plain text (no raw <tg-emoji> tags)
-      expect(t("uz", "btn_pay_card")).toBe("Karta orqali to‘lash 💳 / 💳");
-      expect(t("ru", "btn_pay_card")).toBe("Оплата картой 💳 / 💳");
-      expect(t("en", "btn_pay_card")).toBe("Pay by card 💳 / 💳");
+      expect(t("uz", "btn_pay_card")).toBe("Karta orqali to‘lash");
+      expect(t("ru", "btn_pay_card")).toBe("Оплата картой");
+      expect(t("en", "btn_pay_card")).toBe("Pay by card");
 
       expect(t("uz", "btn_pay_card")).not.toContain("<tg-emoji");
       expect(t("ru", "btn_pay_card")).not.toContain("<tg-emoji");

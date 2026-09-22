@@ -74,6 +74,7 @@ import {
   CARD_PREMIUM_EMOJI_1,
   CARD_PREMIUM_EMOJI_2,
   buildCardPaymentSupportUrl,
+  renderCardPayButtonHtml,
 } from "../lib/domain/card-payment";
 import { parseHumoNotification } from "../lib/domain/humo-parser";
 import { startHumoMonitor, registerPaymentConfirmedHandler, triggerImmediateCheck, getHumoMonitorStatus } from "../lib/services/humo-monitor";
@@ -3034,11 +3035,16 @@ async function showBankPicker(
 
   kb.text(t(lang, "back"), `q:${v.id}:${qty}:0:all`);
 
+  const cardLine = canAccessCardPayment(user.tgId)
+    ? `${renderCardPayButtonHtml(lang)}\n\n`
+    : "";
+
   const text =
     `🧾 <b>${esc(label)}</b>\n\n` +
     (targetUsername ? `${t(lang, "uname_for")}: <b>@${esc(targetUsername)}</b>\n\n` : "") +
     (disc ? `🎁 Скидка за рефералов: <b>−${disc.pct}%</b> (спишется ${disc.cost} реф.)\n\n` : "") +
     `<tg-emoji emoji-id="${PAY_STAR_EMOJI}">⭐️</tg-emoji> К оплате: <b>${money(total, lang)}</b>\n\n` +
+    cardLine +
     `Выберите способ оплаты <tg-emoji emoji-id="${PAY_ARROW_EMOJI}">⬇️</tg-emoji>`;
   await ctx.answerCallbackQuery().catch(() => {});
   await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(async () => {
@@ -7307,7 +7313,10 @@ bot.on("callback_query:data", async (ctx) => {
       const recipientTgId = rest[3] || undefined;
 
       if (!canAccessCardPayment(user.tgId)) {
-        return ctx.reply(t(lang, "card_pay_unavailable"), { parse_mode: "HTML" }).catch(() => {});
+        // This callback can be delivered more than once by Telegram clients.
+        // Edit the originating menu instead of appending a new error message on
+        // every delivery.
+        return sendOrEdit(ctx, t(lang, "card_pay_unavailable"));
       }
 
       const config = getCardPaymentConfig();
@@ -7317,7 +7326,7 @@ bot.on("callback_query:data", async (ctx) => {
         const kb = new InlineKeyboard()
           .url(t(lang, "btn_contact_admin"), `https://t.me/${adminUser}`).row()
           .text(t(lang, "to_shop"), "m:0:all");
-        return ctx.reply(t(lang, "card_pay_unavailable"), { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+        return sendOrEdit(ctx, t(lang, "card_pay_unavailable"), { reply_markup: kb });
       }
 
       const monitorStatus = await getHumoMonitorStatus(db);
@@ -7325,11 +7334,11 @@ bot.on("callback_query:data", async (ctx) => {
         const kb = new InlineKeyboard()
           .url(t(lang, "btn_contact_admin"), `https://t.me/${adminUser}`).row()
           .text(t(lang, "to_shop"), "m:0:all");
-        return ctx.reply(
+        return sendOrEdit(ctx,
           `⚠️ <b>Оплата на карту временно недоступна</b>\n\n` +
           `Автоматический приём платежей на карту сейчас на техобслуживании (монитор недоступен). Вы можете обратиться к администратору для оформления заказа:`,
-          { parse_mode: "HTML", reply_markup: kb }
-        ).catch(() => {});
+          { reply_markup: kb }
+        );
       }
 
       const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
@@ -7394,7 +7403,7 @@ bot.on("callback_query:data", async (ctx) => {
       } catch (err: any) {
         console.error("[bot] card payment create error:", err.message);
         const kb = new InlineKeyboard().url(t(lang, "btn_contact_admin"), `https://t.me/${adminUser}`).row();
-        return ctx.reply(t(lang, "card_pay_unavailable"), { parse_mode: "HTML", reply_markup: kb }).catch(() => {});
+        return sendOrEdit(ctx, t(lang, "card_pay_unavailable"), { reply_markup: kb });
       }
       return;
     }
