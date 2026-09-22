@@ -7363,21 +7363,10 @@ bot.on("callback_query:data", async (ctx) => {
         });
         const formatSum = (n: number) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
         const cardDigitsOnly = config.cardDigitsOnly || config.cardNumber.replace(/\s+/g, "");
-        const supportUrl = buildCardPaymentSupportUrl({
-          adminUsername: adminUser,
-          requestId: request.id,
-          itemTitle,
-          totalAmount,
-          createdAt,
-          expiresAt,
-          status: "pending",
-          now: createdAt,
-        });
         const kb = new InlineKeyboard();
-        kb.add({ text: t(lang, "btn_copy_card"), copy_text: { text: cardDigitsOnly } }).row();
-        kb.add({ text: t(lang, "btn_copy_amount"), copy_text: { text: String(totalAmount) } }).row();
         kb.text(t(lang, "btn_check_payment"), `card_chk:${request.id}`).row();
-        kb.url(t(lang, "btn_contact_admin"), supportUrl).row();
+        kb.add({ text: t(lang, "btn_copy_amount"), copy_text: { text: String(totalAmount) } }).row();
+        kb.add({ text: t(lang, "btn_copy_card"), copy_text: { text: cardDigitsOnly } }).row();
         const msg = await ctx.reply(
           t(lang, "card_pay_instructions", {
             item: itemTitle,
