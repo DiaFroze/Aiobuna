@@ -674,6 +674,8 @@ model Variant {
   customPrices UserVariantPrice[]
   promoLinks   PromoLink[]
   giveaways    Giveaway[]
+  creatorRates CreatorProductRate[]
+  channelPromos ChannelPromoCampaign[]
 
   @@unique([supplierKey, supplierExternalId])
 }
@@ -744,6 +746,9 @@ model BotUser {
   giveawayWins     GiveawayWinner[]
   channelBoosts    ChannelBoost[]
   cardPaymentRequests CardPaymentRequest[]
+  creatorId        Int?
+  creator          Creator?         @relation("CreatorReferrals", fields: [creatorId], references: [id])
+  creatorCode      String?
 }
 
 model BotAdStart {
@@ -811,6 +816,9 @@ model BotOrder {
   attributedAd     AdLink?  @relation(fields: [attributedAdId], references: [id])
   attributedAdCode String?
   adAttributedAt   DateTime?
+  attributedCreatorId Int?
+  attributedCreator   Creator? @relation(fields: [attributedCreatorId], references: [id])
+  creatorRewardUzs    Int?     @default(0)
 
   createdAt DateTime @default(now())
 
@@ -1364,6 +1372,140 @@ model BankNotification {
   @@index([status])
   @@index([amount, cardLast4])
   @@index([operationTime])
+}
+
+// ---------------------------------------------------------------------------
+// AI-Creators & Media Team Affiliate Platform
+// ---------------------------------------------------------------------------
+
+model Creator {
+  id               Int                   @id @default(autoincrement())
+  code             String                @unique // unique slug: t.me/Aiobuna_bot?start=c_alex
+  name             String                // Name / nickname
+  tgId             String?               @unique // Telegram ID for /creator access
+  username         String?               // @username
+  phone            String?
+  cardNumber       String?               // Humo / Uzcard payout card
+  cardHolder       String?               // Card holder name
+  
+  // Balances in UZS (strict ledger accounting)
+  balanceUzs       Int                   @default(0) // Available to withdraw
+  holdBalanceUzs   Int                   @default(0) // Pending payout
+  totalEarnedUzs   Int                   @default(0) // Lifetime earnings
+  totalPaidUzs     Int                   @default(0) // Lifetime paid out
+
+  defaultRateUzs   Int                   @default(10000) // Default commission in UZS
+
+  isActive         Boolean               @default(true)
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+
+  productRates     CreatorProductRate[]
+  orderRewards     CreatorOrderReward[]
+  payouts          CreatorPayout[]
+  transactions     CreatorLedger[]
+  referredUsers    BotUser[]             @relation("CreatorReferrals")
+  attributedOrders BotOrder[]
+
+  @@index([code])
+  @@index([isActive])
+}
+
+model CreatorProductRate {
+  id        Int      @id @default(autoincrement())
+  creatorId Int
+  creator   Creator  @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  variantId Int
+  variant   Variant  @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  rewardUzs Int      // Custom reward in UZS per sold unit
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([creatorId, variantId])
+  @@index([creatorId])
+  @@index([variantId])
+}
+
+model CreatorOrderReward {
+  id            Int      @id @default(autoincrement())
+  creatorId     Int
+  creator       Creator  @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  orderId       Int      @unique // Strictly one reward per order (prevents duplicate credit)
+  buyerId       Int
+  variantId     Int?
+  amountUzs     Int      // Credited reward
+  orderTotalUzs Int      // Order amount
+  createdAt     DateTime @default(now())
+
+  @@index([creatorId, createdAt])
+}
+
+model CreatorPayout {
+  id         Int       @id @default(autoincrement())
+  creatorId  Int
+  creator    Creator   @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  amountUzs  Int       // Payout amount in UZS (min 50 000)
+  cardNumber String    // Humo / Uzcard
+  cardHolder String?
+  status     String    @default("pending") // "pending" | "paid" | "rejected"
+  adminNote  String?   // Comment / transaction receipt reference
+  reviewedBy String?   // Admin username/email
+  reviewedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([creatorId, status])
+  @@index([status, createdAt])
+}
+
+model CreatorLedger {
+  id            Int      @id @default(autoincrement())
+  creatorId     Int
+  creator       Creator  @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  type          String   // "COMMISSION", "PAYOUT_REQUEST", "PAYOUT_APPROVED", "PAYOUT_REJECTED", "ADJUSTMENT"
+  amountUzs     Int      // Delta (+ or -)
+  balanceBefore Int
+  balanceAfter  Int
+  referenceId   String?  // Order ID or Payout ID
+  note          String?
+  createdAt     DateTime @default(now())
+
+  @@index([creatorId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Telegram Channel Interactive Promos with Reactions
+// ---------------------------------------------------------------------------
+
+model ChannelPromoCampaign {
+  id               Int       @id @default(autoincrement())
+  channelId        String
+  messageId        Int
+  variantId        Int
+  variant          Variant   @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  originalPriceUzs Int
+  promoPriceUzs    Int
+  expiresAt        DateTime
+
+  // Reactions & Automation
+  state            String    @default("active") // "active" | "waiting_reactions" | "completed" | "cancelled"
+  targetEmoji      String    @default("🔥")
+  targetReactions  Int       @default(10)
+  currentReactions Int       @default(0)
+  autoLaunchNext   Boolean   @default(true)
+
+  // Next promo settings
+  nextVariantId    Int?
+  nextPriceUzs     Int?
+  nextHours        Int?      @default(2)
+  teaserTemplate   String?
+
+  triggeredAt      DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@unique([channelId, messageId])
+  @@index([state])
 }
 
 

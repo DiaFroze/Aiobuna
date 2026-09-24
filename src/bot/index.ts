@@ -78,6 +78,17 @@ import {
 } from "../lib/domain/card-payment";
 import { parseHumoNotification } from "../lib/domain/humo-parser";
 import { startHumoMonitor, registerPaymentConfirmedHandler, triggerImmediateCheck, getHumoMonitorStatus } from "../lib/services/humo-monitor";
+import {
+  parseCreatorStartPayload,
+  formatCreatorLink,
+  accrueOrderCommission,
+  requestCreatorPayout,
+  MIN_CREATOR_PAYOUT_UZS,
+} from "../lib/domain/creators";
+import {
+  handleMessageReactionCountUpdate,
+  transitionPromoToTeaser,
+} from "../lib/services/channel-reactions";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -456,6 +467,8 @@ const pending = new Map<
       targetLang: "both_uz" | "uz" | "ru";
       tempUzDesc?: string;
     }
+  | { type: "creator_card"; creatorId: number; amountUzs: number }
+  | { type: "creator_holder"; creatorId: number; amountUzs: number; cardNumber: string }
 >();
 
 // Telegram Bot API requires icon_custom_emoji_id as a JSON number,
@@ -2246,6 +2259,37 @@ async function refundRefPoints(userId: number, points: number | undefined) {
   ).catch((e) => console.error("[bot] refundRefPoints failed:", (e as Error).message));
 }
 
+async function tryAccrueCreatorCommission(orderId: number, userId: number, variantId: number, total: number, label: string) {
+  try {
+    const user = await db.botUser.findUnique({ where: { id: userId }, select: { creatorId: true, lang: true } });
+    if (!user?.creatorId) return;
+    const res = await accrueOrderCommission(db, {
+      orderId,
+      buyerId: userId,
+      variantId,
+      orderTotalUzs: total,
+      creatorId: user.creatorId,
+    });
+    if (res.success && !res.alreadyCredited) {
+      console.log(`[creators] Accrued ${res.amountUzs} UZS to creator #${user.creatorId} for order #${orderId}`);
+      const creator = await db.creator.findUnique({ where: { id: user.creatorId } });
+      if (creator?.tgId) {
+        await bot.api.sendMessage(
+          creator.tgId,
+          `💰 <b>Вам начислена комиссия!</b>\n\n` +
+          `📦 Товар: <b>${esc(label)}</b>\n` +
+          `💵 Начислено: <b>+${money(res.amountUzs, "ru")}</b>\n` +
+          `💳 Доступный баланс: <b>${money(creator.balanceUzs, "ru")}</b>\n\n` +
+          `Используйте команду /creator для просмотра статистики и вывода средств.`,
+          { parse_mode: "HTML" }
+        ).catch(() => {});
+      }
+    }
+  } catch (err) {
+    console.error(`[creators] Failed to accrue commission for order #${orderId}:`, (err as Error).message);
+  }
+}
+
 async function executePurchase(
   tgId: string,
   variantId: number,
@@ -2819,6 +2863,7 @@ async function executePurchase(
     });
 
     const promoToRecord = adminPriceMeta?.promoId ?? eff.promoLinkId;
+    await tryAccrueCreatorCommission(reserve.orderId, user.id, variantId, total, label).catch(() => {});
     if (promoToRecord) {
       await recordPromoUsage(promoToRecord, user.id, reserve.orderId, total);
     }
@@ -4236,6 +4281,7 @@ bot.use(async (ctx, next) => {
 async function deliverIntent(ctx: Context, user: any, intent: string) {
   if (intent === "gifts") return showGifts(ctx, false);
   if (intent === "boost" || intent === "booster") return showBoosterHub(ctx);
+  if (parseCreatorStartPayload(intent)) return enterShop(ctx, user);
   if (intent.startsWith("buy_")) {
     const vid = Number(intent.slice(4));
     if (vid > 0) return showQtyChooser(ctx, vid, 1, "0:all", false, true);
@@ -4278,6 +4324,24 @@ bot.command("start", async (ctx) => {
   // actually pass the subscription gate below.
   const user = await getUser(ctx, payload || undefined);
   const tgId = user.tgId;
+  const creatorCode = parseCreatorStartPayload(payload);
+  if (creatorCode) {
+    const creator = await db.creator.findUnique({
+      where: { code: creatorCode },
+      select: { id: true, code: true, isActive: true },
+    }).catch(() => null);
+
+    if (creator && creator.isActive) {
+      await db.botUser.update({
+        where: { id: user.id },
+        data: {
+          creatorId: creator.id,
+          creatorCode: creator.code,
+        },
+      }).catch((e) => console.error("[bot] failed linking user to creator:", e));
+      console.log(`[creators] Linked user @${user.username || user.tgId} to creator c_${creator.code}`);
+    }
+  }
   const candidateCode = parseAdStartPayload(payload);
   if (candidateCode) {
     const adLink = await db.adLink.findUnique({
@@ -6075,6 +6139,7 @@ bot.command("give", async (ctx) => {
     where: { id: orderId },
     data: { payload: text, ...closeDeliveryPatch(order) },
   });
+  await tryAccrueCreatorCommission(orderId, order.userId, order.variantId || 0, order.priceUzs || 0, order.titleRu).catch(() => {});
   const ulang = order.user.lang;
   // A Stars / Premium order has no credentials to hand over — the goods went
   // to a Telegram account. Showing "Ваш товар: выдано" would read as nonsense,
@@ -6514,6 +6579,18 @@ async function stopPromo(triggeredByAdmin = false, adminTgId?: string) {
 
   await db.setting.update({ where: { key: "promo_active" }, data: { valueRu: "" } }).catch(() => {});
 
+  // Edit channel post into reaction teaser instead of deleting
+  const teaserRes = await transitionPromoToTeaser(db, bot.api, p.variantId).catch((e) => {
+    console.error("[bot] transitionPromoToTeaser failed:", (e as Error).message);
+    return { handled: false };
+  });
+  if (teaserRes?.handled) {
+    const promoChan = await getPromoChannel();
+    if (promoChan) {
+      await db.promoBroadcastMessage.deleteMany({ where: { tgId: String(promoChan) } }).catch(() => {});
+    }
+  }
+
   const notifyChatId = adminTgId || ADMIN_ID;
   const reasonText = triggeredByAdmin ? "🛑 <b>Акция выключена досрочно</b>" : "⏱ <b>Время акции истекло</b>";
 
@@ -6918,6 +6995,81 @@ bot.command(["referral", "invite", "taklif"], async (ctx) => { const u = await g
 bot.command(["support", "yordam"], async (ctx) => { const u = await getUser(ctx); const { text, kb } = await supportView(u.lang); await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } }); });
 bot.command(["language", "lang", "til"], (ctx) => showLangPicker(ctx, false));
 
+async function showCreatorPortal(ctx: Context) {
+  const tgId = String(ctx.from?.id ?? "");
+  const user = await getUser(ctx);
+  const lang = user.lang;
+
+  const creator = await db.creator.findFirst({
+    where: {
+      OR: [
+        { tgId },
+        ...(user.username ? [{ username: user.username }] : []),
+      ],
+    },
+    include: {
+      productRates: {
+        include: {
+          variant: {
+            include: { plan: { include: { product: true } } },
+          },
+        },
+      },
+      _count: {
+        select: {
+          referredUsers: true,
+          orderRewards: true,
+        },
+      },
+    },
+  });
+
+  if (!creator || !creator.isActive) {
+    const supportUser = (await setting("support_username", "Aiobuna_support")).replace(/^@/, "");
+    const kb = new InlineKeyboard()
+      .url(t(lang, "btn_support"), `https://t.me/${supportUser}`)
+      .row()
+      .text(t(lang, "to_shop"), "m:0:all");
+    return ctx.reply(t(lang, "creator_not_found"), {
+      parse_mode: "HTML",
+      reply_markup: kb,
+    });
+  }
+
+  if (!creator.tgId) {
+    await db.creator.update({ where: { id: creator.id }, data: { tgId } }).catch(() => {});
+  }
+
+  const botUsername = ctx.me?.username || (await bot.api.getMe()).username;
+  const link = formatCreatorLink(botUsername, creator.code);
+
+  const text =
+    `${t(lang, "creator_title")}\n\n` +
+    `👤 <b>Партнёр:</b> ${esc(creator.name)}\n` +
+    `🔗 <b>Ваша партнёрская ссылка:</b>\n` +
+    `<code>${link}</code>\n\n` +
+    `📊 <b>Статистика:</b>\n` +
+    `• Привлечено покупателей: <b>${creator._count.referredUsers} чел.</b>\n` +
+    `• Оплаченных заказов: <b>${creator._count.orderRewards} шт.</b>\n` +
+    `• Заработано за всё время: <b>${money(creator.totalEarnedUzs, lang)}</b>\n` +
+    `• Выплачено за всё время: <b>${money(creator.totalPaidUzs, lang)}</b>\n\n` +
+    `💰 <b>Доступно к выводу:</b> <b>${money(creator.balanceUzs, lang)}</b>\n` +
+    (creator.holdBalanceUzs > 0 ? `⏳ В обработке на вывод: <b>${money(creator.holdBalanceUzs, lang)}</b>\n` : "") +
+    `\n📌 <i>Минимальная сумма вывода: 50 000 UZS. Выплаты производятся ежедневно до 23:00 на карты Humo и Uzcard.</i>`;
+
+  const kb = new InlineKeyboard();
+  if (creator.balanceUzs >= MIN_CREATOR_PAYOUT_UZS) {
+    kb.text(t(lang, "creator_btn_payout"), `cr_payout:${creator.id}`).row();
+  }
+  kb.text(t(lang, "creator_btn_rates"), `cr_rates:${creator.id}`).row();
+  kb.text(t(lang, "creator_btn_refresh"), `cr_refresh:${creator.id}`).row();
+  kb.text(t(lang, "to_shop"), "m:0:all");
+
+  return sendOrEdit(ctx, text, { reply_markup: kb });
+}
+
+bot.command(["creator", "kreator", "media", "affiliate", "partner"], showCreatorPortal);
+
 // Promo-code how-to video: how to get one and where to enter it in the bot.
 async function showInstructions(ctx: Context) {
   const user = await getUser(ctx);
@@ -7109,6 +7261,59 @@ bot.on("callback_query:data", async (ctx) => {
   console.log(`[bot] callback from ${ctx.from?.id}: "${data}"`);
   try {
     if (data === "noop") return ctx.answerCallbackQuery();
+    if (data.startsWith("cr_refresh:")) {
+      await ctx.answerCallbackQuery().catch(() => {});
+      return showCreatorPortal(ctx);
+    }
+    if (data.startsWith("cr_rates:")) {
+      const creatorId = Number(data.slice(9));
+      const user = await getUser(ctx);
+      const lang = user.lang;
+      const creator = await db.creator.findUnique({
+        where: { id: creatorId },
+        include: {
+          productRates: {
+            include: {
+              variant: {
+                include: { plan: { include: { product: true } } },
+              },
+            },
+          },
+        },
+      });
+      if (!creator) return ctx.answerCallbackQuery({ text: "Не найдено", show_alert: true });
+      await ctx.answerCallbackQuery().catch(() => {});
+      const list = creator.productRates.length > 0
+        ? creator.productRates.map((r: any) =>
+            `• ${esc(r.variant.plan.product.titleRu)} — ${esc(r.variant.titleRu)}: <b>${money(r.rewardUzs, lang)}</b>`
+          ).join("\n")
+        : "<i>Индивидуальных ставок нет — на все товары действует базовая ставка.</i>";
+      const text = t(lang, "creator_rates_title", {
+        defaultRate: money(creator.defaultRateUzs, lang),
+        list,
+      });
+      const kb = new InlineKeyboard().text(t(lang, "prev"), `cr_refresh:${creator.id}`);
+      return sendOrEdit(ctx, text, { reply_markup: kb });
+    }
+    if (data.startsWith("cr_payout:")) {
+      const creatorId = Number(data.slice(10));
+      const user = await getUser(ctx);
+      const lang = user.lang;
+      const creator = await db.creator.findUnique({ where: { id: creatorId } });
+      if (!creator) return ctx.answerCallbackQuery({ text: "Не найдено", show_alert: true });
+      if (creator.balanceUzs < MIN_CREATOR_PAYOUT_UZS) {
+        return ctx.answerCallbackQuery({ text: t(lang, "creator_payout_low_balance"), show_alert: true });
+      }
+      await ctx.answerCallbackQuery().catch(() => {});
+      pending.set(String(ctx.from?.id), {
+        type: "creator_card",
+        creatorId: creator.id,
+        amountUzs: creator.balanceUzs,
+      });
+      const text = t(lang, "creator_payout_enter_card", { balance: money(creator.balanceUzs, lang) });
+      const kb = new InlineKeyboard().text(t(lang, "prev"), `cr_refresh:${creator.id}`);
+      return sendOrEdit(ctx, text, { reply_markup: kb });
+    }
     // Bank poll vote — one changeable vote per user, keyed by tgId. Handled
     // before getUser()/gates so anyone who received the poll can answer.
     if (data.startsWith("vote:")) {
@@ -8146,6 +8351,59 @@ bot.on("message:text", async (ctx) => {
     return redeemPromo(ctx, user, ctx.message.text);
   }
 
+  if (state.type === "creator_card") {
+    const cleanCard = (ctx.message.text || "").replace(/\D/g, "");
+    if (cleanCard.length < 16) {
+      pending.set(key, state);
+      return ctx.reply(t(lang, "creator_payout_invalid_card"));
+    }
+    pending.set(key, {
+      type: "creator_holder",
+      creatorId: state.creatorId,
+      amountUzs: state.amountUzs,
+      cardNumber: cleanCard,
+    });
+    return ctx.reply(t(lang, "creator_payout_enter_holder"));
+  }
+
+  if (state.type === "creator_holder") {
+    const holder = (ctx.message.text || "").trim();
+    pending.delete(key);
+    const res = await requestCreatorPayout(db, {
+      creatorId: state.creatorId,
+      amountUzs: state.amountUzs,
+      cardNumber: state.cardNumber,
+      cardHolder: holder,
+    });
+    if (!res.success) {
+      return ctx.reply(`❌ Ошибка оформления заявки на вывод: ${res.error}`);
+    }
+    const formattedCard = state.cardNumber.replace(/(\d{4})/g, "$1 ").trim();
+    await ctx.reply(
+      t(lang, "creator_payout_submitted", {
+        id: String(res.payoutId),
+        amount: money(state.amountUzs, lang),
+        card: formattedCard,
+        holder,
+      }),
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text(t(lang, "to_shop"), "m:0:all"),
+      }
+    );
+    if (ADMIN_ID) {
+      await bot.api.sendMessage(
+        ADMIN_ID,
+        `💳 <b>Новая заявка на вывод от креатора!</b>\n\n` +
+        `Сумма: <b>${money(state.amountUzs, "ru")}</b>\n` +
+        `Карта: <code>${formattedCard}</code> (${holder})\n\n` +
+        `Подтвердите выплату в админ-панели: /admin/creators`,
+        { parse_mode: "HTML" }
+      ).catch(() => {});
+    }
+    return;
+  }
+
   const n = Math.floor(Number(ctx.message.text.replace(/[^\d]/g, "")));
   if (state.type === "qty") {
     if (!Number.isFinite(n) || n < 1) return ctx.reply(t(lang, "enter_number"));
@@ -9017,6 +9275,113 @@ async function ensureSchema() {
     `CREATE INDEX IF NOT EXISTS "BankNotification_status_idx" ON "BankNotification"("status")`,
     `CREATE INDEX IF NOT EXISTS "BankNotification_amount_cardLast4_idx" ON "BankNotification"("amount", "cardLast4")`,
     `CREATE INDEX IF NOT EXISTS "BankNotification_operationTime_idx" ON "BankNotification"("operationTime")`,
+    `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "creatorId" INTEGER`,
+    `ALTER TABLE "BotUser" ADD COLUMN IF NOT EXISTS "creatorCode" TEXT`,
+    `CREATE INDEX IF NOT EXISTS "BotUser_creatorId_idx" ON "BotUser"("creatorId")`,
+    `ALTER TABLE "BotOrder" ADD COLUMN IF NOT EXISTS "attributedCreatorId" INTEGER`,
+    `ALTER TABLE "BotOrder" ADD COLUMN IF NOT EXISTS "creatorRewardUzs" INTEGER DEFAULT 0`,
+    `CREATE INDEX IF NOT EXISTS "BotOrder_attributedCreatorId_idx" ON "BotOrder"("attributedCreatorId")`,
+    `CREATE TABLE IF NOT EXISTS "Creator" (
+      "id" SERIAL NOT NULL,
+      "code" TEXT NOT NULL,
+      "name" TEXT NOT NULL,
+      "tgId" TEXT,
+      "username" TEXT,
+      "phone" TEXT,
+      "cardNumber" TEXT,
+      "cardHolder" TEXT,
+      "balanceUzs" INTEGER NOT NULL DEFAULT 0,
+      "holdBalanceUzs" INTEGER NOT NULL DEFAULT 0,
+      "totalEarnedUzs" INTEGER NOT NULL DEFAULT 0,
+      "totalPaidUzs" INTEGER NOT NULL DEFAULT 0,
+      "defaultRateUzs" INTEGER NOT NULL DEFAULT 10000,
+      "isActive" BOOLEAN NOT NULL DEFAULT true,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "Creator_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "Creator_code_key" ON "Creator"("code")`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "Creator_tgId_key" ON "Creator"("tgId")`,
+    `CREATE INDEX IF NOT EXISTS "Creator_code_idx" ON "Creator"("code")`,
+    `CREATE INDEX IF NOT EXISTS "Creator_isActive_idx" ON "Creator"("isActive")`,
+    `CREATE TABLE IF NOT EXISTS "CreatorProductRate" (
+      "id" SERIAL NOT NULL,
+      "creatorId" INTEGER NOT NULL,
+      "variantId" INTEGER NOT NULL,
+      "rewardUzs" INTEGER NOT NULL,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "CreatorProductRate_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "CreatorProductRate_creatorId_variantId_key" ON "CreatorProductRate"("creatorId", "variantId")`,
+    `CREATE INDEX IF NOT EXISTS "CreatorProductRate_creatorId_idx" ON "CreatorProductRate"("creatorId")`,
+    `CREATE INDEX IF NOT EXISTS "CreatorProductRate_variantId_idx" ON "CreatorProductRate"("variantId")`,
+    `CREATE TABLE IF NOT EXISTS "CreatorOrderReward" (
+      "id" SERIAL NOT NULL,
+      "creatorId" INTEGER NOT NULL,
+      "orderId" INTEGER NOT NULL,
+      "buyerId" INTEGER NOT NULL,
+      "variantId" INTEGER,
+      "amountUzs" INTEGER NOT NULL,
+      "orderTotalUzs" INTEGER NOT NULL,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "CreatorOrderReward_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "CreatorOrderReward_orderId_key" ON "CreatorOrderReward"("orderId")`,
+    `CREATE INDEX IF NOT EXISTS "CreatorOrderReward_creatorId_createdAt_idx" ON "CreatorOrderReward"("creatorId", "createdAt")`,
+    `CREATE TABLE IF NOT EXISTS "CreatorPayout" (
+      "id" SERIAL NOT NULL,
+      "creatorId" INTEGER NOT NULL,
+      "amountUzs" INTEGER NOT NULL,
+      "cardNumber" TEXT NOT NULL,
+      "cardHolder" TEXT,
+      "status" TEXT NOT NULL DEFAULT 'pending',
+      "adminNote" TEXT,
+      "reviewedBy" TEXT,
+      "reviewedAt" TIMESTAMP(3),
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "CreatorPayout_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE INDEX IF NOT EXISTS "CreatorPayout_creatorId_status_idx" ON "CreatorPayout"("creatorId", "status")`,
+    `CREATE INDEX IF NOT EXISTS "CreatorPayout_status_createdAt_idx" ON "CreatorPayout"("status", "createdAt")`,
+    `CREATE TABLE IF NOT EXISTS "CreatorLedger" (
+      "id" SERIAL NOT NULL,
+      "creatorId" INTEGER NOT NULL,
+      "type" TEXT NOT NULL,
+      "amountUzs" INTEGER NOT NULL,
+      "balanceBefore" INTEGER NOT NULL,
+      "balanceAfter" INTEGER NOT NULL,
+      "referenceId" TEXT,
+      "note" TEXT,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "CreatorLedger_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE INDEX IF NOT EXISTS "CreatorLedger_creatorId_createdAt_idx" ON "CreatorLedger"("creatorId", "createdAt")`,
+    `CREATE TABLE IF NOT EXISTS "ChannelPromoCampaign" (
+      "id" SERIAL NOT NULL,
+      "channelId" TEXT NOT NULL,
+      "messageId" INTEGER NOT NULL,
+      "variantId" INTEGER NOT NULL,
+      "originalPriceUzs" INTEGER NOT NULL,
+      "promoPriceUzs" INTEGER NOT NULL,
+      "expiresAt" TIMESTAMP(3) NOT NULL,
+      "state" TEXT NOT NULL DEFAULT 'active',
+      "targetEmoji" TEXT NOT NULL DEFAULT '🔥',
+      "targetReactions" INTEGER NOT NULL DEFAULT 10,
+      "currentReactions" INTEGER NOT NULL DEFAULT 0,
+      "autoLaunchNext" BOOLEAN NOT NULL DEFAULT true,
+      "nextVariantId" INTEGER,
+      "nextPriceUzs" INTEGER,
+      "nextHours" INTEGER DEFAULT 2,
+      "teaserTemplate" TEXT,
+      "triggeredAt" TIMESTAMP(3),
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "ChannelPromoCampaign_pkey" PRIMARY KEY ("id")
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS "ChannelPromoCampaign_channelId_messageId_key" ON "ChannelPromoCampaign"("channelId", "messageId")`,
+    `CREATE INDEX IF NOT EXISTS "ChannelPromoCampaign_state_idx" ON "ChannelPromoCampaign"("state")`,
   ];
   for (const sql of statements) {
     try {
@@ -9354,6 +9719,33 @@ async function repairUnmatchedBankNotifications() {
   }
 }
 
+bot.on("message_reaction_count", async (ctx) => {
+  try {
+    const u = ctx.messageReactionCount;
+    if (!u) return;
+    const botUser = ctx.me?.username || (await bot.api.getMe()).username;
+    const res = await handleMessageReactionCountUpdate(
+      db,
+      bot.api,
+      {
+        chat: { id: u.chat.id },
+        message_id: u.message_id,
+        reactions: (u.reactions || []) as any,
+      },
+      botUser
+    );
+    if (res.launched && ADMIN_ID) {
+      await bot.api.sendMessage(
+        ADMIN_ID,
+        `🚀 <b>Акция в канале автоматически запущена по реакциям!</b>\n\nПодписчики набрали ${res.count} реакций! Следующая акция активирована в магазине и пост обновлен.`,
+        { parse_mode: "HTML" }
+      ).catch(() => {});
+    }
+  } catch (e: any) {
+    console.error("[bot] message_reaction_count handler error:", e.message || e);
+  }
+});
+
 async function bootstrap() {
   await ensureSchema();             // create missing tables before serving anything
   await ensureCourseCatalog(Boolean(await configuredCourseChannel())).catch((e) => {
@@ -9409,6 +9801,7 @@ async function bootstrap() {
     allowed_updates: [
       "message", "callback_query", "chat_member", "chat_join_request",
       "pre_checkout_query", "chat_boost", "removed_chat_boost",
+      "message_reaction_count", "message_reaction",
     ],
     onStart: async (me: UserFromGetMe) => {
       buttonEmoji = await setting("button_emoji", "");
@@ -9428,6 +9821,7 @@ async function bootstrap() {
         { command: "orders", description: "🧾 Заказы" },
         { command: "profile", description: "👤 Профиль" },
         { command: "referral", description: "🤝 Пригласить" },
+        { command: "creator", description: "🎬 Кабинет креатора" },
         { command: "support", description: "🆘 Поддержка" },
         { command: "language", description: "🌐 Язык / Language / Til" },
       ]).catch(() => {});

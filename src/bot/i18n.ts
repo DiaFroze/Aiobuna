@@ -247,6 +247,20 @@ const RU: Dict = {
   card_pay_expired:
     "⏱ <b>Время оплаты истекло</b>\n\nСрок действия платёжной заявки (5 минут) завершён.\n\nЕсли вы уже перевели деньги или возникла ошибка, пожалуйста, свяжитесь с администратором.",
   card_pay_confirmed: "✅ <b>Оплата на карту успешно подтверждена!</b>\n\nФормируем ваш заказ...",
+  creator_title: "🎬 <b>Кабинет креатора / Медиа</b>",
+  creator_not_found:
+    "ℹ️ <b>Вы ещё не зарегистрированы как креатор или медиа-партнёр.</b>\n\nЕсли вы ведёте канал, блог или соцсети и хотите зарабатывать на рекомендациях сервиса AI OBUNA — напишите нашей поддержке!",
+  creator_btn_payout: "💳 Запросить вывод средств",
+  creator_btn_rates: "📋 Мои ставки на товары",
+  creator_btn_refresh: "🔄 Обновить",
+  creator_rates_title: "📋 <b>Ваши ставки на товары:</b>\n\nБазовая ставка: <b>{defaultRate}</b>\n\n{list}",
+  creator_payout_enter_card:
+    "💳 <b>Запрос на вывод средств</b>\n\nДоступно к выводу: <b>{balance}</b>\nМинимум для вывода: <b>50 000 UZS</b>\n\nВведите 16 цифр вашей карты Humo или Uzcard:",
+  creator_payout_enter_holder: "👤 Введите имя и фамилию владельца карты (как на карте):",
+  creator_payout_submitted:
+    "✅ <b>Заявка на вывод #{id} принята!</b>\n\nСумма: <b>{amount}</b>\nКарта: <code>{card}</code> ({holder})\n\n⏳ <b>Регламент выплат:</b> средства будут переведены на вашу карту сегодня <b>до 23:00</b>.",
+  creator_payout_low_balance: "❌ Минимальная сумма вывода — 50 000 UZS. Ваш баланс пока меньше минимальной суммы.",
+  creator_payout_invalid_card: "❌ Некорректный номер карты. Введите ровно 16 цифр Humo или Uzcard.",
 };
 
 const EN: Dict = {
@@ -489,6 +503,20 @@ const EN: Dict = {
   card_pay_expired:
     "⏱ <b>Payment deadline expired</b>\n\nThe 5-minute payment window has ended.\n\nIf you have already transferred money or encountered an error, please contact the administrator.",
   card_pay_confirmed: "✅ <b>Card payment successfully confirmed!</b>\n\nFulfilling your order...",
+  creator_title: "🎬 <b>Creator / Media Portal</b>",
+  creator_not_found:
+    "ℹ️ <b>You are not registered as a creator or media partner yet.</b>\n\nIf you run a channel, blog, or social media and want to earn by promoting AI OBUNA, please contact our support team!",
+  creator_btn_payout: "💳 Request Payout",
+  creator_btn_rates: "📋 My Product Rates",
+  creator_btn_refresh: "🔄 Refresh",
+  creator_rates_title: "📋 <b>Your Product Rates:</b>\n\nDefault rate: <b>{defaultRate}</b>\n\n{list}",
+  creator_payout_enter_card:
+    "💳 <b>Payout Request</b>\n\nAvailable to withdraw: <b>{balance}</b>\nMinimum payout: <b>50 000 UZS</b>\n\nEnter the 16 digits of your Humo or Uzcard card:",
+  creator_payout_enter_holder: "👤 Enter the cardholder's full name:",
+  creator_payout_submitted:
+    "✅ <b>Payout request #{id} accepted!</b>\n\nAmount: <b>{amount}</b>\nCard: <code>{card}</code> ({holder})\n\n⏳ <b>Payout schedule:</b> funds will be sent to your card today <b>before 23:00</b>.",
+  creator_payout_low_balance: "❌ Minimum payout is 50 000 UZS. Your balance is currently below the minimum.",
+  creator_payout_invalid_card: "❌ Invalid card number. Please enter 16 digits of your Humo or Uzcard.",
 };
 
 const UZ: Dict = {
@@ -731,6 +759,20 @@ const UZ: Dict = {
   card_pay_expired:
     "⏱ <b>To'lov vaqti tugadi</b>\n\nTo'lov arizasining 5 daqiqalik muddati yakunlandi.\n\nAgar siz pul o'tkazgan bo'lsangiz yoki xatolik yuz bersa, iltimos administrator bilan bog'laning.",
   card_pay_confirmed: "✅ <b>Kartaga to'lov muvaffaqiyatli tasdiqlandi!</b>\n\nBuyurtmangiz tayyorlanmoqda...",
+  creator_title: "🎬 <b>Kreator / Media kabineti</b>",
+  creator_not_found:
+    "ℹ️ <b>Siz hali kreator yoki media hamkor sifatida ro‘yxatdan o‘tmagansiz.</b>\n\nAgar siz kanal, blog yoki ijtimoiy tarmoq yuritsangiz va AI OBUNA bilan daromad olishni istasangiz — qo‘llab-quvvatlash xizmatiga yozing!",
+  creator_btn_payout: "💳 Pul yechib olishni so‘rash",
+  creator_btn_rates: "📋 Mahsulotlar bo‘yicha stavkalar",
+  creator_btn_refresh: "🔄 Yangilash",
+  creator_rates_title: "📋 <b>Mahsulotlar bo‘yicha stavkalaringiz:</b>\n\nAsosiy stavka: <b>{defaultRate}</b>\n\n{list}",
+  creator_payout_enter_card:
+    "💳 <b>Pul yechib olish so‘rovi</b>\n\nYechib olish uchun mavjud: <b>{balance}</b>\nMinimal: <b>50 000 UZS</b>\n\nHumo yoki Uzcard kartangizning 16 ta raqamini kiriting:",
+  creator_payout_enter_holder: "👤 Karta egasining to‘liq ism-familiyasini kiriting:",
+  creator_payout_submitted:
+    "✅ <b>#{id} raqamli pul yechish so‘rovi qabul qilindi!</b>\n\nSumma: <b>{amount}</b>\nKarta: <code>{card}</code> ({holder})\n\n⏳ <b>To‘lov qoidasi:</b> mablag‘ bugun <b>soat 23:00 gacha</b> kartangizga o‘tkaziladi.",
+  creator_payout_low_balance: "❌ Minimal yechib olish summasi — 50 000 UZS. Balansingiz hozircha minimal miqdordan kam.",
+  creator_payout_invalid_card: "❌ Karta raqami noto‘g‘ri. Humo yoki Uzcard kartangizning 16 ta raqamini kiriting.",
 };
 
 const DICTS: Record<Lang, Dict> = { ru: RU, en: EN, uz: UZ };
