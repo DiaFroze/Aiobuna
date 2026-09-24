@@ -8,6 +8,7 @@ import {
   approvePayoutAction,
   rejectPayoutAction,
 } from "./actions";
+import { extractCreatorSlug } from "@/lib/domain/creators";
 
 export function CopyButton({
   text,
@@ -46,6 +47,13 @@ export function CreatorModal({
 }) {
   const [isPending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
+  const [codeVal, setCodeVal] = useState(creator?.code || "");
+
+  const handleCodeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const raw = e.target.value;
+    const clean = extractCreatorSlug(raw);
+    setCodeVal(clean || raw);
+  };
 
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -53,12 +61,14 @@ export function CreatorModal({
     const formData = new FormData(e.currentTarget);
     startTransition(async () => {
       try {
-        if (creator) {
-          await updateCreatorAction(formData);
+        const res = creator
+          ? await updateCreatorAction(formData)
+          : await createCreatorAction(formData);
+        if (res && !res.success) {
+          setError(res.error || "Ошибка сохранения");
         } else {
-          await createCreatorAction(formData);
+          onClose();
         }
-        onClose();
       } catch (err: any) {
         setError(err.message || "Ошибка сохранения");
       }
@@ -107,13 +117,19 @@ export function CreatorModal({
             <input
               name="code"
               required
-              defaultValue={creator?.code || ""}
-              placeholder="alex, media2026, star"
+              value={codeVal}
+              onChange={handleCodeChange}
+              placeholder="alex, media2026, meta_campaign"
               className="w-full input text-sm font-mono"
             />
-            <span className="text-xs text-muted mt-0.5 block">
-              Только латиница, цифры и дефис/подчеркивание (от 2 до 32 символов)
-            </span>
+            <div className="flex items-center justify-between text-xs text-muted mt-1 gap-2 flex-wrap">
+              <span>Латиница, цифры, дефис, подчеркивание (можно вставить ссылку)</span>
+              {codeVal && (
+                <span className="text-brand font-medium">
+                  Ссылка: t.me/...start=c_{codeVal}
+                </span>
+              )}
+            </div>
           </div>
 
           <div>
@@ -255,8 +271,12 @@ export function RateMatrixModal({
 
     startTransition(async () => {
       try {
-        await saveCreatorProductRatesAction(formData);
-        onClose();
+        const res = await saveCreatorProductRatesAction(formData);
+        if (res && !res.success) {
+          setError(res.error || "Ошибка сохранения ставок");
+        } else {
+          onClose();
+        }
       } catch (err: any) {
         setError(err.message || "Ошибка сохранения ставок");
       }
@@ -372,8 +392,12 @@ export function PayoutApproveModal({
 
     startTransition(async () => {
       try {
-        await approvePayoutAction(formData);
-        onClose();
+        const res = await approvePayoutAction(formData);
+        if (res && !res.success) {
+          setError(res.error || "Ошибка подтверждения");
+        } else {
+          onClose();
+        }
       } catch (err: any) {
         setError(err.message || "Ошибка подтверждения");
       }
@@ -449,8 +473,12 @@ export function PayoutRejectModal({
 
     startTransition(async () => {
       try {
-        await rejectPayoutAction(formData);
-        onClose();
+        const res = await rejectPayoutAction(formData);
+        if (res && !res.success) {
+          setError(res.error || "Ошибка отклонения");
+        } else {
+          onClose();
+        }
       } catch (err: any) {
         setError(err.message || "Ошибка отклонения");
       }

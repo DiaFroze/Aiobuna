@@ -20,22 +20,75 @@ export interface CreatorCodeValidation {
 }
 
 /**
- * Validates and normalizes a creator code slug.
- * Allowed: alphanumeric characters, underscores, dashes (2 to 32 chars).
+ * Extracts and cleans a creator slug from a raw string or full URL.
+ * Handles:
+ * - "https://aiobuna.vercel.app/go/meta_dcntjqbicwm_2026092" -> "meta_dcntjqbicwm_2026092"
+ * - "https://t.me/Aiobuna_bot?start=c_alex" -> "alex"
+ * - "t.me/Aiobuna_bot?start=c_alex" -> "alex"
+ * - "c_alex" -> "alex"
+ * - "alex" -> "alex"
  */
-export function validateCreatorCode(rawCode: string): CreatorCodeValidation {
-  const trimmed = (rawCode ?? "").trim().toLowerCase();
-  if (!trimmed) {
-    return { valid: false, code: "", reason: "empty" };
+export function extractCreatorSlug(rawInput: string): string {
+  let str = (rawInput ?? "").trim();
+  if (!str) return "";
+
+  // If input contains URL patterns (http://, https://, t.me/, /go/, etc.)
+  if (str.includes("://") || str.includes("t.me/") || str.includes("/go/")) {
+    try {
+      const parsed = new URL(str.startsWith("http") ? str : `https://${str}`);
+      const startParam = parsed.searchParams.get("start");
+      if (startParam) {
+        str = startParam;
+      } else {
+        const segments = parsed.pathname.split("/").filter(Boolean);
+        if (segments.length > 0) {
+          str = segments[segments.length - 1];
+        }
+      }
+    } catch {
+      const parts = str.split("/").filter(Boolean);
+      str = parts[parts.length - 1] || str;
+    }
   }
 
-  // Strip leading c_ if someone entered it
-  const code = trimmed.startsWith("c_") ? trimmed.slice(2) : trimmed;
+  // Strip query/hash if still present
+  str = str.split("?")[0].split("#")[0];
+
+  // Strip prefixes: c_ or creator_
+  str = str.replace(/^(?:c_|creator_)/i, "");
+
+  return str.trim().toLowerCase();
+}
+
+export function getCreatorCodeValidationErrorRu(reason?: string): string {
+  switch (reason) {
+    case "empty":
+      return "Укажите код или ссылку для креатора";
+    case "too_short":
+      return "Код ссылки слишком короткий (минимум 2 символа)";
+    case "too_long":
+      return "Код ссылки слишком длинный (максимум 64 символа)";
+    case "invalid_chars":
+      return "Код ссылки может содержать только латинские буквы, цифры, дефис и знак подчеркивания";
+    default:
+      return "Некорректный код ссылки";
+  }
+}
+
+/**
+ * Validates and normalizes a creator code slug.
+ * Allowed: alphanumeric characters, underscores, dashes (2 to 64 chars).
+ */
+export function validateCreatorCode(rawCode: string): CreatorCodeValidation {
+  const code = extractCreatorSlug(rawCode);
+  if (!code) {
+    return { valid: false, code: "", reason: "empty" };
+  }
 
   if (code.length < 2) {
     return { valid: false, code, reason: "too_short" };
   }
-  if (code.length > 32) {
+  if (code.length > 64) {
     return { valid: false, code, reason: "too_long" };
   }
   if (!/^[a-z0-9_-]+$/.test(code)) {

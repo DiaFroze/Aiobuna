@@ -12,17 +12,25 @@ import {
 } from "../src/lib/domain/creators";
 
 describe("Creator Domain - Code & Payload Validation", () => {
-  it("validates allowed creator slugs", () => {
+  it("validates allowed creator slugs and extracts from full URLs", () => {
     expect(validateCreatorCode("alex")).toEqual({ valid: true, code: "alex" });
     expect(validateCreatorCode("c_alex")).toEqual({ valid: true, code: "alex" });
     expect(validateCreatorCode("MEDIA_STAR_1")).toEqual({ valid: true, code: "media_star_1" });
     expect(validateCreatorCode("top-blogger")).toEqual({ valid: true, code: "top-blogger" });
+    expect(validateCreatorCode("https://aiobuna.vercel.app/go/meta_dcntjqbicwm_2026092")).toEqual({
+      valid: true,
+      code: "meta_dcntjqbicwm_2026092",
+    });
+    expect(validateCreatorCode("https://t.me/Aiobuna_bot?start=c_alex")).toEqual({
+      valid: true,
+      code: "alex",
+    });
   });
 
   it("rejects invalid creator codes", () => {
     expect(validateCreatorCode("").valid).toBe(false);
     expect(validateCreatorCode("a").valid).toBe(false); // too short
-    expect(validateCreatorCode("a".repeat(35)).valid).toBe(false); // too long
+    expect(validateCreatorCode("a".repeat(70)).valid).toBe(false); // too long
     expect(validateCreatorCode("hello world!").valid).toBe(false); // invalid chars
     expect(validateCreatorCode("user@name").valid).toBe(false);
   });
