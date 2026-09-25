@@ -345,11 +345,16 @@ export async function startHumoMonitor(db: any): Promise<void> {
   const rawApiHash = getEnvTolerant("TELEGRAM_API_HASH", ["Appapi_hash", "appapi_hash", "telegram_api_hash", "API_HASH"]);
   const rawSession = getEnvTolerant("TELEGRAM_SESSION", ["telegram_session", "SESSION", "HUMO_SESSION", "STRING_SESSION"]);
   const rawChatId = config.humoChatId;
+  const supportConfig = supportUserConfig();
+  const personalSupportConfigured =
+    (supportConfig.mode === "allowlist" || supportConfig.mode === "dry_run") &&
+    supportConfig.targetIds.size > 0 &&
+    Boolean(supportConfig.ownerUsername);
 
-  if (!rawApiId || !rawApiHash || !rawSession || !rawChatId) {
+  if (!rawApiId || !rawApiHash || !rawSession || (!rawChatId && !personalSupportConfigured)) {
     state.isConfigured = false;
     state.isRunning = false;
-    state.lastError = "Missing MTProto configuration (TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION, or HUMO_CHAT_ID)";
+    state.lastError = "Missing MTProto configuration (TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION, or HUMO_CHAT_ID / support allowlist)";
     console.log("[humo-monitor] MTProto credentials not fully configured; monitor is offline.");
     await persistMonitorState(db, state);
     return;
@@ -379,7 +384,11 @@ export async function startHumoMonitor(db: any): Promise<void> {
     state.lastError = null;
     await persistMonitorState(db, state);
 
-    console.log(`[humo-monitor] GramJS MTProto client connected and authorized. Listening to chat ${maskChatId(rawChatId)}`);
+    console.log(
+      `[humo-monitor] GramJS MTProto client connected and authorized. Listening to chat ${
+        rawChatId ? maskChatId(rawChatId) : "disabled"
+      }; personal support ${personalSupportConfigured ? supportConfig.mode : "disabled"}`,
+    );
 
     // Preload dialogs so GramJS entity cache has channel access hashes
     await client.getDialogs({ limit: 100 }).catch((e) => {
@@ -387,14 +396,16 @@ export async function startHumoMonitor(db: any): Promise<void> {
     });
 
     let resolvedChatNumericId: string | null = null;
-    try {
-      const entity = await client.getEntity(rawChatId);
-      if (entity && (entity as any).id) {
-        resolvedChatNumericId = String((entity as any).id);
-        console.log(`[humo-monitor] Resolved target chat ${rawChatId} to numeric id: ${resolvedChatNumericId}`);
+    if (rawChatId) {
+      try {
+        const entity = await client.getEntity(rawChatId);
+        if (entity && (entity as any).id) {
+          resolvedChatNumericId = String((entity as any).id);
+          console.log(`[humo-monitor] Resolved target chat ${rawChatId} to numeric id: ${resolvedChatNumericId}`);
+        }
+      } catch (e: any) {
+        console.warn(`[humo-monitor] getEntity for ${rawChatId} note:`, e?.message || e);
       }
-    } catch (e: any) {
-      console.warn(`[humo-monitor] getEntity for ${rawChatId} note:`, e?.message || e);
     }
 
     // Event listener for incoming bank notification messages
