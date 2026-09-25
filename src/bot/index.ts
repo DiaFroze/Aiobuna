@@ -951,13 +951,18 @@ async function handleSupportAccountMessage(message: { senderId: string; text: st
   );
   if (!personalSupportAiEnabled() || !message.isPrivate || !targetIds.has(message.senderId)) return;
 
+  console.info("[telegram-support] target=" + message.senderId + " result=drafting");
   const storedUser = await db.botUser.findUnique({ where: { tgId: message.senderId } }).catch(() => null);
   const user = storedUser ?? { id: -1, lang: "uz", firstName: null };
-  const answer = await draftSupportAiReply(message.text, user, "personal:" + message.senderId, true);
+  const answer = await Promise.race([
+    draftSupportAiReply(message.text, user, "personal:" + message.senderId, true),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000)),
+  ]);
   if (!answer) {
-    console.info("[telegram-support] target=" + message.senderId + " result=ai_unavailable");
+    console.info("[telegram-support] target=" + message.senderId + " result=ai_unavailable_or_timeout");
     return;
   }
+  console.info("[telegram-support] target=" + message.senderId + " result=ai_ready");
   const result = await sendSupportAccountMessage(message.senderId, answer);
   console.info("[telegram-support] target=" + message.senderId + " result=" + result);
 }
