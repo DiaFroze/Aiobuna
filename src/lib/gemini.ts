@@ -367,9 +367,7 @@ export async function geminiSupportReply(
   history: SupportAiMessage[],
   context: SupportAiContext,
 ): Promise<string | null> {
-  const key = process.env.GEMINI_API_KEY ?? "";
-  const model = process.env.GEMINI_MODEL ?? "gemini-3.8-flash";
-  if (!key || !message.trim()) return null;
+  if (!message.trim()) return null;
 
   // Keep simple greetings warm and language-appropriate instead of spending an
   // API call on a generic support-script response.
@@ -379,6 +377,10 @@ export async function geminiSupportReply(
     if (context.language === "en") return "Hi! What can I help you with?";
     return "Здравствуйте! Что подсказать?";
   }
+
+  const key = process.env.GEMINI_API_KEY ?? "";
+  const model = process.env.GEMINI_MODEL ?? "gemini-3.8-flash";
+  if (!key) return null;
 
   const langName = context.language === "uz" ? "узбекском" : context.language === "en" ? "английском" : "русском";
   const safeHistory = history
