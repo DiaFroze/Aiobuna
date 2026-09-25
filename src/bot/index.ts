@@ -887,6 +887,7 @@ async function supportAiContextFor(user: { id: number; lang: string; firstName?:
         plan: { isActive: true, product: { isActive: true } },
       },
       select: {
+        id: true,
         titleRu: true,
         titleUz: true,
         durationDays: true,
@@ -928,6 +929,7 @@ async function supportAiContextFor(user: { id: number; lang: string; firstName?:
     paymentCardHolder: "Zokirov Abdulloh",
     botUsername,
     catalog: variants.map((v) => ({
+      id: v.id,
       product: lang === "uz" ? v.plan.product.titleUz : lang === "en" ? v.plan.product.titleRu : v.plan.product.titleRu,
       plan: lang === "uz" ? v.plan.titleUz : lang === "en" ? v.plan.titleRu : v.plan.titleRu,
       durationDays: v.durationDays,
@@ -2850,12 +2852,24 @@ async function executePurchase(
         take: stockQty,
       });
       if (items.length > 0) {
-        payloads.push(items.map((it) => it.payload).join("\n"));
-        stockDeliveredQty = items.length;
-        await db.stockItem.updateMany({
-          where: { id: { in: items.map((it) => it.id) } },
+        const itemIds = items.map((it) => it.id);
+        const claimResult = await db.stockItem.updateMany({
+          where: { id: { in: itemIds }, isSold: false },
           data: { isSold: true, soldAt: new Date(), orderId: reserve.orderId },
         });
+        if (claimResult.count === items.length) {
+          payloads.push(items.map((it) => it.payload).join("\n"));
+          stockDeliveredQty = items.length;
+        } else {
+          // If concurrent orders raced, only deliver items successfully claimed by THIS order
+          const claimedByThisOrder = await db.stockItem.findMany({
+            where: { orderId: reserve.orderId },
+          });
+          if (claimedByThisOrder.length > 0) {
+            payloads.push(claimedByThisOrder.map((it) => it.payload).join("\n"));
+            stockDeliveredQty = claimedByThisOrder.length;
+          }
+        }
       }
     }
 
@@ -4550,12 +4564,118 @@ bot.use(async (ctx, next) => {
   if (sent?.message_id) subsGateMsg.set(tgId, sent.message_id);
 });
 
+async function initiateCardPayment(
+  ctx: Context,
+  user: any,
+  variantId: number,
+  qty = 1,
+  targetUsername?: string,
+  recipientTgId?: string,
+) {
+  const lang = (user.lang || "ru") as Lang;
+  if (!canAccessCardPayment(user.tgId)) {
+    return sendOrEdit(ctx, t(lang, "card_pay_unavailable"));
+  }
+
+  const config = getCardPaymentConfig();
+  const adminUser = config.adminUsername || (await setting("support_username", "Aiobuna_support")).replace(/^@/, "");
+
+  if (config.mode === "disabled" || !config.cardNumber || !config.cardLast4) {
+    const kb = new InlineKeyboard()
+      .url(t(lang, "btn_contact_admin"), `https://t.me/${adminUser}`).row()
+      .text(t(lang, "to_shop"), "m:0:all");
+    return sendOrEdit(ctx, t(lang, "card_pay_unavailable"), { reply_markup: kb });
+  }
+
+  const monitorStatus = await getHumoMonitorStatus(db);
+  if (!monitorStatus.isRunning) {
+    const kb = new InlineKeyboard()
+      .url(t(lang, "btn_contact_admin"), `https://t.me/${adminUser}`).row()
+      .text(t(lang, "to_shop"), "m:0:all");
+    return sendOrEdit(
+      ctx,
+      `⚠️ <b>Оплата на карту временно недоступна</b>\n\n` +
+      `Автоматический приём платежей на карту сейчас на техобслуживании (монитор недоступен). Вы можете обратиться к администратору для оформления заказа:`,
+      { reply_markup: kb }
+    );
+  }
+
+  const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
+  if (!v) return;
+  const pt = await pick3(v.plan.product.titleRu, v.plan.product.titleEn, v.plan.product.titleUz, lang);
+  const vt = await locName(v.titleRu, v.titleUz, lang);
+  const itemTitle = `${pt} — ${vt}`;
+  const eff = await effPriceFor(user.id, variantId, v.priceUzs);
+  const baseAmount = bulkTotal(eff.price, qty, parseBulkPrices(v.bulkPrices || ""));
+  try {
+    const { extraAmount, totalAmount } = await generateUniqueAmount(baseAmount, config.cardLast4, db);
+    const createdAt = new Date();
+    const expiresAt = calculatePaymentExpiry(createdAt, config.ttlSeconds);
+    const request = await db.cardPaymentRequest.create({
+      data: {
+        userId: user.id,
+        variantId,
+        qty,
+        baseAmount,
+        extraAmount,
+        totalAmount,
+        cardLast4: config.cardLast4,
+        cardNumber: config.cardNumber,
+        status: "pending",
+        createdAt,
+        expiresAt,
+        chatId: user.tgId,
+        targetUsername: targetUsername ?? null,
+        recipientTgId: recipientTgId ?? null,
+      },
+    });
+    const formatSum = (n: number) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+    const cardDigitsOnly = config.cardDigitsOnly || config.cardNumber.replace(/\s+/g, "");
+    const supportUrl = buildCardPaymentSupportUrl({
+      adminUsername: adminUser,
+      requestId: request.id,
+      itemTitle,
+      totalAmount,
+      createdAt,
+      expiresAt,
+      status: "pending",
+      now: createdAt,
+    });
+    const kb = new InlineKeyboard();
+    kb.text(t(lang, "btn_check_payment"), `card_chk:${request.id}`).row();
+    kb.add({ text: t(lang, "btn_copy_amount"), copy_text: { text: String(totalAmount) } }).row();
+    kb.add({ text: t(lang, "btn_copy_card"), copy_text: { text: cardDigitsOnly } }).row();
+    kb.url(t(lang, "btn_contact_admin"), supportUrl).row();
+    const msg = await ctx.reply(
+      t(lang, "card_pay_instructions", {
+        item: itemTitle,
+        qty: String(qty),
+        cardNumber: config.cardNumber,
+        totalAmount: formatSum(totalAmount),
+        baseAmount: formatSum(baseAmount),
+        extraAmount: formatSum(extraAmount),
+      }),
+      { parse_mode: "HTML", reply_markup: kb }
+    );
+    await db.cardPaymentRequest.update({ where: { id: request.id }, data: { messageId: msg.message_id } }).catch(() => {});
+  } catch (err: any) {
+    console.error("[bot] card payment create error:", err.message);
+    const kb = new InlineKeyboard().url(t(lang, "btn_contact_admin"), `https://t.me/${adminUser}`).row();
+    return sendOrEdit(ctx, t(lang, "card_pay_unavailable"), { reply_markup: kb });
+  }
+}
+
 // ---------- deliver intent helper ----------
 // Delivers a user's target destination from a deep link, promo deal link, or saved callback intent.
 async function deliverIntent(ctx: Context, user: any, intent: string) {
   if (intent === "gifts") return showGifts(ctx, false);
   if (intent === "boost" || intent === "booster") return showBoosterHub(ctx);
   if (parseCreatorStartPayload(intent)) return enterShop(ctx, user);
+  if (intent.startsWith("pay_") || intent.startsWith("card_")) {
+    const rawId = intent.replace(/^(pay_|card_)/, "");
+    const vid = Number(rawId);
+    if (vid > 0) return initiateCardPayment(ctx, user, vid, 1);
+  }
   if (intent.startsWith("buy_")) {
     const vid = Number(intent.slice(4));
     if (vid > 0) return showQtyChooser(ctx, vid, 1, "0:all", false, true);
@@ -7790,101 +7910,7 @@ bot.on("callback_query:data", async (ctx) => {
       const qty = Number(rest[1]) || 1;
       const targetUsername = rest[2] || undefined;
       const recipientTgId = rest[3] || undefined;
-
-      if (!canAccessCardPayment(user.tgId)) {
-        // This callback can be delivered more than once by Telegram clients.
-        // Edit the originating menu instead of appending a new error message on
-        // every delivery.
-        return sendOrEdit(ctx, t(lang, "card_pay_unavailable"));
-      }
-
-      const config = getCardPaymentConfig();
-      const adminUser = config.adminUsername || (await setting("support_username", "Aiobuna_support")).replace(/^@/, "");
-
-      if (config.mode === "disabled" || !config.cardNumber || !config.cardLast4) {
-        const kb = new InlineKeyboard()
-          .url(t(lang, "btn_contact_admin"), `https://t.me/${adminUser}`).row()
-          .text(t(lang, "to_shop"), "m:0:all");
-        return sendOrEdit(ctx, t(lang, "card_pay_unavailable"), { reply_markup: kb });
-      }
-
-      const monitorStatus = await getHumoMonitorStatus(db);
-      if (!monitorStatus.isRunning) {
-        const kb = new InlineKeyboard()
-          .url(t(lang, "btn_contact_admin"), `https://t.me/${adminUser}`).row()
-          .text(t(lang, "to_shop"), "m:0:all");
-        return sendOrEdit(ctx,
-          `⚠️ <b>Оплата на карту временно недоступна</b>\n\n` +
-          `Автоматический приём платежей на карту сейчас на техобслуживании (монитор недоступен). Вы можете обратиться к администратору для оформления заказа:`,
-          { reply_markup: kb }
-        );
-      }
-
-      const v = await db.variant.findUnique({ where: { id: variantId }, include: { plan: { include: { product: true } } } });
-      if (!v) return;
-      const pt = await pick3(v.plan.product.titleRu, v.plan.product.titleEn, v.plan.product.titleUz, lang);
-      const vt = await locName(v.titleRu, v.titleUz, lang);
-      const itemTitle = `${pt} — ${vt}`;
-      const eff = await effPriceFor(user.id, variantId, v.priceUzs);
-      const baseAmount = bulkTotal(eff.price, qty, parseBulkPrices(v.bulkPrices || ""));
-      try {
-        const { extraAmount, totalAmount } = await generateUniqueAmount(baseAmount, config.cardLast4, db);
-        const createdAt = new Date();
-        const expiresAt = calculatePaymentExpiry(createdAt, config.ttlSeconds);
-        const request = await db.cardPaymentRequest.create({
-          data: {
-            userId: user.id,
-            variantId,
-            qty,
-            baseAmount,
-            extraAmount,
-            totalAmount,
-            cardLast4: config.cardLast4,
-            cardNumber: config.cardNumber,
-            status: "pending",
-            createdAt,
-            expiresAt,
-            chatId: user.tgId,
-            targetUsername: targetUsername ?? null,
-            recipientTgId: recipientTgId ?? null,
-          },
-        });
-        const formatSum = (n: number) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
-        const cardDigitsOnly = config.cardDigitsOnly || config.cardNumber.replace(/\s+/g, "");
-        const supportUrl = buildCardPaymentSupportUrl({
-          adminUsername: adminUser,
-          requestId: request.id,
-          itemTitle,
-          totalAmount,
-          createdAt,
-          expiresAt,
-          status: "pending",
-          now: createdAt,
-        });
-        const kb = new InlineKeyboard();
-        kb.text(t(lang, "btn_check_payment"), `card_chk:${request.id}`).row();
-        kb.add({ text: t(lang, "btn_copy_amount"), copy_text: { text: String(totalAmount) } }).row();
-        kb.add({ text: t(lang, "btn_copy_card"), copy_text: { text: cardDigitsOnly } }).row();
-        kb.url(t(lang, "btn_contact_admin"), supportUrl).row();
-        const msg = await ctx.reply(
-          t(lang, "card_pay_instructions", {
-            item: itemTitle,
-            qty: String(qty),
-            cardNumber: config.cardNumber,
-            totalAmount: formatSum(totalAmount),
-            baseAmount: formatSum(baseAmount),
-            extraAmount: formatSum(extraAmount),
-          }),
-          { parse_mode: "HTML", reply_markup: kb }
-        );
-        // Save messageId for later deletion
-        await db.cardPaymentRequest.update({ where: { id: request.id }, data: { messageId: msg.message_id } }).catch(() => {});
-      } catch (err: any) {
-        console.error("[bot] card payment create error:", err.message);
-        const kb = new InlineKeyboard().url(t(lang, "btn_contact_admin"), `https://t.me/${adminUser}`).row();
-        return sendOrEdit(ctx, t(lang, "card_pay_unavailable"), { reply_markup: kb });
-      }
-      return;
+      return initiateCardPayment(ctx, user, variantId, qty, targetUsername, recipientTgId);
     }
     if (tag === "card_chk") {
       const requestId = Number(rest[0]);

@@ -386,7 +386,7 @@ export async function geminiSupportReply(
     .slice(0, 80)
     .map(
       (item) =>
-        `${item.product} | ${item.plan} | ${item.durationDays} kun/дн | ${item.priceUzs.toLocaleString("ru-RU")} UZS`,
+        `${item.id ? `[ID:${item.id}] ` : ""}${item.product} | ${item.plan} | ${item.durationDays} kun/дн | ${item.priceUzs.toLocaleString("ru-RU")} UZS${item.id ? ` | Havola/Ссылка: https://t.me/${botUser}?start=buy_${item.id}` : ""}`,
     )
     .join("\n");
   const orders = context.recentOrders
@@ -421,6 +421,8 @@ export async function geminiSupportReply(
       `    ${cardNum}`,
       `    ${cardHolder}`,
       `    После оплаты отправьте чек сюда в чат — я проверю и сразу подключу. Также можете купить автоматически в нашем боте @${botUser} (Click, Payme, Stars).`,
+      "- Быстрая автоматическая покупка через бота:",
+      `  • Если клиент хочет оформить быстро или в любое время, можешь предложить ссылку на бота: «Или оформите в боте за 1 минуту: https://t.me/${botUser}?start=buy_ID — бот сгенерирует точную сумму к оплате, а после перевода автоматически пришлёт официальную ссылку на подписку».`,
       "- Если клиент прислал чек или пишет о проблеме с оплатой:",
       "  • Отвечай: «Пришлите чек сюда в чат — я проверю платёж и помогу подключить».",
       "- Вопросы сотрудничества и опта (партнёрство, опт):",
@@ -470,6 +472,8 @@ export async function geminiSupportReply(
       `    ${cardNum}`,
       `    ${cardHolder}`,
       `    After payment, please send the receipt right here in this chat — I will verify and activate it for you right away. You can also purchase automatically via our bot @${botUser} (Click, Payme, Stars).`,
+      "- Fast automated purchase in bot:",
+      `  • If customer wants fast self-service: 'Or purchase instantly via our bot: https://t.me/${botUser}?start=buy_ID — it will generate the exact payment amount, and the official activation link is sent automatically upon payment.'`,
       "- If customer sends receipt or payment issue:",
       "  • Reply: 'Please send your receipt right here in this chat — I will check and activate it for you.'",
       "- Partnership and wholesale inquiries:",
@@ -519,6 +523,8 @@ export async function geminiSupportReply(
       `    ${cardNum}`,
       `    ${cardHolder}`,
       `    To'lov qilgach, chekni shu yerga yuborsangiz, tekshirib darhol ulab beraman. Shuningdek, @${botUser} botimiz orqali ham avtomatik (Click/Payme) xarid qilishingiz mumkin.`,
+      "- Tezkor avtomatik xarid (bot orqali):",
+      `  • Mijoz istalgan paytda bot orqali avtomatik olishi mumkin: «Yoki botimiz orqali 1 daqiqada avtomatik xarid qiling: https://t.me/${botUser}?start=buy_ID — bot to'lov summasini chiqaradi va to'lovdan so'ng rasmiy Google havolasi avtomatik beriladi».`,
       "- Agar mijoz to'lov chekini yuborsa yoki to'lov bo'yicha muammo aytsa:",
       "  • 'Chekni shu yerga yuboring, tekshirib darhol ulab beraman' deb javob ber.",
       "- Hamkorlik va ulgurji savdo (sheriklik, optom):",

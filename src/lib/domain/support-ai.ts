@@ -6,6 +6,7 @@
 export type Lang = "ru" | "uz" | "en";
 
 export interface SupportAiCatalogItem {
+  id?: number;
   product: string;
   plan: string;
   durationDays: number;
