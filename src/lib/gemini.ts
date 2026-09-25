@@ -433,7 +433,13 @@ export async function geminiSupportReply(
       }),
     });
     const json = (await res.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
-    if (!res.ok) return null;
+    if (!res.ok) {
+      const apiError = (json as any)?.error?.message;
+      console.error(
+        "geminiSupportReply HTTP " + res.status + ": " + String(apiError || "request rejected").slice(0, 240),
+      );
+      return null;
+    }
     const answer = json.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "";
     if (!answer) return null;
     return answer.slice(0, 1400).trim() || null;

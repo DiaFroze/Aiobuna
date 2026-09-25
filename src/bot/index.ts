@@ -954,7 +954,10 @@ async function handleSupportAccountMessage(message: { senderId: string; text: st
   const storedUser = await db.botUser.findUnique({ where: { tgId: message.senderId } }).catch(() => null);
   const user = storedUser ?? { id: -1, lang: "uz", firstName: null };
   const answer = await draftSupportAiReply(message.text, user, "personal:" + message.senderId, true);
-  if (!answer) return;
+  if (!answer) {
+    console.info("[telegram-support] target=" + message.senderId + " result=ai_unavailable");
+    return;
+  }
   const result = await sendSupportAccountMessage(message.senderId, answer);
   console.info("[telegram-support] target=" + message.senderId + " result=" + result);
 }
