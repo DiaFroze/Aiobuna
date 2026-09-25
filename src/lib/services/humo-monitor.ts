@@ -401,13 +401,20 @@ export async function startHumoMonitor(db: any): Promise<void> {
 
       if (supportIncomingHandler && message.message) {
         const senderId = messageSenderId(message);
+        const isPrivate = Boolean(message.isPrivate || message.peerId?.userId);
         if (senderId) {
+          const supportConfig = supportUserConfig();
+          if (isPrivate) {
+            console.info(
+              `[telegram-support] incoming sender=${senderId} private=true targetMatch=${supportConfig.targetIds.has(senderId)}`,
+            );
+          }
           await supportIncomingHandler({
             senderId,
             messageId: Number(message.id) || 0,
             text: String(message.message),
             date: new Date(message.date * 1000),
-            isPrivate: Boolean(message.isPrivate || message.peerId?.userId),
+            isPrivate,
           }).catch((error) => {
             console.error("[telegram-support] incoming handler failed:", (error as Error).message);
           });
