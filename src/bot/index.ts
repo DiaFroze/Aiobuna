@@ -13,7 +13,7 @@ import { db } from "./db";
 import { adSource, parseAdStartPayload } from "../lib/domain/ad-attribution";
 import { sourceOrder, envVexSource, envBuyerSource, envQamifySource, sourceBalance, type Source } from "../lib/supplier";
 import { sortSuppliersByStrategy, type SupplierCandidate, type RoutingStrategy } from "../lib/domain/supplier-routing";
-import { geminiTranslate } from "../lib/gemini";
+import { geminiTranslate, geminiSupportReply, type SupportAiMessage } from "../lib/gemini";
 import { t, LANGS, LANG_NAMES, normalizeLang, btnVariants, type Lang } from "./i18n";
 import { generateVerificationCode } from "../lib/orderCode";
 import { parseBulkPrices, parseBulkBonus, bulkTotal, bonusQty, bulkSaving, describeBulk } from "../lib/domain/bulk-pricing";
@@ -77,7 +77,14 @@ import {
   renderCardPayButtonHtml,
 } from "../lib/domain/card-payment";
 import { parseHumoNotification } from "../lib/domain/humo-parser";
-import { startHumoMonitor, registerPaymentConfirmedHandler, triggerImmediateCheck, getHumoMonitorStatus } from "../lib/services/humo-monitor";
+import {
+  startHumoMonitor,
+  registerPaymentConfirmedHandler,
+  registerSupportIncomingHandler,
+  sendSupportAccountMessage,
+  triggerImmediateCheck,
+  getHumoMonitorStatus,
+} from "../lib/services/humo-monitor";
 import {
   parseCreatorStartPayload,
   formatCreatorLink,
@@ -471,6 +478,9 @@ const pending = new Map<
   | { type: "creator_holder"; creatorId: number; amountUzs: number; cardNumber: string }
 >();
 
+const supportAiHistory = new Map<string, SupportAiMessage[]>();
+const SUPPORT_AI_MAX_HISTORY = 8;
+
 // Telegram Bot API requires icon_custom_emoji_id as a JSON number,
 // but these are 19-digit IDs that exceed JS Number precision.
 // We patch the raw fetch body to convert "icon_custom_emoji_id":"123" → "icon_custom_emoji_id":123
@@ -802,6 +812,151 @@ function langKeyboard() {
 async function setting(key: string, fallback: string): Promise<string> {
   const s = await db.setting.findUnique({ where: { key } });
   return s?.valueRu?.trim() || fallback;
+}
+
+function supportAiEnabled(): boolean {
+  return ["1", "true", "yes", "on"].includes((process.env.AI_SUPPORT_ENABLED ?? "").trim().toLowerCase());
+}
+
+function personalSupportAiEnabled(): boolean {
+  return ["1", "true", "yes", "on"].includes((process.env.TELEGRAM_SUPPORT_AI_ENABLED ?? "").trim().toLowerCase());
+}
+
+function supportAiDate(value: Date): string {
+  return value.toISOString().slice(0, 16).replace("T", " ");
+}
+
+async function supportAiContextFor(user: { id: number; lang: string; firstName?: string | null }) {
+  const lang = normalizeLang(user.lang);
+  const [variants, orders, payments, supportUsername] = await Promise.all([
+    db.variant.findMany({
+      where: {
+        isActive: true,
+        plan: { isActive: true, product: { isActive: true } },
+      },
+      select: {
+        titleRu: true,
+        titleUz: true,
+        durationDays: true,
+        priceUzs: true,
+        plan: {
+          select: {
+            titleRu: true,
+            titleUz: true,
+            product: { select: { titleRu: true, titleUz: true } },
+          },
+        },
+      },
+      orderBy: [{ plan: { product: { sortOrder: "asc" } } }, { sortOrder: "asc" }],
+      take: 80,
+    }).catch(() => []),
+    db.botOrder.findMany({
+      where: { userId: user.id },
+      select: { titleRu: true, status: true, priceUzs: true, createdAt: true },
+      orderBy: { createdAt: "desc" },
+      take: 3,
+    }).catch(() => []),
+    db.topUp.findMany({
+      where: { userId: user.id },
+      select: { amount: true, method: true, status: true, createdAt: true },
+      orderBy: { createdAt: "desc" },
+      take: 3,
+    }).catch(() => []),
+    setting("support_username", "Aiobuna_support"),
+  ]);
+
+  return {
+    language: lang,
+    customerName: user.firstName,
+    supportUsername: supportUsername.replace(/^@/, ""),
+    catalog: variants.map((v) => ({
+      product: lang === "uz" ? v.plan.product.titleUz : lang === "en" ? v.plan.product.titleRu : v.plan.product.titleRu,
+      plan: lang === "uz" ? v.plan.titleUz : lang === "en" ? v.plan.titleRu : v.plan.titleRu,
+      durationDays: v.durationDays,
+      priceUzs: v.priceUzs,
+    })),
+    recentOrders: orders.map((o) => ({
+      title: o.titleRu,
+      status: o.status,
+      priceUzs: o.priceUzs ?? 0,
+      createdAt: supportAiDate(o.createdAt),
+    })),
+    recentPayments: payments.map((p) => ({
+      amount: p.amount,
+      method: p.method,
+      status: p.status,
+      createdAt: supportAiDate(p.createdAt),
+    })),
+  };
+}
+
+async function draftSupportAiReply(
+  text: string,
+  user: { id: number; lang: string; firstName?: string | null },
+  historyKey: string,
+  enabled = supportAiEnabled(),
+) {
+  if (!enabled || !process.env.GEMINI_API_KEY || !text.trim()) return null;
+  const cleanText = text.trim();
+  const history = supportAiHistory.get(historyKey) ?? [];
+  const nextHistory: SupportAiMessage[] = [...history, { role: "user" as const, text: cleanText }].slice(-SUPPORT_AI_MAX_HISTORY);
+  const context = await supportAiContextFor(user);
+  const answer = await geminiSupportReply(cleanText, history, context);
+  if (answer) {
+    supportAiHistory.set(historyKey, [...nextHistory, { role: "assistant" as const, text: answer }].slice(-SUPPORT_AI_MAX_HISTORY));
+  }
+  return answer;
+}
+
+async function answerWithSupportAi(ctx: Context, user: Awaited<ReturnType<typeof getUser>>): Promise<boolean> {
+  if (!supportAiEnabled() || !process.env.GEMINI_API_KEY || !ctx.message || !("text" in ctx.message)) return false;
+  const text = typeof ctx.message.text === "string" ? ctx.message.text.trim() : "";
+  if (!text || text.startsWith("/")) return false;
+  if (await isAdminAsync(ctx)) return false;
+
+  const key = String(ctx.from?.id ?? "");
+  const answer = await draftSupportAiReply(text, user, key);
+  const context = await supportAiContextFor(user);
+  if (!answer) {
+    let fallback: string;
+    if (context.supportUsername) {
+      fallback =
+        user.lang === "uz"
+          ? "Hozir javobni tekshirishda muammo bo'ldi. Iltimos, administratorga @" + context.supportUsername + " yozing."
+          : user.lang === "en"
+          ? "I could not prepare a reliable answer right now. Please contact the administrator @" + context.supportUsername + "."
+          : "Сейчас не получилось подготовить надёжный ответ. Напишите, пожалуйста, администратору @" + context.supportUsername + ".";
+    } else {
+      fallback =
+        user.lang === "uz"
+          ? "Hozir javobni tekshirishda muammo bo'ldi. Iltimos, administratorga yozing."
+          : user.lang === "en"
+          ? "I could not prepare a reliable answer right now. Please contact the administrator."
+          : "Сейчас не получилось подготовить надёжный ответ. Напишите, пожалуйста, администратору.";
+    }
+    await ctx.reply(fallback).catch(() => {});
+    return true;
+  }
+
+  await ctx.reply(answer).catch(() => {});
+  return true;
+}
+
+async function handleSupportAccountMessage(message: { senderId: string; text: string; isPrivate?: boolean }) {
+  const targetIds = new Set(
+    (process.env.TELEGRAM_SUPPORT_TARGET_ID ?? "")
+      .split(/[,;\s]+/)
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
+  if (!personalSupportAiEnabled() || !message.isPrivate || !targetIds.has(message.senderId)) return;
+
+  const storedUser = await db.botUser.findUnique({ where: { tgId: message.senderId } }).catch(() => null);
+  const user = storedUser ?? { id: -1, lang: "uz", firstName: null };
+  const answer = await draftSupportAiReply(message.text, user, "personal:" + message.senderId, true);
+  if (!answer) return;
+  const result = await sendSupportAccountMessage(message.senderId, answer);
+  console.info("[telegram-support] target=" + message.senderId + " result=" + result);
 }
 
 async function refreshAdminIdsCache(): Promise<Set<string>> {
@@ -8112,7 +8267,11 @@ async function handleProductDescInput(
 bot.on("message:text", async (ctx) => {
   const key = String(ctx.from?.id);
   const state = pending.get(key);
-  if (!state) return;
+  if (!state) {
+    const user = await getUser(ctx);
+    await answerWithSupportAi(ctx, user);
+    return;
+  }
 
   if (state.type === "set_product_desc") {
     const consumed = await handleProductDescInput(ctx, ctx.message.text ?? "", ctx.message.entities);
@@ -9793,6 +9952,7 @@ async function bootstrap() {
       console.error("[humo] confirmed handler error:", (e as Error).message);
     }
   });
+  registerSupportIncomingHandler(handleSupportAccountMessage);
   startHumoMonitor(db).catch((e) => {
     console.error("[humo] monitor start failed:", (e as Error).message);
   });

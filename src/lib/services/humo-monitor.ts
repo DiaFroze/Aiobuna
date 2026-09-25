@@ -34,6 +34,75 @@ const state: MonitorState = {
 let client: TelegramClient | null = null;
 let dbClientInstance: any = null;
 
+export interface SupportIncomingMessage {
+  senderId: string;
+  messageId: number;
+  text: string;
+  date: Date;
+  isPrivate: boolean;
+}
+
+export type SupportIncomingHandler = (message: SupportIncomingMessage) => Promise<void>;
+
+let supportIncomingHandler: SupportIncomingHandler | null = null;
+let supportOwnerVerified: boolean | null = null;
+
+export function registerSupportIncomingHandler(handler: SupportIncomingHandler | null) {
+  supportIncomingHandler = handler;
+}
+
+function supportUserConfig() {
+  const mode = (getEnvTolerant("TELEGRAM_SUPPORT_MODE", ["telegram_support_mode"]) || "off").toLowerCase();
+  const targetIds = new Set(
+    (getEnvTolerant("TELEGRAM_SUPPORT_TARGET_ID", ["telegram_support_target_id"]) || "")
+      .split(/[,;\s]+/)
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
+  const ownerUsername = getEnvTolerant("TELEGRAM_SUPPORT_OWNER_USERNAME", ["telegram_support_owner_username"])
+    .replace(/^@/, "")
+    .trim()
+    .toLowerCase();
+  return { mode, targetIds, ownerUsername };
+}
+
+function messageSenderId(message: any): string {
+  const raw = message?.senderId?.value ?? message?.senderId ?? message?.peerId?.userId?.value ?? message?.peerId?.userId;
+  return raw === undefined || raw === null ? "" : String(raw).trim();
+}
+
+async function isSupportOwnerAccount(): Promise<boolean> {
+  const config = supportUserConfig();
+  if (!config.ownerUsername || !client) return false;
+  if (supportOwnerVerified !== null) return supportOwnerVerified;
+  try {
+    const me: any = await client.getMe();
+    supportOwnerVerified = String(me?.username ?? "").replace(/^@/, "").toLowerCase() === config.ownerUsername;
+  } catch {
+    supportOwnerVerified = false;
+  }
+  return supportOwnerVerified;
+}
+
+export async function sendSupportAccountMessage(targetId: string, text: string): Promise<"sent" | "dry_run" | "disabled" | "rejected"> {
+  const config = supportUserConfig();
+  if (!config.targetIds.has(String(targetId)) || !text.trim()) return "rejected";
+  if (config.mode === "dry_run") {
+    console.log("[telegram-support] dry-run reply skipped for " + targetId);
+    return "dry_run";
+  }
+  if (config.mode !== "allowlist" || !client || !state.isRunning || !(await isSupportOwnerAccount())) {
+    return "disabled";
+  }
+  try {
+    await client.sendMessage(String(targetId), { message: text.slice(0, 4096) });
+    return "sent";
+  } catch (error) {
+    console.error("[telegram-support] send failed:", (error as Error).message);
+    return "disabled";
+  }
+}
+
 export type PaymentConfirmedHandler = (request: {
   id: number;
   userId: number;
@@ -332,6 +401,21 @@ export async function startHumoMonitor(db: any): Promise<void> {
     client.addEventHandler(async (event: any) => {
       const message = event.message;
       if (!message || message.out) return;
+
+      if (supportIncomingHandler && message.message) {
+        const senderId = messageSenderId(message);
+        if (senderId) {
+          await supportIncomingHandler({
+            senderId,
+            messageId: Number(message.id) || 0,
+            text: String(message.message),
+            date: new Date(message.date * 1000),
+            isPrivate: Boolean(message.isPrivate || message.peerId?.userId),
+          }).catch((error) => {
+            console.error("[telegram-support] incoming handler failed:", (error as Error).message);
+          });
+        }
+      }
 
       const isTarget = isMatchingChatId(message.chatId, message.peerId, rawChatId, resolvedChatNumericId, message.senderId);
       if (!isTarget) {
