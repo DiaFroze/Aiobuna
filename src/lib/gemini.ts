@@ -442,7 +442,10 @@ export async function geminiSupportReply(
     }
     const answer = json.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "";
     if (!answer) return null;
-    return answer.slice(0, 1400).trim() || null;
+    const cleaned = answer
+      .replace(/^(?:клиент|помощник|assistant|customer)\s*:\s*/i, "")
+      .trim();
+    return cleaned.slice(0, 1400).trim() || null;
   } catch (error) {
     console.error("geminiSupportReply failed:", (error as Error).message);
     return null;
