@@ -205,23 +205,9 @@ async function persistMonitorState(db: any, s: MonitorState) {
       }).catch(() => {});
     }
 
-    // Save into Setting (used by Next.js web process)
-    if (db.setting) {
-      try {
-        await db.setting.upsert({
-          where: { key: "humo_monitor_status" },
-          create: { key: "humo_monitor_status", value: dataObj as any },
-          update: { value: dataObj as any },
-        });
-      } catch {
-        // In bot process db.setting is proxied to BotSetting which expects valueRu
-        await db.setting.upsert({
-          where: { key: "humo_monitor_status" },
-          create: { key: "humo_monitor_status", valueRu: valRu },
-          update: { valueRu: valRu },
-        }).catch(() => {});
-      }
-    }
+    // BotSetting is the shared status store. In the bot process `db.setting`
+    // is a compatibility proxy to BotSetting, so writing both models causes
+    // Prisma to reject the web-only `value` field.
   } catch {
     // Non-critical, ignore
   }
