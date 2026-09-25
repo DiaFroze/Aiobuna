@@ -14,6 +14,15 @@ import { adSource, parseAdStartPayload } from "../lib/domain/ad-attribution";
 import { sourceOrder, envVexSource, envBuyerSource, envQamifySource, sourceBalance, type Source } from "../lib/supplier";
 import { sortSuppliersByStrategy, type SupplierCandidate, type RoutingStrategy } from "../lib/domain/supplier-routing";
 import { geminiTranslate, geminiSupportReply, redactSupportText, type SupportAiMessage, type SupportAiContext } from "../lib/gemini";
+import {
+  detectMessageLanguage,
+  quickGreetingReply,
+  isEscalationQuery,
+  directEscalationReply,
+  fallbackSupportReply,
+  unclearQueryReply,
+  isUnclearQuery,
+} from "../lib/domain/support-ai";
 import { t, LANGS, LANG_NAMES, normalizeLang, btnVariants, type Lang } from "./i18n";
 import { generateVerificationCode } from "../lib/orderCode";
 import { parseBulkPrices, parseBulkBonus, bulkTotal, bonusQty, bulkSaving, describeBulk } from "../lib/domain/bulk-pricing";
@@ -483,26 +492,15 @@ const SUPPORT_AI_MAX_HISTORY = 8;
 const supportAiContextCache = new Map<string, { expiresAt: number; context: SupportAiContext }>();
 
 function supportLanguageForMessage(text: string, fallback: string): Lang {
-  const value = text.trim().toLowerCase();
-  if (/(^|\s)(salom|assalomu|alaykum|kerak|edi|qanday|qancha|olish|sotib)(\s|$)/i.test(value)) return "uz";
-  if (/(^|\s)(hello|hi|please|how|buy|need|price|subscription)(\s|$)/i.test(value)) return "en";
-  if (/[а-яё]/i.test(value) || /(^|\s)(привет|салом|здравствуйте|сколько|купить|оплата|подписка)(\s|$)/i.test(value)) return "ru";
-  return normalizeLang(fallback);
+  return detectMessageLanguage(text, normalizeLang(fallback));
 }
 
 function quickSupportGreeting(text: string, lang: Lang): string | null {
-  const value = text.trim().toLowerCase().replace(/[!?.,]+$/g, "");
-  if (!/^(salom|assalomu\s+alaykum|ассалому\s+алайкум|привет|здравствуйте|hello|hi)$/.test(value)) return null;
-  if (lang === "uz") return "Assalomu alaykum! Nima yordam kerak?";
-  if (lang === "en") return "Hi! What can I help you with?";
-  return "Здравствуйте! Что подсказать?";
+  return quickGreetingReply(text, lang);
 }
 
 function supportNeedsAdmin(text: string, answer: string | null): boolean {
-  const value = text.toLowerCase();
-  if (/(сотруднич|партнёр|партнер|оптов|коллаб|collab|partnership|hamkorlik|sheriklik)/i.test(value)) return true;
-  if (/(возврат|спорн|не приш|не получил|плат[её]ж|refund|payment|to.?lov|qaytar)/i.test(value)) return true;
-  return Boolean(answer && /(не уверен|не знаю|не понял|уточн|не могу помочь|not sure|i cannot|bilmayman|tushunmadim)/i.test(answer));
+  return isEscalationQuery(text, answer);
 }
 
 async function notifySupportAdmin(senderId: string, text: string, answer: string | null) {
@@ -512,10 +510,12 @@ async function notifySupportAdmin(senderId: string, text: string, answer: string
   }
   const safeText = redactSupportText(text).slice(0, 900);
   const safeAnswer = answer ? redactSupportText(answer).slice(0, 500) : "ответ не подготовлен";
-  await bot.api.sendMessage(
-    ADMIN_ID,
-    `🆘 Личная поддержка требует внимания\nПользователь: ${senderId}\nВопрос: ${safeText}\nОтвет AI: ${safeAnswer}`,
-  ).catch((error) => console.error("[telegram-support] admin notification failed:", (error as Error).message));
+  await bot.api
+    .sendMessage(
+      ADMIN_ID,
+      `🆘 Личная поддержка требует внимания\nПользователь: ${senderId}\nВопрос: ${safeText}\nОтвет AI: ${safeAnswer}`,
+    )
+    .catch((error) => console.error("[telegram-support] admin notification failed:", (error as Error).message));
 }
 
 // Telegram Bot API requires icon_custom_emoji_id as a JSON number,
@@ -863,6 +863,18 @@ function supportAiDate(value: Date): string {
   return value.toISOString().slice(0, 16).replace("T", " ");
 }
 
+async function getSupportAdminUsername(): Promise<string> {
+  try {
+    const fromDb = (await setting("support_username", "")).replace(/^@/, "").trim();
+    if (fromDb) return fromDb;
+  } catch {}
+  const fromOwner = (process.env.TELEGRAM_SUPPORT_OWNER_USERNAME ?? "").replace(/^@/, "").trim();
+  if (fromOwner) return fromOwner;
+  const fromAdmin = (process.env.ADMIN_USERNAME ?? "").replace(/^@/, "").trim();
+  if (fromAdmin) return fromAdmin;
+  return "Abdulloh_Zokirov";
+}
+
 async function supportAiContextFor(user: { id: number; lang: string; firstName?: string | null }) {
   const lang = normalizeLang(user.lang);
   const cacheKey = String(user.id) + ":" + lang;
@@ -902,13 +914,16 @@ async function supportAiContextFor(user: { id: number; lang: string; firstName?:
       orderBy: { createdAt: "desc" },
       take: 3,
     }).catch(() => []),
-    setting("support_username", "Aiobuna_support"),
+    getSupportAdminUsername(),
   ]);
+
+  const botUsername = (bot.botInfo?.username || "Aiobunabot").replace(/^@/, "");
 
   const context: SupportAiContext = {
     language: lang,
     customerName: user.firstName,
     supportUsername: supportUsername.replace(/^@/, ""),
+    botUsername,
     catalog: variants.map((v) => ({
       product: lang === "uz" ? v.plan.product.titleUz : lang === "en" ? v.plan.product.titleRu : v.plan.product.titleRu,
       plan: lang === "uz" ? v.plan.titleUz : lang === "en" ? v.plan.titleRu : v.plan.titleRu,
@@ -956,31 +971,39 @@ async function answerWithSupportAi(ctx: Context, user: Awaited<ReturnType<typeof
   if (!text || text.startsWith("/")) return false;
   if (await isAdminAsync(ctx)) return false;
 
+  const lang = detectMessageLanguage(text, normalizeLang(user.lang));
+
+  // Fast greeting check for in-bot AI
+  const quickGreeting = quickGreetingReply(text, lang);
+  if (quickGreeting) {
+    await ctx.reply(quickGreeting).catch(() => {});
+    return true;
+  }
+
+  const adminUsername = await getSupportAdminUsername();
+  const directReply = directEscalationReply(text, lang, adminUsername);
+  if (directReply) {
+    await ctx.reply(directReply).catch(() => {});
+    await notifySupportAdmin(String(ctx.from?.id ?? ""), text, directReply);
+    return true;
+  }
+
   const key = String(ctx.from?.id ?? "");
-  const answer = await draftSupportAiReply(text, user, key);
-  const context = await supportAiContextFor(user);
+  const effectiveUser = { ...user, lang };
+  const answer = await draftSupportAiReply(text, effectiveUser, key);
+  const context = await supportAiContextFor(effectiveUser);
+
   if (!answer) {
-    let fallback: string;
-    if (context.supportUsername) {
-      fallback =
-        user.lang === "uz"
-          ? "Hozir javobni tekshirishda muammo bo'ldi. Iltimos, administratorga @" + context.supportUsername + " yozing."
-          : user.lang === "en"
-          ? "I could not prepare a reliable answer right now. Please contact the administrator @" + context.supportUsername + "."
-          : "Сейчас не получилось подготовить надёжный ответ. Напишите, пожалуйста, администратору @" + context.supportUsername + ".";
-    } else {
-      fallback =
-        user.lang === "uz"
-          ? "Hozir javobni tekshirishda muammo bo'ldi. Iltimos, administratorga yozing."
-          : user.lang === "en"
-          ? "I could not prepare a reliable answer right now. Please contact the administrator."
-          : "Сейчас не получилось подготовить надёжный ответ. Напишите, пожалуйста, администратору.";
-    }
+    const fallback = fallbackSupportReply(lang, context.supportUsername || adminUsername);
     await ctx.reply(fallback).catch(() => {});
+    await notifySupportAdmin(String(ctx.from?.id ?? ""), text, "fallback_sent: " + fallback);
     return true;
   }
 
   await ctx.reply(answer).catch(() => {});
+  if (isEscalationQuery(text, answer)) {
+    await notifySupportAdmin(String(ctx.from?.id ?? ""), text, answer);
+  }
   return true;
 }
 
@@ -994,28 +1017,62 @@ async function handleSupportAccountMessage(message: { senderId: string; text: st
   if (!personalSupportAiEnabled() || !message.isPrivate || !targetIds.has(message.senderId)) return;
 
   console.info("[telegram-support] target=" + message.senderId + " result=drafting");
-  const quickGreeting = quickSupportGreeting(message.text, supportLanguageForMessage(message.text, "uz"));
+  const storedUser = await db.botUser.findUnique({ where: { tgId: message.senderId } }).catch(() => null);
+  const baseLang = storedUser?.lang || "uz";
+  const lang = detectMessageLanguage(message.text, normalizeLang(baseLang));
+
+  // 1. Fast greetings (instant, no Gemini, no DB delay)
+  const quickGreeting = quickGreetingReply(message.text, lang);
   if (quickGreeting) {
     const result = await sendSupportAccountMessage(message.senderId, quickGreeting);
     console.info("[telegram-support] target=" + message.senderId + " result=" + result + " quick_greeting");
     return;
   }
-  const storedUser = await db.botUser.findUnique({ where: { tgId: message.senderId } }).catch(() => null);
-  const baseUser = storedUser ?? { id: -1, lang: "uz", firstName: null };
-  const user = { ...baseUser, lang: supportLanguageForMessage(message.text, baseUser.lang) };
+
+  const adminUsername = await getSupportAdminUsername();
+
+  // 2. Direct escalation for partnership / payment failure / refund
+  const directReply = directEscalationReply(message.text, lang, adminUsername);
+  if (directReply) {
+    const result = await sendSupportAccountMessage(message.senderId, directReply);
+    console.info("[telegram-support] target=" + message.senderId + " result=" + result + " direct_escalation");
+    await notifySupportAdmin(message.senderId, message.text, directReply);
+    return;
+  }
+
+  // 3. Unclear query
+  if (isUnclearQuery(message.text)) {
+    const unclearReply = unclearQueryReply(lang, adminUsername);
+    const result = await sendSupportAccountMessage(message.senderId, unclearReply);
+    console.info("[telegram-support] target=" + message.senderId + " result=" + result + " unclear_query");
+    await notifySupportAdmin(message.senderId, message.text, unclearReply);
+    return;
+  }
+
+  // 4. Draft AI reply with safe context
+  const baseUser = storedUser ?? { id: -1, lang, firstName: null };
+  const user = { ...baseUser, lang };
   const answer = await Promise.race([
     draftSupportAiReply(message.text, user, "personal:" + message.senderId, true),
     new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000)),
   ]);
+
   if (!answer) {
     console.info("[telegram-support] target=" + message.senderId + " result=ai_unavailable_or_timeout");
-    if (supportNeedsAdmin(message.text, null)) await notifySupportAdmin(message.senderId, message.text, null);
+    const fallback = fallbackSupportReply(lang, adminUsername);
+    const result = await sendSupportAccountMessage(message.senderId, fallback);
+    console.info("[telegram-support] target=" + message.senderId + " result=" + result + " fallback_sent");
+    await notifySupportAdmin(message.senderId, message.text, "fallback_sent: " + fallback);
     return;
   }
+
   console.info("[telegram-support] target=" + message.senderId + " result=ai_ready");
   const result = await sendSupportAccountMessage(message.senderId, answer);
   console.info("[telegram-support] target=" + message.senderId + " result=" + result);
-  if (supportNeedsAdmin(message.text, answer)) await notifySupportAdmin(message.senderId, message.text, answer);
+
+  if (isEscalationQuery(message.text, answer)) {
+    await notifySupportAdmin(message.senderId, message.text, answer);
+  }
 }
 
 async function refreshAdminIdsCache(): Promise<Set<string>> {
@@ -10059,10 +10116,13 @@ async function bootstrap() {
       await bot.start(pollingOptions);
       return;
     } catch (error) {
-      const apiError = error as { error_code?: number; method?: string; description?: string };
-      const rolloutConflict = apiError.error_code === 409 && apiError.method === "getUpdates";
-      if (!rolloutConflict || Date.now() >= conflictDeadline) throw error;
-      console.warn("[bot] another rollout instance still owns getUpdates; retrying in 5s");
+      const errObj = error as any;
+      const msg = String(errObj?.message ?? errObj?.description ?? error ?? "").toLowerCase();
+      const code = errObj?.error_code ?? errObj?.code;
+      const is409 = code === 409 || msg.includes("409") || msg.includes("terminated by other getupdates");
+      if (!is409 || Date.now() >= conflictDeadline) throw error;
+      const remainingSec = Math.max(0, Math.round((conflictDeadline - Date.now()) / 1000));
+      console.warn(`[bot] another rollout instance still owns getUpdates; retrying in 5s (${remainingSec}s remaining)`);
       await new Promise((resolve) => setTimeout(resolve, 5_000));
     }
   }
