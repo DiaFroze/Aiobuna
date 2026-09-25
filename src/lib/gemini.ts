@@ -368,7 +368,7 @@ export async function geminiSupportReply(
   context: SupportAiContext,
 ): Promise<string | null> {
   const key = process.env.GEMINI_API_KEY ?? "";
-  const model = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
+  const model = process.env.GEMINI_MODEL ?? "gemini-3.8-flash";
   if (!key || !message.trim()) return null;
 
   const langName = context.language === "uz" ? "узбекском" : context.language === "en" ? "английском" : "русском";
@@ -429,7 +429,7 @@ export async function geminiSupportReply(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.55, maxOutputTokens: 220 },
+        generationConfig: { maxOutputTokens: 220 },
       }),
     });
     const json = (await res.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
