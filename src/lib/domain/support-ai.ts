@@ -16,6 +16,9 @@ export interface SupportAiContext {
   language: Lang;
   customerName?: string | null;
   supportUsername?: string | null;
+  cooperationUsername?: string | null;
+  paymentCard?: string | null;
+  paymentCardHolder?: string | null;
   botUsername?: string | null;
   catalog: SupportAiCatalogItem[];
   recentOrders: { title: string; status: string; priceUzs: number; createdAt: string }[];
@@ -324,27 +327,31 @@ export function isEscalationQuery(text: string, answer?: string | null): boolean
 /**
  * Returns immediate deterministic escalation reply if query directly matches cooperation or payment issue.
  */
-export function directEscalationReply(text: string, lang: Lang, adminUsername: string): string | null {
-  const cleanAdmin = adminUsername.replace(/^@/, "").trim() || "Abdulloh_Zokirov";
+export function directEscalationReply(
+  text: string,
+  lang: Lang,
+  cooperationUsername: string = "Abdulloh_ZokirovN",
+): string | null {
+  const cleanCoop = cooperationUsername.replace(/^@/, "").trim() || "Abdulloh_ZokirovN";
 
   if (isCooperationQuery(text)) {
     if (lang === "uz") {
-      return `Hamkorlik va ulgurji savdo bo'yicha administratorimiz @${cleanAdmin} ga yozishingiz mumkin, shartlarni kelishamiz.`;
+      return `Hamkorlik va ulgurji savdo bo'yicha shaxsiy profilim @${cleanCoop} ga yozing, barcha shartlarni kelishamiz.`;
     }
     if (lang === "en") {
-      return `For partnership and wholesale inquiries, please contact our administrator @${cleanAdmin} directly.`;
+      return `For partnership and wholesale inquiries, please message me directly at @${cleanCoop}.`;
     }
-    return `По вопросам сотрудничества и опта напишите, пожалуйста, нашему администратору @${cleanAdmin} — всё обсудим.`;
+    return `По вопросам сотрудничества и опта напишите мне в личку @${cleanCoop} — всё обсудим.`;
   }
 
   if (isPaymentIssueQuery(text)) {
     if (lang === "uz") {
-      return `Agar to'lov yechilib, obuna faollashmagan bo'lsa, to'lov chekini administratorimiz @${cleanAdmin} ga yuboring. Tekshirib, darhol yordam beradilar.`;
+      return `To'lov chekini shu yerga yuboring, hozir tekshirib darhol yordam beraman.`;
     }
     if (lang === "en") {
-      return `If payment was deducted but your subscription is not active yet, please send your payment receipt to our administrator @${cleanAdmin}.`;
+      return `Please send your payment receipt right here in this chat, and I will check and resolve it for you immediately.`;
     }
-    return `Если оплата списалась, но заказ не обновился, пришлите чек администратору @${cleanAdmin}. Он проверит платёж и сразу поможет.`;
+    return `Пожалуйста, отправьте чек об оплате прямо сюда в чат — я сразу проверю платёж и помогу.`;
   }
 
   return null;
@@ -353,29 +360,27 @@ export function directEscalationReply(text: string, lang: Lang, adminUsername: s
 /**
  * Response for completely unclear queries.
  */
-export function unclearQueryReply(lang: Lang, adminUsername: string): string {
-  const cleanAdmin = adminUsername.replace(/^@/, "").trim() || "Abdulloh_Zokirov";
+export function unclearQueryReply(lang: Lang, _adminUsername?: string): string {
   if (lang === "uz") {
-    return `Savolingizni aniqroq yozsangiz, yordam berishga harakat qilaman. Yoki administratorimiz @${cleanAdmin} ga yozishingiz mumkin.`;
+    return `Savolingizni aniqroq yozsangiz, yordam berishga harakat qilaman.`;
   }
   if (lang === "en") {
-    return `Could you please clarify your question? I'll be glad to help, or you can message our administrator @${cleanAdmin}.`;
+    return `Could you please clarify your question? I'll be glad to help.`;
   }
-  return `Уточните, пожалуйста, ваш вопрос — с радостью подскажу. Также вы можете написать напрямую администратору @${cleanAdmin}.`;
+  return `Уточните, пожалуйста, ваш вопрос — с радостью подскажу.`;
 }
 
 /**
  * Polite fallback when Gemini API times out or is temporarily unavailable.
  */
-export function fallbackSupportReply(lang: Lang, adminUsername: string): string {
-  const cleanAdmin = adminUsername.replace(/^@/, "").trim() || "Abdulloh_Zokirov";
+export function fallbackSupportReply(lang: Lang, _adminUsername?: string): string {
   if (lang === "uz") {
-    return `Hozir javob tayyorlashda kechikish bo'ldi. Iltimos, administratorimiz @${cleanAdmin} ga yozing, tezda yordam beradilar.`;
+    return `Hozir xabaringizni ko'rib chiqib, tezda javob beraman.`;
   }
   if (lang === "en") {
-    return `There was a brief delay preparing an automated answer. Please message our administrator @${cleanAdmin} for assistance.`;
+    return `I'll review your message and reply shortly.`;
   }
-  return `Сейчас не получилось быстро подготовить ответ. Пожалуйста, напишите администратору @${cleanAdmin}, он сразу поможет.`;
+  return `Сейчас посмотрю ваше сообщение и скоро отвечу.`;
 }
 
 /**

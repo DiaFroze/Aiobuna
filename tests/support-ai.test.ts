@@ -117,35 +117,39 @@ describe("Support AI Domain Logic", () => {
       expect(isUnclearQuery("Gemini")).toBe(false);
     });
 
-    it("provides direct escalation replies with admin username", () => {
-      const coopUz = directEscalationReply("Hamkorlik qilmoqchiman", "uz", admin);
-      expect(coopUz).toContain("@" + admin);
+    it("provides direct escalation replies with cooperation handle or direct receipt request", () => {
+      const coopHandle = "Abdulloh_ZokirovN";
+      const coopUz = directEscalationReply("Hamkorlik qilmoqchiman", "uz", coopHandle);
+      expect(coopUz).toContain("@" + coopHandle);
       expect(coopUz).toContain("Hamkorlik");
 
-      const coopRu = directEscalationReply("Хочу сотрудничество", "ru", admin);
-      expect(coopRu).toContain("@" + admin);
+      const coopRu = directEscalationReply("Хочу сотрудничество", "ru", coopHandle);
+      expect(coopRu).toContain("@" + coopHandle);
       expect(coopRu).toContain("сотрудничества");
 
-      const payRu = directEscalationReply("Оплата не прошла", "ru", admin);
-      expect(payRu).toContain("@" + admin);
+      const payRu = directEscalationReply("Оплата не прошла", "ru");
       expect(payRu).toContain("чек");
+      expect(payRu).toContain("прямо сюда в чат");
 
-      const payUz = directEscalationReply("To'lov o'tmadi", "uz", admin);
-      expect(payUz).toContain("@" + admin);
+      const payUz = directEscalationReply("To'lov o'tmadi", "uz");
       expect(payUz).toContain("chek");
+      expect(payUz).toContain("shu yerga");
     });
 
-    it("handles unclear query responses with admin username", () => {
-      const respUz = unclearQueryReply("uz", admin);
-      expect(respUz).toContain("@" + admin);
+    it("handles unclear query responses in first person", () => {
+      const respUz = unclearQueryReply("uz");
+      expect(respUz).toContain("aniqroq");
 
-      const respRu = unclearQueryReply("ru", admin);
-      expect(respRu).toContain("@" + admin);
+      const respRu = unclearQueryReply("ru");
+      expect(respRu).toContain("Уточните");
     });
 
-    it("provides fallback reply with admin username", () => {
-      const fb = fallbackSupportReply("uz", admin);
-      expect(fb).toContain("@" + admin);
+    it("provides natural fallback reply in first person", () => {
+      const fb = fallbackSupportReply("uz");
+      expect(fb).toContain("tezda javob");
+
+      const fbRu = fallbackSupportReply("ru");
+      expect(fbRu).toContain("скоро отвечу");
     });
 
     it("escalates if AI response indicates uncertainty", () => {

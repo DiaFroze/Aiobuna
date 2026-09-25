@@ -923,6 +923,9 @@ async function supportAiContextFor(user: { id: number; lang: string; firstName?:
     language: lang,
     customerName: user.firstName,
     supportUsername: supportUsername.replace(/^@/, ""),
+    cooperationUsername: (process.env.TELEGRAM_COOPERATION_USERNAME ?? "Abdulloh_ZokirovN").replace(/^@/, "").trim(),
+    paymentCard: "9860606756718767",
+    paymentCardHolder: "Zokirov Abdulloh",
     botUsername,
     catalog: variants.map((v) => ({
       product: lang === "uz" ? v.plan.product.titleUz : lang === "en" ? v.plan.product.titleRu : v.plan.product.titleRu,
@@ -980,8 +983,8 @@ async function answerWithSupportAi(ctx: Context, user: Awaited<ReturnType<typeof
     return true;
   }
 
-  const adminUsername = await getSupportAdminUsername();
-  const directReply = directEscalationReply(text, lang, adminUsername);
+  const coopUsername = (process.env.TELEGRAM_COOPERATION_USERNAME ?? "Abdulloh_ZokirovN").replace(/^@/, "").trim();
+  const directReply = directEscalationReply(text, lang, coopUsername);
   if (directReply) {
     await ctx.reply(directReply).catch(() => {});
     await notifySupportAdmin(String(ctx.from?.id ?? ""), text, directReply);
@@ -994,7 +997,7 @@ async function answerWithSupportAi(ctx: Context, user: Awaited<ReturnType<typeof
   const context = await supportAiContextFor(effectiveUser);
 
   if (!answer) {
-    const fallback = fallbackSupportReply(lang, context.supportUsername || adminUsername);
+    const fallback = fallbackSupportReply(lang);
     await ctx.reply(fallback).catch(() => {});
     await notifySupportAdmin(String(ctx.from?.id ?? ""), text, "fallback_sent: " + fallback);
     return true;
@@ -1029,10 +1032,10 @@ async function handleSupportAccountMessage(message: { senderId: string; text: st
     return;
   }
 
-  const adminUsername = await getSupportAdminUsername();
+  const coopUsername = (process.env.TELEGRAM_COOPERATION_USERNAME ?? "Abdulloh_ZokirovN").replace(/^@/, "").trim();
 
   // 2. Direct escalation for partnership / payment failure / refund
-  const directReply = directEscalationReply(message.text, lang, adminUsername);
+  const directReply = directEscalationReply(message.text, lang, coopUsername);
   if (directReply) {
     const result = await sendSupportAccountMessage(message.senderId, directReply);
     console.info("[telegram-support] target=" + message.senderId + " result=" + result + " direct_escalation");
@@ -1042,7 +1045,7 @@ async function handleSupportAccountMessage(message: { senderId: string; text: st
 
   // 3. Unclear query
   if (isUnclearQuery(message.text)) {
-    const unclearReply = unclearQueryReply(lang, adminUsername);
+    const unclearReply = unclearQueryReply(lang);
     const result = await sendSupportAccountMessage(message.senderId, unclearReply);
     console.info("[telegram-support] target=" + message.senderId + " result=" + result + " unclear_query");
     await notifySupportAdmin(message.senderId, message.text, unclearReply);
@@ -1054,12 +1057,12 @@ async function handleSupportAccountMessage(message: { senderId: string; text: st
   const user = { ...baseUser, lang };
   const answer = await Promise.race([
     draftSupportAiReply(message.text, user, "personal:" + message.senderId, true),
-    new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000)),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 22_000)),
   ]);
 
   if (!answer) {
     console.info("[telegram-support] target=" + message.senderId + " result=ai_unavailable_or_timeout");
-    const fallback = fallbackSupportReply(lang, adminUsername);
+    const fallback = fallbackSupportReply(lang);
     const result = await sendSupportAccountMessage(message.senderId, fallback);
     console.info("[telegram-support] target=" + message.senderId + " result=" + result + " fallback_sent");
     await notifySupportAdmin(message.senderId, message.text, "fallback_sent: " + fallback);

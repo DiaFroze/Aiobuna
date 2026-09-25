@@ -12,6 +12,9 @@ const context: SupportAiContext = {
   language: "uz",
   customerName: "TestUser",
   supportUsername: "Abdulloh_Zokirov",
+  cooperationUsername: "Abdulloh_ZokirovN",
+  paymentCard: "9860606756718767",
+  paymentCardHolder: "Zokirov Abdulloh",
   botUsername: "Aiobunabot",
   catalog: [
     { product: "Gemini AI Pro 18m", plan: "Тарифы", durationDays: 540, priceUzs: 6048 },
@@ -26,7 +29,9 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const customerScenarios = [
   { q: "salom aka", desc: "Быстрое приветствие на узбекском" },
   { q: "Assalomu alaykum", desc: "Классическое приветствие" },
-  { q: "Привет", desc: "Приветствие на русском" },
+  { q: "Siz orqali sotib olsam boladimi", desc: "Покупка напрямую у владельца (UZ - из скрина)" },
+  { q: "Kartangizni bering, to'lov qilaman", desc: "Запрос номера карты для оплаты (UZ)" },
+  { q: "Siz kimsiz?", desc: "Личность владельца (UZ)" },
   { q: "Gemini bormi narxi qancha?", desc: "Вопрос о наличии и цене" },
   { q: "Qanday sotib olaman?", desc: "Вопрос о процессе покупки" },
   { q: "O'z akkauntimga ulasa bo'ladimi?", desc: "Вопрос о привязке к личному аккаунту" },
@@ -34,12 +39,16 @@ const customerScenarios = [
   { q: "Aktivatsiya qanday bo'ladi?", desc: "Инструкция по активации" },
   { q: "Link ochilmayapti, xato beryapti", desc: "Проблема с активационной ссылкой" },
   { q: "Hamkorlik qilmoqchiman", desc: "Сотрудничество / партнёрство" },
+  { q: "Привет", desc: "Приветствие на русском" },
+  { q: "Можно купить напрямую через вас?", desc: "Прямая покупка у владельца (RU)" },
+  { q: "Дайте номер карты, оплачу", desc: "Запрос карты для оплаты (RU)" },
   { q: "Как купить Gemini?", desc: "Покупка на русском языке" },
   { q: "Подключается к моей почте или даёте готовый аккаунт?", desc: "Личный или готовый аккаунт (RU)" },
   { q: "Пароль от почты нужен?", desc: "Вопрос о пароле (RU)" },
   { q: "Как проходит активация?", desc: "Процесс активации (RU)" },
   { q: "Оплата не прошла, деньги списались", desc: "Проблема с оплатой (RU)" },
   { q: "How can I buy Gemini?", desc: "Покупка на английском" },
+  { q: "Can I buy directly from you?", desc: "Прямая покупка (EN)" },
   { q: "Do I need to give you my Google password?", desc: "Вопрос о пароле на английском" },
   { q: "???", desc: "Непонятный запрос" },
 ];
@@ -63,12 +72,12 @@ async function runBenchmark() {
       reply = quick;
       method = "fast_greeting";
     } else {
-      const direct = directEscalationReply(item.q, lang, ctx.supportUsername || "Abdulloh_Zokirov");
+      const direct = directEscalationReply(item.q, lang, ctx.cooperationUsername || "Abdulloh_ZokirovN");
       if (direct) {
         reply = direct;
         method = "direct_escalation";
       } else if (isUnclearQuery(item.q)) {
-        reply = unclearQueryReply(lang, ctx.supportUsername || "Abdulloh_Zokirov");
+        reply = unclearQueryReply(lang);
         method = "unclear_query";
       } else {
         reply = (await geminiSupportReply(item.q, [], ctx)) || "";
