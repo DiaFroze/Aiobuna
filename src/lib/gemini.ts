@@ -348,7 +348,7 @@ export interface SupportAiMessage {
   text: string;
 }
 
-function redactSupportText(text: string): string {
+export function redactSupportText(text: string): string {
   return text
     .replace(/([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\s*(?:----|::|\/)\s*\S+/gi, "[account-data]")
     .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[email]")

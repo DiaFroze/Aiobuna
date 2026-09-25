@@ -13,7 +13,7 @@ import { db } from "./db";
 import { adSource, parseAdStartPayload } from "../lib/domain/ad-attribution";
 import { sourceOrder, envVexSource, envBuyerSource, envQamifySource, sourceBalance, type Source } from "../lib/supplier";
 import { sortSuppliersByStrategy, type SupplierCandidate, type RoutingStrategy } from "../lib/domain/supplier-routing";
-import { geminiTranslate, geminiSupportReply, type SupportAiMessage } from "../lib/gemini";
+import { geminiTranslate, geminiSupportReply, redactSupportText, type SupportAiMessage, type SupportAiContext } from "../lib/gemini";
 import { t, LANGS, LANG_NAMES, normalizeLang, btnVariants, type Lang } from "./i18n";
 import { generateVerificationCode } from "../lib/orderCode";
 import { parseBulkPrices, parseBulkBonus, bulkTotal, bonusQty, bulkSaving, describeBulk } from "../lib/domain/bulk-pricing";
@@ -480,6 +480,43 @@ const pending = new Map<
 
 const supportAiHistory = new Map<string, SupportAiMessage[]>();
 const SUPPORT_AI_MAX_HISTORY = 8;
+const supportAiContextCache = new Map<string, { expiresAt: number; context: SupportAiContext }>();
+
+function supportLanguageForMessage(text: string, fallback: string): Lang {
+  const value = text.trim().toLowerCase();
+  if (/(^|\s)(salom|assalomu|alaykum|kerak|edi|qanday|qancha|olish|sotib)(\s|$)/i.test(value)) return "uz";
+  if (/(^|\s)(hello|hi|please|how|buy|need|price|subscription)(\s|$)/i.test(value)) return "en";
+  if (/[а-яё]/i.test(value) || /(^|\s)(привет|салом|здравствуйте|сколько|купить|оплата|подписка)(\s|$)/i.test(value)) return "ru";
+  return normalizeLang(fallback);
+}
+
+function quickSupportGreeting(text: string, lang: Lang): string | null {
+  const value = text.trim().toLowerCase().replace(/[!?.,]+$/g, "");
+  if (!/^(salom|assalomu\s+alaykum|ассалому\s+алайкум|привет|здравствуйте|hello|hi)$/.test(value)) return null;
+  if (lang === "uz") return "Assalomu alaykum! Nima yordam kerak?";
+  if (lang === "en") return "Hi! What can I help you with?";
+  return "Здравствуйте! Что подсказать?";
+}
+
+function supportNeedsAdmin(text: string, answer: string | null): boolean {
+  const value = text.toLowerCase();
+  if (/(сотруднич|партнёр|партнер|оптов|коллаб|collab|partnership|hamkorlik|sheriklik)/i.test(value)) return true;
+  if (/(возврат|спорн|не приш|не получил|плат[её]ж|refund|payment|to.?lov|qaytar)/i.test(value)) return true;
+  return Boolean(answer && /(не уверен|не знаю|не понял|уточн|не могу помочь|not sure|i cannot|bilmayman|tushunmadim)/i.test(answer));
+}
+
+async function notifySupportAdmin(senderId: string, text: string, answer: string | null) {
+  if (!ADMIN_ID) {
+    console.info("[telegram-support] admin notification skipped: TELEGRAM_ADMIN_CHAT_ID is not configured");
+    return;
+  }
+  const safeText = redactSupportText(text).slice(0, 900);
+  const safeAnswer = answer ? redactSupportText(answer).slice(0, 500) : "ответ не подготовлен";
+  await bot.api.sendMessage(
+    ADMIN_ID,
+    `🆘 Личная поддержка требует внимания\nПользователь: ${senderId}\nВопрос: ${safeText}\nОтвет AI: ${safeAnswer}`,
+  ).catch((error) => console.error("[telegram-support] admin notification failed:", (error as Error).message));
+}
 
 // Telegram Bot API requires icon_custom_emoji_id as a JSON number,
 // but these are 19-digit IDs that exceed JS Number precision.
@@ -828,6 +865,9 @@ function supportAiDate(value: Date): string {
 
 async function supportAiContextFor(user: { id: number; lang: string; firstName?: string | null }) {
   const lang = normalizeLang(user.lang);
+  const cacheKey = String(user.id) + ":" + lang;
+  const cached = supportAiContextCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.context;
   const [variants, orders, payments, supportUsername] = await Promise.all([
     db.variant.findMany({
       where: {
@@ -865,7 +905,7 @@ async function supportAiContextFor(user: { id: number; lang: string; firstName?:
     setting("support_username", "Aiobuna_support"),
   ]);
 
-  return {
+  const context: SupportAiContext = {
     language: lang,
     customerName: user.firstName,
     supportUsername: supportUsername.replace(/^@/, ""),
@@ -888,6 +928,8 @@ async function supportAiContextFor(user: { id: number; lang: string; firstName?:
       createdAt: supportAiDate(p.createdAt),
     })),
   };
+  supportAiContextCache.set(cacheKey, { expiresAt: Date.now() + 30_000, context });
+  return context;
 }
 
 async function draftSupportAiReply(
@@ -896,7 +938,7 @@ async function draftSupportAiReply(
   historyKey: string,
   enabled = supportAiEnabled(),
 ) {
-  if (!enabled || !process.env.GEMINI_API_KEY || !text.trim()) return null;
+  if (!enabled || !text.trim()) return null;
   const cleanText = text.trim();
   const history = supportAiHistory.get(historyKey) ?? [];
   const nextHistory: SupportAiMessage[] = [...history, { role: "user" as const, text: cleanText }].slice(-SUPPORT_AI_MAX_HISTORY);
@@ -952,19 +994,28 @@ async function handleSupportAccountMessage(message: { senderId: string; text: st
   if (!personalSupportAiEnabled() || !message.isPrivate || !targetIds.has(message.senderId)) return;
 
   console.info("[telegram-support] target=" + message.senderId + " result=drafting");
+  const quickGreeting = quickSupportGreeting(message.text, supportLanguageForMessage(message.text, "uz"));
+  if (quickGreeting) {
+    const result = await sendSupportAccountMessage(message.senderId, quickGreeting);
+    console.info("[telegram-support] target=" + message.senderId + " result=" + result + " quick_greeting");
+    return;
+  }
   const storedUser = await db.botUser.findUnique({ where: { tgId: message.senderId } }).catch(() => null);
-  const user = storedUser ?? { id: -1, lang: "uz", firstName: null };
+  const baseUser = storedUser ?? { id: -1, lang: "uz", firstName: null };
+  const user = { ...baseUser, lang: supportLanguageForMessage(message.text, baseUser.lang) };
   const answer = await Promise.race([
     draftSupportAiReply(message.text, user, "personal:" + message.senderId, true),
     new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000)),
   ]);
   if (!answer) {
     console.info("[telegram-support] target=" + message.senderId + " result=ai_unavailable_or_timeout");
+    if (supportNeedsAdmin(message.text, null)) await notifySupportAdmin(message.senderId, message.text, null);
     return;
   }
   console.info("[telegram-support] target=" + message.senderId + " result=ai_ready");
   const result = await sendSupportAccountMessage(message.senderId, answer);
   console.info("[telegram-support] target=" + message.senderId + " result=" + result);
+  if (supportNeedsAdmin(message.text, answer)) await notifySupportAdmin(message.senderId, message.text, answer);
 }
 
 async function refreshAdminIdsCache(): Promise<Set<string>> {
