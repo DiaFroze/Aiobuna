@@ -5,6 +5,7 @@ import {
   quickGreetingReply,
   isCooperationQuery,
   isPaymentIssueQuery,
+  isPaymentProofQuery,
   isUnclearQuery,
   isEscalationQuery,
   directEscalationReply,
@@ -109,6 +110,20 @@ describe("Support AI Domain Logic", () => {
       expect(isPaymentIssueQuery("How to pay?")).toBe(false);
     });
 
+    it("identifies payment proof and receipt messages", () => {
+      expect(isPaymentProofQuery("чек 39000")).toBe(true);
+      expect(isPaymentProofQuery("чек")).toBe(true);
+      expect(isPaymentProofQuery("вот чек")).toBe(true);
+      expect(isPaymentProofQuery("оплатил")).toBe(true);
+      expect(isPaymentProofQuery("оплатила")).toBe(true);
+      expect(isPaymentProofQuery("перевёл")).toBe(true);
+      expect(isPaymentProofQuery("to'ladim")).toBe(true);
+      expect(isPaymentProofQuery("mana chek")).toBe(true);
+      expect(isPaymentProofQuery("чек скинул")).toBe(true);
+      expect(isPaymentProofQuery("нужен ли чек?")).toBe(false);
+      expect(isPaymentProofQuery("чек kerakmi")).toBe(false);
+    });
+
     it("identifies unclear queries", () => {
       expect(isUnclearQuery("???")).toBe(true);
       expect(isUnclearQuery("...")).toBe(true);
@@ -134,6 +149,13 @@ describe("Support AI Domain Logic", () => {
       const payUz = directEscalationReply("To'lov o'tmadi", "uz");
       expect(payUz).toContain("chek");
       expect(payUz).toContain("shu yerga");
+
+      const proofRu = directEscalationReply("чек 39000", "ru");
+      expect(proofRu).toContain("Чек принят на ручную проверку");
+      expect(proofRu).toContain("Абдуллох");
+
+      const proofUz = directEscalationReply("to'ladim", "uz");
+      expect(proofUz).toContain("Chek qabul qilindi");
     });
 
     it("handles unclear query responses in first person", () => {

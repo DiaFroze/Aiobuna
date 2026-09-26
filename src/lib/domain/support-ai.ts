@@ -295,6 +295,21 @@ export function isPaymentIssueQuery(text: string): boolean {
 }
 
 /**
+ * Checks if the customer is sending a payment receipt, proof of transfer, or claiming they just paid.
+ */
+export function isPaymentProofQuery(text: string): boolean {
+  const norm = text.trim().toLowerCase();
+  if (!norm) return false;
+  // Guard against questions about whether a receipt is needed
+  if (/(?:kerakmi|bormi|qanday|qanaqa|нужен\s+ли|надо\s+ли|нужно\s+ли|зачем\s+чек)/i.test(norm)) {
+    return false;
+  }
+  return /(?:^|[^a-zа-яё0-9_])(?:чек|чек\s*\d+|вот\s*чек|оплатил|оплатила|перев[её]л|перевела|скинул\s*чек|отправил\s*чек|скрин\s*чека|to'?ladim|to‘ladim|to'lov\s*qildim|to‘lov\s*qildim|mana\s*chek|chek|chek\s*\d+|mana\s*to'?lov|paid|sent\s*receipt)(?:$|[^a-zа-яё0-9_])/i.test(
+    norm,
+  );
+}
+
+/**
  * Checks if the text has no meaningful letters or expresses complete confusion.
  */
 export function isUnclearQuery(text: string): boolean {
@@ -313,6 +328,7 @@ export function isUnclearQuery(text: string): boolean {
 export function isEscalationQuery(text: string, answer?: string | null): boolean {
   if (isCooperationQuery(text)) return true;
   if (isPaymentIssueQuery(text)) return true;
+  if (isPaymentProofQuery(text)) return true;
   if (isUnclearQuery(text)) return true;
   if (
     answer &&
@@ -343,6 +359,16 @@ export function directEscalationReply(
       return `For partnership and wholesale inquiries, please message me directly at @${cleanCoop}.`;
     }
     return `По вопросам сотрудничества и опта напишите мне в личку @${cleanCoop} — всё обсудим.`;
+  }
+
+  if (isPaymentProofQuery(text)) {
+    if (lang === "uz") {
+      return `Chek qabul qilindi. Hozir bank ilovasida to'lov tushganini shaxsan tekshirib, rasmiy faollashtirish havolasini shu yerga yuboraman. Bir oz kuting!`;
+    }
+    if (lang === "en") {
+      return `Receipt received for manual verification. I will check my bank app and send you the official activation link directly here in chat in a moment.`;
+    }
+    return `Чек принят на ручную проверку. Я (Абдуллох) сейчас лично проверю поступление в банковском приложении и отправлю вам официальную ссылку активации прямо сюда в чат. Ожидайте пару минут!`;
   }
 
   if (isPaymentIssueQuery(text)) {
