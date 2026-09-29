@@ -6,6 +6,7 @@ import { PERMISSIONS } from "@/lib/security/rbac";
 import { botDb } from "@/lib/botDb";
 import { audit } from "@/lib/security/audit";
 import { closeDeliveryPatch, isAlreadyDelivered } from "@/lib/domain/premium-delivery";
+import { enqueueMetaPurchase } from "@/lib/services/meta-conversions";
 
 function escapeHtml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -53,6 +54,14 @@ export async function deliverManualOrderAction(formData: FormData) {
   if (claimed.count !== 1) {
     throw new Error("Этот заказ уже выдан или отменен");
   }
+
+  await enqueueMetaPurchase({
+    orderId: order.id,
+    telegramId: order.user.tgId,
+    adCode: order.attributedAdCode ?? order.lastAdCode ?? order.firstAdCode,
+    valueUzs: order.priceUzs ?? 0,
+    eventTime: new Date(),
+  }).catch((e) => console.error("[meta-capi] failed queueing manual delivery purchase:", (e as Error).message));
 
   // Log audit
   await audit({

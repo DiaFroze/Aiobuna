@@ -1197,6 +1197,22 @@ model PromoLink {
   @@index([variantId])
 }
 
+// Durable Meta Conversions API outbox. eventId is stable so Meta can deduplicate
+// retries; payload contains only pseudonymous identifiers and conversion data.
+model MetaConversionEvent {
+  id          Int      @id @default(autoincrement())
+  eventId     String   @unique
+  eventName   String
+  payload     Json
+  status      String   @default("pending") // pending | sent | failed
+  attempts    Int      @default(0)
+  lastError   String?
+  createdAt   DateTime @default(now())
+  sentAt      DateTime?
+
+  @@index([status, createdAt])
+}
+
 model PromoLinkUsage {
   id          Int        @id @default(autoincrement())
   promoLinkId Int
@@ -1507,6 +1523,5 @@ model ChannelPromoCampaign {
   @@unique([channelId, messageId])
   @@index([state])
 }
-
 
 
