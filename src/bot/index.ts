@@ -31,6 +31,7 @@ import { buildCheckoutUrl, sumToTiyin } from "../lib/domain/payme";
 import { buildClickUrl } from "../lib/domain/click";
 import { binancePayReady } from "../lib/services/binance-pay-client";
 import { createBinanceCheckout, reconcilePendingBinancePayments } from "../lib/services/binance-pay";
+import { dispatchMetaConversions, enqueueMetaLead, enqueueMetaPurchase } from "../lib/services/meta-conversions";
 // The auto-delivery decision logic (classifyGiftError / decideAfterReconcile)
 // lives in the same module and is unit-tested, but is intentionally NOT wired up
 // yet: PREMIUM_DELIVERY_MODE stays "manual" until the Star-balance experiment
@@ -1662,6 +1663,12 @@ async function fulfillCourseOrder(orderId: number): Promise<void> {
     reply_markup: new InlineKeyboard().url(lang === "uz" ? "🎓 Kursga kirish" : lang === "en" ? "🎓 Join the course" : "🎓 Вступить в курс", invite),
   });
   await db.botOrder.update({ where: { id: order.id }, data: { status: "delivered", deliveredAt: new Date() } });
+  await enqueueMetaPurchase({
+    orderId: order.id,
+    telegramId: order.user.tgId,
+    adCode: order.attributedAdCode ?? order.lastAdCode ?? order.firstAdCode,
+    valueUzs: order.priceUzs ?? 0,
+  }).catch((e) => console.error("[meta-capi] failed queueing course purchase:", (e as Error).message));
   await deliverCourseBonus(order.id);
 }
 
@@ -3019,6 +3026,14 @@ async function executePurchase(
     // edit, so the "processing…" placeholder is deleted and replaced instead
     // of stacking a separate video on top of it).
     const u = await db.botUser.findUnique({ where: { id: user.id } });
+    if (!isRefGift && !isAdminPay && total > 0) {
+      await enqueueMetaPurchase({
+        orderId: reserve.orderId,
+        telegramId: user.tgId,
+        adCode: u?.lastAdCode ?? u?.firstAdCode ?? null,
+        valueUzs: total,
+      }).catch((e) => console.error("[meta-capi] failed queueing purchase:", (e as Error).message));
+    }
     const isLargeOrder = deliveredQty > 5;
     // Per-product video wins; else per-product photo/banner; else global tutorial video.
     const productVideo: string | null = v.plan.product.videoFileId ?? null;
@@ -4786,6 +4801,8 @@ bot.command("start", async (ctx) => {
         data: [{ userId: user.id, source: adLink.code, isNewUser: !existing }],
         skipDuplicates: true,
       }).catch(() => {});
+      await enqueueMetaLead({ userId: user.id, telegramId: user.tgId, adCode: adLink.code, eventTime: now })
+        .catch((e) => console.error("[meta-capi] failed queueing lead:", (e as Error).message));
     } else if (adSource(payload)) {
       const legacySource = adSource(payload)!;
       await db.botAdStart.createMany({
@@ -9095,6 +9112,20 @@ bot.api.config.use(async (prev, method, payload, signal) => {
 // Prisma client itself — no CLI/shell, works with the internal DB URL at runtime.
 // DDL matches `prisma migrate diff` output. Non-fatal: logs and continues.
 async function ensureSchema() {
+  await db.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS "MetaConversionEvent" (
+    "id" SERIAL NOT NULL,
+    "eventId" TEXT NOT NULL,
+    "eventName" TEXT NOT NULL,
+    "payload" JSONB NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'pending',
+    "attempts" INTEGER NOT NULL DEFAULT 0,
+    "lastError" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "sentAt" TIMESTAMP(3),
+    CONSTRAINT "MetaConversionEvent_pkey" PRIMARY KEY ("id")
+  )`).catch((e) => console.error("[bot] MetaConversionEvent schema unavailable:", (e as Error).message));
+  await db.$executeRawUnsafe(`CREATE UNIQUE INDEX IF NOT EXISTS "MetaConversionEvent_eventId_key" ON "MetaConversionEvent"("eventId")`).catch(() => {});
+  await db.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "MetaConversionEvent_status_createdAt_idx" ON "MetaConversionEvent"("status", "createdAt")`).catch(() => {});
   await db.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS "BotAdStart" (
     "userId" INTEGER NOT NULL REFERENCES "BotUser"("id") ON DELETE CASCADE ON UPDATE CASCADE,
     "source" TEXT NOT NULL,
@@ -10058,6 +10089,9 @@ async function bootstrap() {
   await backfillChannelVerified();  // one-time referral verification backfill (guarded)
   await maybeResetAdmins();         // one-time admin reset (guarded)
   repairUnmatchedBankNotifications().catch(() => {});
+  setInterval(() => {
+    dispatchMetaConversions().catch((e) => console.error("[meta-capi] outbox retry failed:", (e as Error).message));
+  }, 60_000);
   // Poll for Payme top-ups the webhook credited, to notify + fulfil them.
   setInterval(() => {
     reconcilePendingBinancePayments().catch(() => console.error("[binance] reconciliation unavailable"));

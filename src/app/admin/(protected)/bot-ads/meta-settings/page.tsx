@@ -3,6 +3,7 @@ import Link from "next/link";
 import { botDb, botConfigured } from "@/lib/botDb";
 import { PageHeader, EmptyState } from "@/components/admin/ui";
 import { getMetaConfig, getLastSyncStatus } from "@/lib/services/meta-ads";
+import { getMetaConversionsStatus } from "@/lib/services/meta-conversions";
 import { MetaConnectionTester } from "./MetaConnectionTester";
 import {
   syncMetaAdsAction,
@@ -40,6 +41,7 @@ export default async function MetaSettingsPage({
 
   const config = getMetaConfig();
   const syncStatus = await getLastSyncStatus();
+  const conversionStatus = await getMetaConversionsStatus();
 
   // Load all AdLinks for manual mapping
   const adLinks = await botDb.adLink.findMany({
@@ -136,6 +138,29 @@ export default async function MetaSettingsPage({
           </Link>
         }
       />
+
+      <section className="card p-5 space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="font-semibold">События конверсий Meta</h2>
+          <span className={`badge text-xs font-semibold ${conversionStatus.configured ? "bg-success/10 text-success" : "bg-warning/10 text-warning"}`}>
+            {conversionStatus.configured ? "● CAPI настроен" : "⚠️ Требуется настройка"}
+          </span>
+        </div>
+        <p className="text-xs text-muted">
+          Бот ставит в очередь входы по рекламным ссылкам и покупки после подтверждённой выдачи. События отправляются в Meta Conversions API и повторяются при временной ошибке.
+        </p>
+        <div className="flex flex-wrap gap-x-6 gap-y-2 text-xs">
+          <span>Источник данных: <code>{process.env.META_DATASET_ID ? "задан" : "не задан (META_DATASET_ID)"}</code></span>
+          <span>Токен событий: <code>{process.env.META_CAPI_ACCESS_TOKEN ? "задан" : "не задан (META_CAPI_ACCESS_TOKEN)"}</code></span>
+          <span>В очереди: <strong>{conversionStatus.pending}</strong></span>
+          <span>Отправлено: <strong>{conversionStatus.sent}</strong></span>
+        </div>
+        {!conversionStatus.configured && (
+          <p className="text-xs text-warning">
+            Добавьте ID набора данных и токен Conversions API в переменные окружения Railway. Секретный токен не вводите в чат и не сохраняйте в коде. Старые события задним числом не отправляются.
+          </p>
+        )}
+      </section>
 
       {/* Notifications */}
       {searchParams.ok === "synced" && (
