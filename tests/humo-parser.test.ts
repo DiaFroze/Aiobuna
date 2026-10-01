@@ -178,3 +178,12 @@ describe("HUMO Notification Parser", () => {
     });
   });
 });
+
+ describe("Exact incoming amount", () => {
+  it("does not round fractional deposits or substitute the balance", () => {
+    expect(extractAmount("Kirim: +13 012.49 UZS. Qoldiq: 13 012 UZS")).toBeNull();
+    expect(extractAmount("Kirim: +13 012,99 UZS")).toBeNull();
+    expect(extractAmount("Kirim: +13 012.00 UZS")).toBe(13012);
+    expect(parseHumoNotification("HUMO *3456: Kirim +13 012.49 UZS").isDeposit).toBe(false);
+  });
+});

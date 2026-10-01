@@ -1,3 +1,4 @@
+import { reserveSharedAmount } from "../lib/services/shared-card-bridge";
 // SubHub store bot (Telegram, long-polling). UZS (сум). RU/EN/UZ i18n with a
 // language picker. Storefront + manual quantity + stock/Vex auto-fulfil +
 // custom top-up (Stars / card / admin). Buttons coloured via Bot API 9.4 style.
@@ -4632,7 +4633,8 @@ async function initiateCardPayment(
   const eff = await effPriceFor(user.id, variantId, v.priceUzs);
   const baseAmount = bulkTotal(eff.price, qty, parseBulkPrices(v.bulkPrices || ""));
   try {
-    const { extraAmount, totalAmount } = await generateUniqueAmount(baseAmount, config.cardLast4, db);
+    const { extraAmount, totalAmount } = (await reserveSharedAmount(baseAmount, config.cardLast4, config.ttlSeconds))
+      ?? await generateUniqueAmount(baseAmount, config.cardLast4, db);
     const createdAt = new Date();
     const expiresAt = calculatePaymentExpiry(createdAt, config.ttlSeconds);
     const request = await db.cardPaymentRequest.create({

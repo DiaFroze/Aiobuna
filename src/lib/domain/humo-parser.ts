@@ -151,9 +151,8 @@ export function extractAmount(rawText: string): number | null {
     const match = text.match(pattern);
     if (match && match[1]) {
       const parsed = parseAmountString(match[1]);
-      if (parsed !== null && parsed > 0) {
-        return parsed;
-      }
+      // An explicit amount that cannot be represented exactly is not a payment match.
+      return parsed !== null && parsed > 0 ? parsed : null;
     }
   }
 
@@ -203,8 +202,8 @@ export function parseAmountString(raw: string): number | null {
     cleaned = cleaned.replace(/[\s'`_,]/g, "");
   }
 
-  const num = Math.round(Number.parseFloat(cleaned));
-  if (Number.isFinite(num) && num > 0) {
+  const num = Number(cleaned);
+  if (Number.isSafeInteger(num) && num > 0) {
     return num;
   }
   return null;

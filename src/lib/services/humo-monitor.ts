@@ -1,3 +1,5 @@
+import { extractCardLast4 as extractBridgeCard } from "../domain/humo-parser";
+import { forwardSharedDeposit, effectiveOperationTime } from "./shared-card-bridge";
 // Background MTProto (GramJS) listener for HUMO Card notification Telegram chat.
 // Connects to Telegram using a user account session string (TELEGRAM_SESSION).
 // Idempotently records bank notifications and matches incoming deposits to active CardPaymentRequests.
@@ -397,7 +399,7 @@ export async function startHumoMonitor(db: any): Promise<void> {
     // Event listener for incoming bank notification messages
     client.addEventHandler(async (event: any) => {
       const message = event.message;
-      if (!message || message.out) return;
+      if (!message || message.out || message.fwdFrom) return;
 
       if (supportIncomingHandler && message.message) {
         const senderId = messageSenderId(message);
@@ -460,11 +462,20 @@ export async function processBankMessage(
   text: string,
   messageDate: Date
 ): Promise<{ matched: boolean; notificationId?: number; requestId?: number }> {
+  // Relay before local duplicate checks, allowing retry after a bridge outage.
+  const bridgeConfig = getCardPaymentConfig();
+  const bridgeParsed = parseHumoNotification(text, messageDate, bridgeConfig.cardLast4);
+  if (process.env.CARD_COORDINATOR_URL) bridgeParsed.operationTime = effectiveOperationTime(text, bridgeParsed.operationTime, messageDate);
+  let bridgeEvent: any = process.env.CARD_COORDINATOR_URL ? {status: "review", project: null} : null;
+  if (bridgeParsed.isDeposit && bridgeParsed.amount > 0 && (!process.env.CARD_COORDINATOR_URL || extractBridgeCard(text))) {
+    bridgeEvent = await forwardSharedDeposit(chatId, messageId, bridgeParsed.amount,
+      bridgeParsed.cardLast4, bridgeParsed.operationTime);
+  }
   const existing = await db.bankNotification.findUnique({
     where: { chatId_messageId: { chatId, messageId } },
   });
 
-  if (existing) {
+  if (existing && !(bridgeEvent?.status === "matched" && bridgeEvent.project === "sb.eu" && existing.status === "unmatched")) {
     return {
       matched: existing.status === "matched",
       notificationId: existing.id,
@@ -474,6 +485,7 @@ export async function processBankMessage(
 
   const config = getCardPaymentConfig();
   const parsed = parseHumoNotification(text, messageDate, config.cardLast4);
+  if (process.env.CARD_COORDINATOR_URL) parsed.operationTime = effectiveOperationTime(text, parsed.operationTime, messageDate);
   const rawSummary = sanitizeNotificationText(text);
 
   if (!parsed.isDeposit || parsed.amount <= 0 || !parsed.cardLast4) {
@@ -492,7 +504,7 @@ export async function processBankMessage(
     return { matched: false, notificationId: saved.id };
   }
 
-  const notification = await db.bankNotification.create({
+  const notification = existing || await db.bankNotification.create({
     data: {
       chatId,
       messageId,
@@ -511,7 +523,8 @@ export async function processBankMessage(
       cardLast4: parsed.cardLast4,
       totalAmount: parsed.amount,
       status: "pending",
-      expiresAt: { gt: now },
+      expiresAt: { gt: bridgeEvent ? parsed.operationTime : now },
+      ...(bridgeEvent ? { createdAt: { lte: parsed.operationTime } } : {}),
     },
     orderBy: { createdAt: "desc" },
   });
@@ -542,6 +555,9 @@ export async function processBankMessage(
     return { matched: false, notificationId: notification.id };
   }
 
+  if (bridgeEvent && (bridgeEvent.status !== "matched" || bridgeEvent.project !== "sb.eu")) {
+    return {matched: false, notificationId: notification.id};
+  }
   const success = await claimPaymentConfirmation(db, matchedRequest.id, notification.id);
   if (!success) {
     console.warn(`[humo-monitor] Failed atomic confirmation for request #${matchedRequest.id}`);
@@ -607,7 +623,7 @@ export async function triggerImmediateCheck(
         messages = await client.getMessages(config.humoChatId, { limit: 15 });
       }
       for (const msg of messages) {
-        if (msg && !msg.out && msg.message) {
+        if (msg && !msg.out && !msg.fwdFrom && msg.message) {
           await processBankMessage(
             db,
             config.humoChatId,
