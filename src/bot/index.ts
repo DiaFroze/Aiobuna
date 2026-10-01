@@ -791,7 +791,7 @@ let buttonEmoji = "";
 const PREMIUM_EMOJI_PROFILE = "5258011929993026890";
 const PREMIUM_EMOJI_ORDERS = "5967412305338568701";
 const PREMIUM_EMOJI_BACK = "5416113713428057601";
-const PREMIUM_EMOJI_SUPPORT = "4970126766132691795";
+const PREMIUM_EMOJI_SUPPORT = "6269458311381258421";
 const PREMIUM_EMOJI_REFER = "6048721430730773527";
 const PREMIUM_EMOJI_GIFTS = "5203996991054432397";
 const PREMIUM_EMOJI_SHOP = "5859297284029681680";
@@ -838,6 +838,7 @@ function mainKeyboard(lang: string) {
   // applied at checkout, not a free-item shop.
   if (GIFTS_ENABLED) kb.text(t(lang, "btn_freebies")).row();
   kb.text(t(lang, "btn_profile")).row();
+  kb.text(t(lang, "btn_support")).row();
   return kb.resized().persistent();
 }
 
@@ -850,6 +851,11 @@ function langKeyboard() {
 async function setting(key: string, fallback: string): Promise<string> {
   const s = await db.setting.findUnique({ where: { key } });
   return s?.valueRu?.trim() || fallback;
+}
+
+async function supportProfileUrl(): Promise<string> {
+  const username = (await setting("support_username", "Abdulloh_Zokirov")).replace(/^@/, "");
+  return `https://t.me/${username}`;
 }
 
 function supportAiEnabled(): boolean {
@@ -1925,6 +1931,9 @@ async function buildMenu(lang: string, page: number, sort: Sort, userId: number,
     // Orders and Profile share one row.
     kb.text(stripLeadEmoji(t(lang, "btn_orders")), "ord").icon(ordersButtonEmoji)
       .text(stripLeadEmoji(t(lang, "btn_profile")), "profile_show").icon(profileButtonEmoji).row();
+  }
+  if (!freebies) {
+    kb.url(t(lang, "btn_support"), await supportProfileUrl()).row();
   }
 
   const head = freebies ? t(lang, "promo_title") : t(lang, "products_available");
@@ -3621,7 +3630,7 @@ async function profileView(user: Awaited<ReturnType<typeof getUser>>) {
   kb.text(t(lang, "btn_refer"), "ref").row()
     .text("🚀 Скидка за буст канала", "hub_boost").row()
     .text(stripLeadEmoji(t(lang, "p_orders")), "ord").icon(ordersButtonEmoji)
-    .text(t(lang, "btn_support"), "support_show").row()
+    .url(t(lang, "btn_support"), await supportProfileUrl()).row()
     .text(t(lang, "btn_language"), "lang_pick").row()
     .text(t(lang, "to_shop"), "m:0:all");
 
@@ -3647,13 +3656,13 @@ function referView(ctx: Context, user: Awaited<ReturnType<typeof getUser>>) {
   return { text: `${t(lang, "refer_title")}\n\n${t(lang, "refer_text")}\n\n<code>${link}</code>`, kb };
 }
 async function supportView(lang: string) {
-  const [custom, supportUsername] = await Promise.all([
+  const [custom, supportUrl] = await Promise.all([
     setting("support", ""),
-    setting("support_username", "").then((s) => s.replace(/^@/, "")),
+    supportProfileUrl(),
   ]);
   const text = custom ? (lang === "ru" ? custom : await translate(custom, lang)) : t(lang, "support_none");
   const kb = new InlineKeyboard();
-  if (supportUsername) kb.url(t(lang, "support_write"), `https://t.me/${supportUsername}`).row();
+  kb.url(t(lang, "support_write"), supportUrl).row();
   kb.text(t(lang, "to_shop"), "m:0:all");
   return { text: `${t(lang, "support_title")}\n\n${text}`, kb };
 }
@@ -7654,7 +7663,7 @@ bot.hears(
   },
 );
 bot.hears(
-  [...btnVariants("btn_support"), /^(?:🆘\s*)?(?:yordam|поддержка|support)$/i],
+  [...btnVariants("btn_support"), /^(?:(?:🆘|👩‍💻)\s*)?(?:yordam|поддержка|саппорт|support|администратор|administrator)$/i],
   async (ctx) => {
     const u = await getUser(ctx);
     const { text, kb } = await supportView(u.lang);
