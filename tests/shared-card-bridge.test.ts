@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { reserveSharedAmount, effectiveOperationTime } from "../src/lib/services/shared-card-bridge";
+import { reserveSharedAmount, effectiveOperationTime, ensureLegacyAmountProtection } from "../src/lib/services/shared-card-bridge";
 import { processBankMessage } from "../src/lib/services/humo-monitor";
 
 afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
@@ -74,5 +74,29 @@ describe("Shared card coordination", () => {
     const {db, request} = existingNotification();
     expect((await processBankMessage(db, "123", 5, "Kirim +13 012 UZS", new Date())).matched).toBe(false);
     expect(fetcher).not.toHaveBeenCalled();expect(request.status).toBe("pending");
+  });
+});
+
+
+describe("Legacy invoice cutover", () => {
+  it("refuses cutover while old invoices are active", async () => {
+    bridge();
+    const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
+    const db: any = {botSetting: {findUnique: vi.fn(async()=>null)}, cardPaymentRequest: {count: vi.fn(async()=>1)}};
+    await expect(ensureLegacyAmountProtection(db, "3456")).rejects.toThrow("Close active");
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it("protects old totals before enabling new invoices and persists the cutover marker", async () => {
+    bridge();
+    const fetcher = vi.fn(async()=>new Response(JSON.stringify({status: "protected"}))); vi.stubGlobal("fetch", fetcher);
+    const db: any = {botSetting: {findUnique: vi.fn(async()=>null), upsert: vi.fn()},
+      cardPaymentRequest: {count: vi.fn(async()=>0), findMany: vi.fn(async()=>[{totalAmount: 13012}, {totalAmount: 13012}])}};
+    await ensureLegacyAmountProtection(db, "3456");
+    await ensureLegacyAmountProtection(db, "3456");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const args = fetcher.mock.calls[0] as any;
+    expect(args[0]).toContain("/legacy-amounts");
+    expect(JSON.parse(args[1].body)).toEqual({card_last4: "3456", amounts: [13012]});
+    expect(db.botSetting.upsert).toHaveBeenCalledTimes(1);
   });
 });

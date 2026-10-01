@@ -1,4 +1,4 @@
-import { reserveSharedAmount } from "../lib/services/shared-card-bridge";
+import { reserveSharedAmount, ensureLegacyAmountProtection } from "../lib/services/shared-card-bridge";
 // SubHub store bot (Telegram, long-polling). UZS (сум). RU/EN/UZ i18n with a
 // language picker. Storefront + manual quantity + stock/Vex auto-fulfil +
 // custom top-up (Stars / card / admin). Buttons coloured via Bot API 9.4 style.
@@ -4633,6 +4633,7 @@ async function initiateCardPayment(
   const eff = await effPriceFor(user.id, variantId, v.priceUzs);
   const baseAmount = bulkTotal(eff.price, qty, parseBulkPrices(v.bulkPrices || ""));
   try {
+    await ensureLegacyAmountProtection(db, config.cardLast4);
     const { extraAmount, totalAmount } = (await reserveSharedAmount(baseAmount, config.cardLast4, config.ttlSeconds))
       ?? await generateUniqueAmount(baseAmount, config.cardLast4, db);
     const createdAt = new Date();
@@ -10143,6 +10144,9 @@ async function bootstrap() {
     }
   });
   registerSupportIncomingHandler(handleSupportAccountMessage);
+  ensureLegacyAmountProtection(db, getCardPaymentConfig().cardLast4).catch(() => {
+    console.warn("[humo] Legacy amount protection pending: new shared invoices remain blocked until retry succeeds");
+  });
   startHumoMonitor(db).catch((e) => {
     console.error("[humo] monitor start failed:", (e as Error).message);
   });

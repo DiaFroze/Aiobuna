@@ -44,3 +44,26 @@ export async function forwardSharedDeposit(chatId: string, messageId: number, am
   return call("/deposits", {notification_id: `${chatId}:${messageId}`, amount,
     card_last4: cardLast4, operation_at: operationTime.toISOString()});
 }
+
+
+let protection: Promise<void> | null = null;
+export async function ensureLegacyAmountProtection(db: any, cardLast4: string): Promise<void> {
+  const config = configuration();
+  if (!config) return;
+  if (!protection) {
+    protection = (async () => {
+      const key = `card_coordinator_legacy_v1:${cardLast4}:${config.url}`;
+      if (await db.botSetting.findUnique({where: {key}})) return;
+      const now = new Date();
+      const active = await db.cardPaymentRequest.count({where: {cardLast4, status: "pending", expiresAt: {gt: now}}});
+      if (active) throw new Error("Close active legacy card invoices before switching coordinator");
+      const rows = await db.cardPaymentRequest.findMany({where: {cardLast4, createdAt: {gte: new Date(now.getTime()-30*86400000)}}, select: {totalAmount: true}});
+      const amounts = [...new Set(rows.map((row: any) => row.totalAmount))];
+      const result = await call("/legacy-amounts", {card_last4: cardLast4, amounts});
+      if (result?.status !== "protected") throw new Error("Legacy amount protection is unavailable");
+      await db.botSetting.upsert({where: {key}, create: {key, valueRu: now.toISOString()}, update: {valueRu: now.toISOString()}});
+      console.log("[humo] Legacy amount protection completed");
+    })().catch(error => {protection = null; throw error;});
+  }
+  await protection;
+}
